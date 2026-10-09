@@ -19,6 +19,7 @@ mod enums;
 mod env;
 mod generic;
 mod macros;
+mod patterns;
 mod place;
 mod tasks;
 
@@ -778,6 +779,7 @@ impl<'a> FnCx<'a> {
                 self.call_value(e.pos, callee, "this function", args)?
             }
             ExprKind::Lambda(l) => self.lambda(e.pos, l, expected)?,
+            ExprKind::Match(value, arms) => self.match_expr(e.pos, value, arms, expected)?,
             ExprKind::NewChan(t, cap) => self.new_chan(e.pos, t, cap.as_deref())?,
             ExprKind::Type(t) => {
                 return Err(Error::new(t.pos, "`fn(...)` is a type, not a value"));

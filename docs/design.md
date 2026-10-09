@@ -383,23 +383,50 @@ return Option.Some(i)                // ... or from the payload, or the return t
   expected type (a typed `let`, an argument, a return value), or else from
   payload values declared with exactly a type parameter (`Some(T)`).
   `let x = Option.None` cannot be inferred and is an error that says so.
-- `match` is a statement. Arms are tested in order; the first one that matches
-  runs. A variant pattern names the variant without the enum (the type is
-  known) and binds each payload value to a new local, or ignores it with `_`:
-  `Rect(w, _)`. Integers and bools can be matched against literals.
-- `_` is the only pattern that matches anything; a bare name is always a
-  variant, so a misspelled variant is an error, not a binding. A `match` must
-  cover every variant (or both bools), or end with `_`; integers always need
-  `_`. Missing variants are listed by name, and arms that can never run are
-  errors. Since an exhaustive `match` has no fall-through, a function whose arms
-  all `return` needs no `return` after it.
+- `match` works on enums, structs, integers and bools. Arms are tested in
+  order; the first one whose pattern matches, and whose guard (`if cond`, if
+  any) holds, runs.
+- Patterns nest (`crates/jihoo-sema/src/patterns.rs`):
+
+  | pattern | matches |
+  |---------|---------|
+  | `_` | anything |
+  | `x` | anything, bound to a new local `x` |
+  | `Empty`, `Rect(p, q)` | a variant of the matched enum, and its payload |
+  | `Point { x, y: 0, .. }` | a struct; `x` alone is `x: x`, `..` ignores the other fields |
+  | `0`, `-1`, `true` | that value |
+
+  Variants are written without the enum, whose type is known. A name is a
+  variant if the matched enum has one by that name, and else a new variable;
+  a name that starts with an uppercase letter must be a variant, so a
+  misspelled variant is an error, not a binding.
+- Patterns read through refs: `Cons(x, Cons(y, _))` matches a list whose tail
+  is a `ref List`. A name or `_` takes the ref itself.
+- A `match` must cover every value, and every arm must match some value the
+  arms above it miss; both are checked with Maranget's usefulness algorithm, so
+  nested patterns are handled exactly. An error names a value that is missed,
+  as a pattern (`` `match` does not cover `Some(Rect(_, _))` ``); arms with a
+  guard do not count towards covering. Since an exhaustive `match` has no
+  fall-through, a function whose arms all `return` needs no `return` after it.
+- `match` is also an expression, with a value after each `=>`:
+
+  ```jihoo
+  let word = match n % 15 {
+      0 => "fizzbuzz"
+      r if r % 3 == 0 => "fizz"
+      _ => to_str(n)
+  }
+  ```
+
+  Every arm has the type of the first one (or the expected type). At the start
+  of a statement, `match` is the statement form, whose arms are statements.
 - In JIR an enum is `enum $Shape { Circle(i64), Rect(i64, i64), Empty }` with
   `variant`, `tag` and `payload` instructions. Natively it has the C layout of
   a `u32` tag followed by a union of the payloads (`size_of(Shape)` is 24); on
   the VM it is a GC object.
-- Not yet: nested patterns, guards, `match` as an expression, and equality on
-  enums. A type cannot contain itself by value; recursive data goes through a
-  `ref` (hosted) or a pointer (freestanding).
+- Not yet: `|` patterns, and equality on enums. A type cannot contain itself
+  by value; recursive data goes through a `ref` (hosted) or a pointer
+  (freestanding).
 
 ## References
 
@@ -652,8 +679,8 @@ free of LLVM.
    Automatic hygiene; field visibility.
 6. ~~GC hardening (one root set, generation-checked references, stress mode);
    function values.~~
-7. ~~Sum types and `match`; `ref T` for recursive data.~~ Nested patterns and
-   `match` expressions.
+7. ~~Sum types and `match`; `ref T` for recursive data; nested patterns,
+   guards and `match` expressions.~~ `|` patterns.
 8. ~~Closures, captured by value and lifted into functions.~~
 9. ~~Tasks and channels on the VM: one OS thread, a deterministic scheduler;
    `select`.~~

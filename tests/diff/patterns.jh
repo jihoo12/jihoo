@@ -1,0 +1,78 @@
+// Nested patterns, struct patterns, guards and `match` expressions.
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+enum Option(T: type) {
+    Some(T)
+    None
+}
+
+enum Shape {
+    Circle(Point, u8)
+    Line(Point, Point)
+    Empty
+}
+
+fn score(s: Shape) -> i64 {
+    return match s {
+        Circle(Point { x: 0, y: 0 }, r) => 1000 + (r as i64)
+        Circle(c, r) if r > 100 => c.x * 100
+        Circle(Point { x, .. }, _) => x
+        Line(Point { x: a, y: b }, Point { x: c, y: d }) if a == c => (d - b) * 10
+        Line(p, q) => q.x - p.x
+        Empty => -1
+    }
+}
+
+fn depth(o: Option(Option(Option(u8)))) -> i64 {
+    return match o {
+        Some(Some(Some(n))) if n > 200 => 4
+        Some(Some(Some(_))) => 3
+        Some(Some(None)) => 2
+        Some(None) => 1
+        None => 0
+    }
+}
+
+fn classify(n: i64, flag: bool) -> i64 {
+    let r = 0
+    match flag {
+        true => {
+            r = match n {
+                0 => 7
+                -1 => 8
+                big if big > 100 => 9
+                _ => 10
+            }
+        }
+        false => r = 11
+    }
+    return r
+}
+
+fn entry() -> i64 {
+    let total = 0
+    let shapes = [
+        Shape.Circle(Point { x: 0, y: 0 }, 5),           // 1005
+        Shape.Circle(Point { x: 3, y: 4 }, 200),         // 300
+        Shape.Circle(Point { x: 7, y: 4 }, 2),           // 7
+        Shape.Line(Point { x: 2, y: 1 }, Point { x: 2, y: 9 }),   // 80
+        Shape.Line(Point { x: 2, y: 1 }, Point { x: 6, y: 9 }),   // 4
+        Shape.Empty,                                      // -1
+    ]
+    let i = 0
+    while i < len(shapes) {
+        total = total + score(shapes[i])
+        i = i + 1
+    }
+    let none = Option(Option(Option(u8))).None
+    total = total + depth(Option.Some(Option.Some(Option.Some(250))))           // 4
+    total = total + depth(Option.Some(Option.Some(Option.Some(1)))) * 10        // 30
+    total = total + depth(Option.Some(Option.Some(Option(u8).None))) * 100      // 200
+    total = total + depth(none)
+    total = total + classify(0, true) + classify(-1, true) + classify(500, true) + classify(5, true) + classify(0, false)
+    return total   // 1395 + 234 + 45 = 1674
+}

@@ -1,0 +1,78 @@
+// Nested patterns, struct patterns, guards, and `match` as an expression.
+// A name in a pattern is a variant if the matched enum has one by that name,
+// else a new variable; `match` must cover every value, and says which it misses.
+//   jihoo run examples/patterns.jh
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+enum Shape {
+    Circle(Point, i64)
+    Rect(Point, Point)
+    Empty
+}
+
+enum Expr {
+    Num(i64)
+    Add(ref Expr, ref Expr)
+    Mul(ref Expr, ref Expr)
+    Neg(ref Expr)
+}
+
+fn describe(s: Shape) -> str {
+    return match s {
+        Circle(Point { x: 0, y: 0 }, r) => "a circle at the origin, radius " + to_str(r)
+        Circle(_, r) if r > 100 => "a huge circle"
+        Circle(Point { x, y }, _) => "a circle at " + to_str(x) + "," + to_str(y)
+        Rect(Point { x: x1, .. }, Point { x: x2, .. }) if x1 == x2 => "a flat rectangle"
+        Rect(a, b) => "a rectangle " + to_str(b.x - a.x) + " wide"
+        Empty => "nothing"
+    }
+}
+
+fn eval(e: Expr) -> i64 {
+    return match e {
+        Num(n) => n
+        Add(a, b) => eval(*a) + eval(*b)
+        Mul(a, b) => eval(*a) * eval(*b)
+        Neg(a) => -eval(*a)
+    }
+}
+
+// Simplifies `x * 1`, `1 * x`, `x + 0`, `0 + x` and `--x`, one level deep.
+// Patterns read through refs: `Num(1)` matches the `ref Expr` in `Mul`.
+fn simplify(e: Expr) -> Expr {
+    return match e {
+        Mul(a, Num(1)) => *a
+        Mul(Num(1), b) => *b
+        Add(a, Num(0)) => *a
+        Add(Num(0), b) => *b
+        Neg(Neg(inner)) => *inner
+        _ => e
+    }
+}
+
+fn main() {
+    print(describe(Shape.Circle(Point { x: 0, y: 0 }, 2)))
+    print(describe(Shape.Circle(Point { x: 3, y: 4 }, 500)))
+    print(describe(Shape.Circle(Point { x: 3, y: 4 }, 1)))
+    print(describe(Shape.Rect(Point { x: 1, y: 1 }, Point { x: 1, y: 5 })))
+    print(describe(Shape.Rect(Point { x: 1, y: 1 }, Point { x: 4, y: 5 })))
+
+    // (2 + 3) * -(4)
+    let e = Expr.Mul(ref Expr.Add(ref Expr.Num(2), ref Expr.Num(3)), ref Expr.Neg(ref Expr.Num(4)))
+    print(eval(e))                                                       // -20
+    print(eval(simplify(Expr.Mul(ref Expr.Num(1), ref Expr.Num(42)))))  // 42
+    print(eval(simplify(Expr.Neg(ref Expr.Neg(ref Expr.Num(7))))))      // 7
+
+    let n = 15
+    let word = match n % 15 {
+        0 => "fizzbuzz"
+        r if r % 3 == 0 => "fizz"
+        r if r % 5 == 0 => "buzz"
+        _ => to_str(n)
+    }
+    print(word)
+}

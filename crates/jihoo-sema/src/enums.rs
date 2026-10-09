@@ -1,18 +1,11 @@
-//! Enums: building variants, and `match`.
+//! Enums: building variants. (`match` is in `patterns.rs`.)
 //!
 //! A variant is written after the enum that declares it: `Shape.Circle(2)`,
 //! `Shape.Empty`, `geo.Shape.Empty`, `Option(i64).Some(1)`. For a generic enum
 //! the type arguments can be left out (`Option.Some(1)`): they come from the
 //! expected type, or else from the payload values.
-//!
-//! `match` is a statement. It reads the tag once and tests the arms in order;
-//! an arm that matches a variant binds its payload values to new locals. Every
-//! variant (or every bool) must be covered, or there must be a `_` arm, so the
-//! fall-through block after the last test is unreachable.
 
-use std::collections::HashSet;
-
-use jihoo_ir::{BinOp, Inst, IntTy, Reg, Terminator, Type};
+use jihoo_ir::{Inst, Reg, Type};
 use jihoo_syntax::ast::*;
 use jihoo_syntax::{Error, Pos};
 
@@ -168,158 +161,5 @@ impl FnCx<'_> {
         let Type::Enum(name) = t else { return Ok(None) };
         let variants = self.env.enum_variants(Pos::default(), name)?;
         Ok(variants.iter().find(|(n, _)| n == variant).and_then(|(_, ts)| ts.get(i).cloned()))
-    }
-
-    /// `match value { pattern => body ... }`.
-    pub(crate) fn match_stmt(&mut self, pos: Pos, value: &Expr, arms: &[MatchArm]) -> Result<(), Error> {
-        let s = self.expr(value, None)?;
-        let ty = self.ty(s).clone();
-        let variants = match &ty {
-            Type::Enum(name) => Some(self.env.enum_variants(pos, name)?),
-            Type::Int(_) | Type::Bool => None,
-            t => {
-                return Err(Error::new(value.pos, format!("cannot `match` on {t}; `match` works on enums, integers and bools")))
-            }
-        };
-        // What the arms compare against: the tag of an enum, else the value itself.
-        let subject = if variants.is_some() { self.emit_to(Type::Int(IntTy::U32), |dst| Inst::Tag { dst, src: s }) } else { s };
-
-        let end = self.new_block();
-        let mut seen: HashSet<i128> = HashSet::new();
-        let mut wild = false;
-        for arm in arms {
-            if wild {
-                return Err(Error::new(arm.pos, "unreachable arm: the `_` arm above already matches everything"));
-            }
-            let body = self.new_block();
-            let mut binds: Vec<(Pos, String, Reg)> = Vec::new();
-            let test = match (&arm.pattern, &variants) {
-                (Pattern::Wild, _) => {
-                    wild = true;
-                    None
-                }
-                (Pattern::Variant(name, payload), Some(variants)) => {
-                    let Some(index) = variants.iter().position(|(n, _)| n == name) else {
-                        let names: Vec<&str> = variants.iter().map(|(n, _)| n.as_str()).collect();
-                        let msg = format!("enum `{ty}` has no variant `{name}` (it has {})", names.join(", "));
-                        return Err(Error::new(arm.pos, msg));
-                    };
-                    let want = &variants[index].1;
-                    match payload {
-                        None if !want.is_empty() => {
-                            let ignore = vec!["_"; want.len()].join(", ");
-                            let msg = format!("`{name}` holds {} values; write `{name}({ignore})` to ignore them", want.len());
-                            return Err(Error::new(arm.pos, msg));
-                        }
-                        Some(_) if want.is_empty() => {
-                            return Err(Error::new(arm.pos, format!("`{name}` holds no values; drop the parentheses")));
-                        }
-                        Some(names) if names.len() != want.len() => {
-                            let msg = format!("`{name}` holds {} values, {} given", want.len(), names.len());
-                            return Err(Error::new(arm.pos, msg));
-                        }
-                        _ => {}
-                    }
-                    for (i, (p, n)) in payload.iter().flatten().enumerate() {
-                        if let Some(n) = n {
-                            if binds.iter().any(|(_, b, _)| b == n) {
-                                return Err(Error::new(*p, format!("`{n}` is bound twice in this pattern")));
-                            }
-                            let t = want[i].clone();
-                            binds.push((*p, n.clone(), self.new_reg(t)));
-                        }
-                    }
-                    if !seen.insert(index as i128) {
-                        return Err(Error::new(arm.pos, format!("unreachable arm: `{name}` is already matched above")));
-                    }
-                    Some(self.konst(Type::Int(IntTy::U32), index as i64))
-                }
-                (Pattern::Variant(name, _), None) => {
-                    return Err(Error::new(arm.pos, format!("`{name}` is a variant pattern, but the value is {ty}, not an enum")));
-                }
-                (Pattern::Int(n), None) if matches!(ty, Type::Int(_)) => {
-                    let t = ty.as_int().unwrap();
-                    if *n < t.min() || *n > t.max() {
-                        return Err(Error::new(arm.pos, format!("{n} does not fit in {ty}")));
-                    }
-                    if !seen.insert(*n) {
-                        return Err(Error::new(arm.pos, format!("unreachable arm: {n} is already matched above")));
-                    }
-                    Some(self.konst(ty.clone(), *n as i64))
-                }
-                (Pattern::Bool(b), None) if ty == Type::Bool => {
-                    if !seen.insert(*b as i128) {
-                        return Err(Error::new(arm.pos, format!("unreachable arm: `{b}` is already matched above")));
-                    }
-                    Some(self.konst(Type::Bool, *b as i64))
-                }
-                (Pattern::Int(_) | Pattern::Bool(_), _) => {
-                    return Err(Error::new(arm.pos, format!("this pattern does not match values of type {ty}")));
-                }
-            };
-            match test {
-                Some(k) => {
-                    let cond = self.emit_to(Type::Bool, |dst| Inst::Binary { dst, op: BinOp::Eq, lhs: subject, rhs: k });
-                    let next = self.new_block();
-                    self.terminate(Terminator::Branch { cond, then: body, els: next });
-                    self.arm(body, end, s, &arm.pattern, &variants, binds, &arm.body)?;
-                    self.switch_to(next);
-                }
-                None => {
-                    self.terminate(Terminator::Jump(body));
-                    self.arm(body, end, s, &arm.pattern, &variants, binds, &arm.body)?;
-                }
-            }
-        }
-
-        if !wild {
-            // Not matched by any arm: only possible if some value is not covered.
-            let missing: Vec<String> = match (&ty, &variants) {
-                (_, Some(vs)) => {
-                    vs.iter().enumerate().filter(|(i, _)| !seen.contains(&(*i as i128))).map(|(_, (n, _))| format!("`{n}`")).collect()
-                }
-                (Type::Bool, _) => [false, true].iter().filter(|b| !seen.contains(&(**b as i128))).map(|b| format!("`{b}`")).collect(),
-                _ => vec!["every other integer".into()],
-            };
-            if !missing.is_empty() {
-                let msg = format!("`match` does not cover {}; add arms for them, or a `_ => ...` arm", missing.join(", "));
-                return Err(Error::new(pos, msg));
-            }
-            self.terminate(Terminator::Unreachable);
-        }
-        self.switch_to(end);
-        Ok(())
-    }
-
-    /// Lowers the body of one arm in block `at`, with its bindings in scope.
-    #[allow(clippy::too_many_arguments)]
-    fn arm(
-        &mut self,
-        at: jihoo_ir::BlockId,
-        end: jihoo_ir::BlockId,
-        s: Reg,
-        pattern: &Pattern,
-        variants: &Option<crate::env::Variants>,
-        binds: Vec<(Pos, String, Reg)>,
-        body: &Block,
-    ) -> Result<(), Error> {
-        self.switch_to(at);
-        self.scopes.push(Default::default());
-        if let (Pattern::Variant(name, Some(names)), Some(vs)) = (pattern, variants) {
-            let variant = vs.iter().position(|(n, _)| n == name).unwrap() as u32;
-            let mut binds = binds.into_iter();
-            for (index, (_, n)) in names.iter().enumerate() {
-                if n.is_some() {
-                    let (_, n, dst) = binds.next().unwrap();
-                    self.emit(Inst::Payload { dst, src: s, variant, index: index as u32 });
-                    self.scopes.last_mut().unwrap().insert(n, dst);
-                }
-            }
-        }
-        let r = self.block(body);
-        self.scopes.pop();
-        r?;
-        self.terminate(Terminator::Jump(end));
-        Ok(())
     }
 }

@@ -504,18 +504,18 @@ fn enums_and_match() {
 #[test]
 fn enum_errors() {
     let m = |body: &str| err(&format!("{SHAPE}fn f(s: Shape) {{\n{body}\n}}\nfn main() {{}}"));
-    assert!(m("match s {\n Circle(r) => {}\n}").contains("`match` does not cover `Rect`, `Empty`"));
+    assert!(m("match s {\n Circle(r) => {}\n}").contains("`match` does not cover `Rect(_, _)`, `Empty`"));
     assert!(m("match s {\n Square => {}\n _ => {}\n}").contains("has no variant `Square` (it has Circle, Rect, Empty)"));
     assert!(m("match s {\n Rect(w) => {}\n _ => {}\n}").contains("`Rect` holds 2 values, 1 given"));
     assert!(m("match s {\n Rect => {}\n _ => {}\n}").contains("write `Rect(_, _)` to ignore them"));
     assert!(m("match s {\n Empty() => {}\n _ => {}\n}").contains("`Empty` holds no values"));
-    assert!(m("match s {\n _ => {}\n Empty => {}\n}").contains("unreachable arm: the `_` arm"));
-    assert!(m("match s {\n Empty => {}\n Empty => {}\n _ => {}\n}").contains("`Empty` is already matched"));
+    assert!(m("match s {\n _ => {}\n Empty => {}\n}").contains("unreachable arm: an arm above matches every value"));
+    assert!(m("match s {\n Empty => {}\n Empty => {}\n _ => {}\n}").contains("the arms above already match every value"));
     assert!(m("match s {\n Rect(a, a) => {}\n _ => {}\n}").contains("`a` is bound twice"));
     assert!(m("match s {\n Circle(r) => {}\n _ => {}\n}\nprint(r)").contains("unknown variable `r`"));
     assert!(m("match 3 {\n 1 => {}\n}").contains("does not cover every other integer"));
     assert!(m("match true {\n true => {}\n}").contains("does not cover `false`"));
-    assert!(m("match 3 {\n Empty => {}\n _ => {}\n}").contains("is a variant pattern, but the value is i64"));
+    assert!(m("match 3 {\n Empty => {}\n _ => {}\n}").contains("`Empty` looks like a variant, but the value is i64"));
     assert!(m("let x: u8 = 1\nmatch x {\n 300 => {}\n _ => {}\n}").contains("300 does not fit in u8"));
     assert!(m("match \"a\" {\n _ => {}\n}").contains("cannot `match` on str"));
     assert!(m("let t = Shape.Square").contains("enum `Shape` has no variant `Square`"));
@@ -527,6 +527,60 @@ fn enum_errors() {
     assert!(err("enum L { Cons(i64, L), Nil }\nfn main() {}").contains("enum `L` contains itself (L -> L)"));
     assert!(err("enum E { A, A }\nfn main() {}").contains("variant `A` is declared twice"));
     assert!(err("struct E { x: i64 }\nenum E { A }\nfn main() {}").contains("type `E` is defined twice"));
+}
+
+// ---- nested patterns and match expressions ----
+
+const NESTED: &str = "struct P { x: i64, y: i64 }\nenum O(T: type) { Some(T), None }\nenum S { Dot(P), Pair(O(bool), O(bool)) }\n";
+
+#[test]
+fn nested_patterns() {
+    let m = |body: &str| err(&format!("{NESTED}fn f(s: S) -> i64 {{\n{body}\n}}\nfn main() {{}}"));
+    // Missing values are spelled out as patterns, nested ones included.
+    let e = m("match s {\n Dot(P { x: 0, y }) => return y\n Pair(Some(true), _) => return 1\n Pair(None, None) => return 2\n}");
+    assert!(e.contains("does not cover `Dot(P { x: 1, y: _ })`, `Pair(Some(false), Some(_))`"), "{e}");
+    let e = m("match s {\n Dot(_) => return 0\n Pair(_, Some(_)) => return 1\n Pair(Some(b), None) if b => return 2\n Pair(_, None) => return 3\n Pair(None, None) => return 4\n}");
+    assert!(e.contains("unreachable arm: the arms above already match every value"), "{e}");
+    // A guard does not count towards covering values.
+    let e = m("match s {\n Dot(p) if p.x > 0 => return 0\n Pair(_, _) => return 1\n}");
+    assert!(e.contains("does not cover `Dot(_)`"), "{e}");
+    assert!(m("match s {\n Dot(P { x }) => return x\n _ => return 0\n}").contains("missing fields in this pattern: y (add `..`"));
+    assert!(m("match s {\n Dot(P { z, .. }) => return 0\n _ => return 0\n}").contains("struct `P` has no field `z`"));
+    assert!(m("match s {\n Dot(Q { .. }) => return 0\n _ => return 0\n}").contains("this pattern matches `Q`, but the value is P"));
+    assert!(m("match s {\n Pair(Some(Nonee), _) => return 0\n _ => return 0\n}").contains("`Nonee` looks like a variant, but the value is bool"));
+    assert!(m("match s {\n Pair(Sone(x), _) => return 0\n _ => return 0\n}").contains("enum `O(bool)` has no variant `Sone`"));
+    assert!(m("match s {\n Pair(x, x) => return 0\n}").contains("`x` is bound twice"));
+    assert!(m("match s {\n Dot(p) if p => return 0\n _ => return 0\n}").contains("a guard must be bool, found P"));
+    // A lowercase name binds; it covers everything.
+    check(&format!("{NESTED}fn f(s: S) -> i64 {{\n match s {{\n Dot(P {{ x, .. }}) => return x\n other => return 0\n }}\n}}\nfn main() {{}}")).unwrap();
+}
+
+#[test]
+fn patterns_read_through_refs() {
+    let list = "enum L { Cons(i64, ref L), Nil }\n";
+    let m = check(&format!(
+        "{list}fn two(l: L) -> bool {{ return match l {{ Cons(_, Cons(_, Nil)) => true, _ => false }} }}\nfn main() {{}}"
+    ))
+    .unwrap();
+    assert!(m.to_string().contains("= deref %"), "{m}");
+    // A name binds the ref itself.
+    check(&format!("{list}fn tail(l: L) -> ref L {{ return match l {{ Cons(_, rest) => rest, Nil => ref L.Nil }} }}\nfn main() {{}}")).unwrap();
+    // Coverage looks through refs too.
+    let e = err(&format!("{list}fn f(l: L) -> i64 {{ return match l {{ Cons(_, Nil) => 1, Nil => 0 }} }}\nfn main() {{}}"));
+    assert!(e.contains("does not cover `Cons(_, Cons(_, _))`"), "{e}");
+}
+
+#[test]
+fn match_expressions() {
+    let m = check(&format!(
+        "{NESTED}fn f(o: O(i64)) -> u8 {{ return match o {{ Some(n) if n > 0 => 1, Some(_) => 2, None => 3 }} }}\nfn main() {{ let k = match 3 > 2 {{ true => \"y\", false => \"n\" }}\n print(k) }}"
+    ))
+    .unwrap();
+    assert!(m.to_string().contains("fn @f($\"O(i64)\") -> u8"), "{m}");
+    let e = err("fn main() { let k = match 1 { 0 => 1, _ => \"x\" } }");
+    assert!(e.contains("the value of this arm (like the arms before it) must be i64, found str"), "{e}");
+    assert!(err("fn main() { let k = match 1 { 0 => 1 } }").contains("does not cover every other integer"));
+    assert!(err("enum E {}\nfn f(e: E) -> i64 { return match e {} }\nfn main() {}").contains("needs at least one arm"));
 }
 
 // ---- refs ----

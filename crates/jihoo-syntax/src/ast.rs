@@ -202,23 +202,46 @@ pub enum SelectOp {
     Default,
 }
 
+/// An arm of a `match` statement: `pattern if guard => body`.
 #[derive(Debug, Clone)]
 pub struct MatchArm {
     pub pos: Pos,
     pub pattern: Pattern,
+    pub guard: Option<Expr>,
     pub body: Block,
 }
 
+/// An arm of a `match` expression: `pattern if guard => value`.
 #[derive(Debug, Clone)]
-pub enum Pattern {
+pub struct MatchExprArm {
+    pub pos: Pos,
+    pub pattern: Pattern,
+    pub guard: Option<Expr>,
+    pub value: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct Pattern {
+    pub pos: Pos,
+    pub kind: PatternKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum PatternKind {
     /// `_`: anything.
     Wild,
     /// An integer literal, possibly negative.
     Int(i128),
     Bool(bool),
-    /// `Circle(r, _)`: a variant of the matched enum, binding its payload values
-    /// to names (`_` ignores one). `None` without parentheses: `Empty`.
-    Variant(String, Option<Vec<(Pos, Option<String>)>>),
+    /// A name: a variant without a payload if the matched enum has one by that
+    /// name, else a new variable bound to the value. Names starting with an
+    /// uppercase letter are always variants.
+    Name(String),
+    /// `Circle(p, _)`: a variant and patterns for its payload values.
+    Variant(String, Vec<Pattern>),
+    /// `Point { x, y: 0, .. }`: a struct and patterns for some of its fields
+    /// (`x` alone is `x: x`); `true` with `..`, which ignores the other fields.
+    Struct(String, Vec<(Pos, String, Pattern)>, bool),
 }
 
 #[derive(Debug, Clone)]
@@ -247,6 +270,8 @@ pub enum ExprKind {
     /// `fn(x: i64, y) -> R { ... }`: an anonymous function, which may capture
     /// local variables.
     Lambda(Box<Lambda>),
+    /// `match value { pattern => value ... }` where a value is expected.
+    Match(Box<Expr>, Vec<MatchExprArm>),
     /// `Point { x: 1, y: 2 }` or `Pair(i64) { a: 1, b: 2 }`
     StructLit(TypeExpr, Vec<FieldInit>),
     /// `base.field`
@@ -402,6 +427,17 @@ pub fn set_pos(e: &mut Expr, pos: Pos) {
             args.iter_mut().for_each(|a| set_pos(a, pos));
         }
         ExprKind::Type(t) => ty(t),
+        ExprKind::Match(value, arms) => {
+            set_pos(value, pos);
+            for arm in arms {
+                arm.pos = pos;
+                set_pattern_pos(&mut arm.pattern, pos);
+                if let Some(g) = &mut arm.guard {
+                    set_pos(g, pos);
+                }
+                set_pos(&mut arm.value, pos);
+            }
+        }
         ExprKind::NewChan(t, cap) => {
             ty(t);
             if let Some(c) = cap {
@@ -522,13 +558,26 @@ pub fn set_stmt_pos(s: &mut Stmt, pos: Pos) {
             set_pos(value, pos);
             for arm in arms {
                 arm.pos = pos;
-                if let Pattern::Variant(_, Some(binds)) = &mut arm.pattern {
-                    binds.iter_mut().for_each(|b| b.0 = pos);
+                set_pattern_pos(&mut arm.pattern, pos);
+                if let Some(g) = &mut arm.guard {
+                    set_pos(g, pos);
                 }
                 set_block_pos(&mut arm.body, pos);
             }
         }
         Stmt::Expr(e) => set_pos(e, pos),
+    }
+}
+
+fn set_pattern_pos(p: &mut Pattern, pos: Pos) {
+    p.pos = pos;
+    match &mut p.kind {
+        PatternKind::Wild | PatternKind::Int(_) | PatternKind::Bool(_) | PatternKind::Name(_) => {}
+        PatternKind::Variant(_, args) => args.iter_mut().for_each(|a| set_pattern_pos(a, pos)),
+        PatternKind::Struct(_, fields, _) => fields.iter_mut().for_each(|(p, _, f)| {
+            *p = pos;
+            set_pattern_pos(f, pos);
+        }),
     }
 }
 

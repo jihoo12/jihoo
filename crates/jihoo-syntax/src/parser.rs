@@ -534,12 +534,32 @@ impl Parser {
         }
     }
 
-    /// `pattern => { ... }` or `pattern => statement`.
+    /// `pattern => { ... }` or `pattern => statement`, with an optional
+    /// `if guard` before `=>`.
     fn match_arm(&mut self) -> PResult<MatchArm> {
         let pos = self.pos();
         let pattern = self.pattern()?;
+        let guard = self.guard()?;
         let body = self.arm_body()?;
-        Ok(MatchArm { pos, pattern, body })
+        Ok(MatchArm { pos, pattern, guard, body })
+    }
+
+    /// `pattern => value` in a `match` expression.
+    fn match_expr_arm(&mut self) -> PResult<MatchExprArm> {
+        let pos = self.pos();
+        let pattern = self.pattern()?;
+        let guard = self.guard()?;
+        self.expect(&Tok::FatArrow, "`=>`")?;
+        let value = self.with_struct_lit(true, |p| p.expr())?;
+        Ok(MatchExprArm { pos, pattern, guard, value })
+    }
+
+    fn guard(&mut self) -> PResult<Option<Expr>> {
+        if self.eat(&Tok::If) {
+            Ok(Some(self.cond()?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// `=> { ... }` or `=> statement`, after the head of an arm.
@@ -586,37 +606,66 @@ impl Parser {
     }
 
     fn pattern(&mut self) -> PResult<Pattern> {
+        let pos = self.pos();
         let negative = self.eat(&Tok::Minus);
-        match self.peek().clone() {
+        let kind = match self.peek().clone() {
             Tok::Int(n) => {
                 self.bump();
-                Ok(Pattern::Int(if negative { -(n as i128) } else { n as i128 }))
+                PatternKind::Int(if negative { -(n as i128) } else { n as i128 })
             }
-            _ if negative => Err(self.unexpected("an integer")),
-            Tok::True | Tok::False => Ok(Pattern::Bool(self.bump().tok == Tok::True)),
+            _ if negative => return Err(self.unexpected("an integer")),
+            Tok::True | Tok::False => PatternKind::Bool(self.bump().tok == Tok::True),
             Tok::Ident(name) if name == "_" => {
                 self.bump();
-                Ok(Pattern::Wild)
+                PatternKind::Wild
             }
             Tok::Ident(name) => {
                 self.bump();
-                if !self.same_line(&Tok::LParen) {
-                    return Ok(Pattern::Variant(name, None));
-                }
-                self.bump();
-                let mut binds = Vec::new();
-                while *self.peek() != Tok::RParen {
-                    let (pos, n) = self.ident("a name or `_`")?;
-                    binds.push((pos, Some(n).filter(|n| n != "_")));
-                    if !self.eat(&Tok::Comma) {
-                        break;
+                if self.same_line(&Tok::LParen) {
+                    self.bump();
+                    let mut args = Vec::new();
+                    while *self.peek() != Tok::RParen {
+                        args.push(self.pattern()?);
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
                     }
+                    self.expect(&Tok::RParen, "`,` or `)`")?;
+                    PatternKind::Variant(name, args)
+                } else if self.same_line(&Tok::LBrace) {
+                    self.struct_pattern(name)?
+                } else {
+                    PatternKind::Name(name)
                 }
-                self.expect(&Tok::RParen, "`,` or `)`")?;
-                Ok(Pattern::Variant(name, Some(binds)))
             }
-            _ => Err(self.unexpected("a pattern (a variant, a literal or `_`)")),
-        }
+            _ => return Err(self.unexpected("a pattern (a variant, a name, a literal or `_`)")),
+        };
+        Ok(Pattern { pos, kind })
+    }
+
+    /// `Name { x, y: pattern, .. }`, after the name.
+    fn struct_pattern(&mut self, name: String) -> PResult<PatternKind> {
+        let mut rest = false;
+        let mut fields = Vec::new();
+        self.braced_list(|p| {
+            if rest {
+                return Err(p.unexpected("`}` after `..`"));
+            }
+            if p.eat(&Tok::Dot) {
+                p.expect(&Tok::Dot, "`..`")?;
+                rest = true;
+                return Ok(());
+            }
+            let (pos, field) = p.ident("a field name or `..`")?;
+            let pattern = if p.eat(&Tok::Colon) {
+                p.pattern()?
+            } else {
+                Pattern { pos, kind: PatternKind::Name(field.clone()) }
+            };
+            fields.push((pos, field, pattern));
+            Ok(())
+        })?;
+        Ok(PatternKind::Struct(name, fields, rest))
     }
 
     fn if_stmt(&mut self) -> PResult<Stmt> {
@@ -795,6 +844,12 @@ impl Parser {
                 ExprKind::Asm(Box::new(self.asm_args()?))
             }
             Tok::Fn => return self.fn_expr(),
+            Tok::Match => {
+                self.bump();
+                let value = self.cond()?;
+                let arms = self.braced_list(|p| p.match_expr_arm())?;
+                ExprKind::Match(Box::new(value), arms)
+            }
             // `chan(T, n)` makes a channel; `chan T` is the type.
             Tok::Chan if self.toks[self.i + 1].tok == Tok::LParen => {
                 self.bump();
@@ -1373,9 +1428,11 @@ mod tests {
         let vs = e.variants.as_ref().unwrap();
         assert!(vs[0].name == "Some" && vs[0].fields.len() == 1 && vs[1].fields.is_empty());
         let Stmt::Match { arms, .. } = &p.funcs[0].body.stmts[0] else { panic!() };
-        assert!(matches!(&arms[0].pattern, Pattern::Variant(n, Some(b)) if n == "Some" && b[0].1.as_deref() == Some("x") && b[1].1.is_none()));
-        assert!(matches!(&arms[1].pattern, Pattern::Variant(n, None) if n == "None"));
-        assert!(matches!(arms[2].pattern, Pattern::Int(-1)) && matches!(arms[3].pattern, Pattern::Wild));
+        let PatternKind::Variant(n, args) = &arms[0].pattern.kind else { panic!() };
+        assert!(n == "Some" && matches!(&args[0].kind, PatternKind::Name(x) if x == "x"));
+        assert!(matches!(args[1].kind, PatternKind::Wild));
+        assert!(matches!(&arms[1].pattern.kind, PatternKind::Name(n) if n == "None"));
+        assert!(matches!(arms[2].pattern.kind, PatternKind::Int(-1)) && matches!(arms[3].pattern.kind, PatternKind::Wild));
         // The value is not a struct literal: `o {` starts the arms.
         assert!(parse("fn f() { match p { _ => {} } }").is_ok());
         assert!(parse("fn f() { match p { 1 {} } }").unwrap_err().msg.contains("expected `=>`"));
@@ -1412,6 +1469,20 @@ mod tests {
         assert!(matches!(&arms[1].op, SelectOp::Recv { bind: None, .. }));
         assert!(matches!(&arms[2].op, SelectOp::Send { .. }));
         assert!(matches!(&arms[3].op, SelectOp::Default));
+    }
+
+    #[test]
+    fn nested_patterns_and_match_expressions() {
+        let s = body("let a = match s {\n Circle(Point { x, y: 0, .. }, r) if r > 1 => r\n _ => 0\n}");
+        let Stmt::Let { value, .. } = &s[0] else { panic!() };
+        let ExprKind::Match(_, arms) = &value.kind else { panic!("{value:?}") };
+        assert!(arms.len() == 2 && arms[0].guard.is_some());
+        let PatternKind::Variant(_, args) = &arms[0].pattern.kind else { panic!() };
+        let PatternKind::Struct(n, fields, rest) = &args[0].kind else { panic!() };
+        assert!(n == "Point" && *rest && fields.len() == 2);
+        assert!(matches!(&fields[0].2.kind, PatternKind::Name(x) if x == "x"));
+        assert!(matches!(fields[1].2.kind, PatternKind::Int(0)));
+        assert!(parse("fn f() { match p { P { .., x } => {} } }").unwrap_err().msg.contains("`}` after `..`"));
     }
 
     #[test]
