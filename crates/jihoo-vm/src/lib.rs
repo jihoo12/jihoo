@@ -60,6 +60,8 @@ pub struct Vm<'m> {
     fn_index: HashMap<&'m str, usize>,
     heap: Heap,
     stack: Vec<Frame>,
+    /// Instructions left before execution is stopped, if limited.
+    fuel: Option<u64>,
 }
 
 /// Runs `main` of a hosted module and returns its result.
@@ -70,7 +72,24 @@ pub fn run(module: &Module, out: &mut dyn Write) -> Result<i64, VmError> {
 impl<'m> Vm<'m> {
     pub fn new(module: &'m Module) -> Self {
         let fn_index = module.funcs.iter().enumerate().map(|(i, f)| (f.name.as_str(), i)).collect();
-        Vm { module, fn_index, heap: Heap::default(), stack: Vec::new() }
+        Vm { module, fn_index, heap: Heap::default(), stack: Vec::new(), fuel: None }
+    }
+
+    /// Stops execution with an error after `steps` instructions. Used for
+    /// compile-time evaluation, so an endless loop cannot hang the compiler.
+    pub fn with_fuel(mut self, steps: u64) -> Self {
+        self.fuel = Some(steps);
+        self
+    }
+
+    /// Calls the function `name` with `args`, regardless of the module's profile.
+    /// Instructions the VM cannot run (pointers, `syscall`) are runtime errors.
+    pub fn call_named(&mut self, name: &str, args: &[Value], out: &mut dyn Write) -> Result<Value, VmError> {
+        let func = *self
+            .fn_index
+            .get(name)
+            .ok_or_else(|| VmError { func: name.into(), msg: "no such function".into() })?;
+        self.call(func, args, out)
     }
 
     pub fn heap(&self) -> &Heap {
@@ -100,6 +119,13 @@ impl<'m> Vm<'m> {
             let f = &module.funcs[frame.func];
             let block = &f.blocks[frame.block];
 
+            if let Some(fuel) = &mut self.fuel {
+                if *fuel == 0 {
+                    return Err(self.error("evaluation did not finish (step limit reached)"));
+                }
+                *fuel -= 1;
+            }
+            let frame = self.stack.last_mut().unwrap();
             if frame.ip < block.insts.len() {
                 let inst = &block.insts[frame.ip];
                 frame.ip += 1;

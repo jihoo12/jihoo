@@ -5,7 +5,17 @@ pub struct Program {
     /// File-level attributes such as `#![freestanding]`.
     pub attrs: Vec<(Pos, String)>,
     pub structs: Vec<StructDecl>,
+    pub consts: Vec<ConstDecl>,
     pub funcs: Vec<FnDecl>,
+}
+
+/// `const NAME: T = value`, evaluated at compile time.
+#[derive(Debug, Clone)]
+pub struct ConstDecl {
+    pub pos: Pos,
+    pub name: String,
+    pub ty: Option<TypeExpr>,
+    pub value: Expr,
 }
 
 #[derive(Debug, Clone)]
@@ -50,8 +60,8 @@ pub enum TypeExprKind {
     Named(String),
     /// `*T`
     Ptr(Box<TypeExpr>),
-    /// `[T; N]`
-    Array(Box<TypeExpr>, u64),
+    /// `[T; N]`, where `N` is evaluated at compile time.
+    Array(Box<TypeExpr>, Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -121,8 +131,10 @@ pub enum ExprKind {
     Cast(Box<Expr>, TypeExpr),
     /// `[a, b, c]`
     ArrayLit(Vec<Expr>),
-    /// `[value; N]`
-    ArrayRepeat(Box<Expr>, u64),
+    /// `[value; N]`, where `N` is evaluated at compile time.
+    ArrayRepeat(Box<Expr>, Box<Expr>),
+    /// `comptime expr`: evaluated while compiling, then used as a constant.
+    Comptime(Box<Expr>),
     /// `size_of(T)`
     SizeOf(TypeExpr),
     /// `align_of(T)`

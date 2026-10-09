@@ -1,0 +1,40 @@
+// Values computed at compile time are spliced into the IR; both backends must
+// rebuild them (including structs and arrays) the same way.
+
+struct Entry {
+    key: u8
+    squares: [i64; 4]
+}
+
+const N = 4
+const TABLE = build()
+const BIG = [7 as u8; 300]
+
+fn build() -> [Entry; N] {
+    let out = [Entry { key: 0, squares: [0; N] }; N]
+    let i = 0
+    while i < N {
+        out[i].key = (i * 3) as u8
+        let j = 0
+        while j < N {
+            out[i].squares[j] = (i + j) * (i + j)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fn entry() -> i64 {
+    let t = TABLE
+    t[0].key = 100      // a copy of the constant, so TABLE itself is unchanged
+    let sum = 0
+    let i = 0
+    while i < N {
+        sum = sum + TABLE[i].squares[N - 1] + TABLE[i].key as i64
+        i = i + 1
+    }
+    let buf: [u8; size_of(Entry) / 8] = [1; comptime size_of(Entry) / 8]
+    // squares[3] = 9 + 16 + 25 + 36 = 86; keys = 0 + 3 + 6 + 9 = 18
+    return sum + len(buf) + (BIG[299] as i64) + t[0].key as i64 - 100
+}

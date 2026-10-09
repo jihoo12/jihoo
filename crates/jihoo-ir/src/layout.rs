@@ -14,12 +14,13 @@ pub struct Layout {
     pub align: u64,
 }
 
-/// Looks up the fields of a struct by name.
-pub type Fields<'a> = dyn Fn(&str) -> Option<&'a [(String, Type)]> + 'a;
+/// Looks up the field types of a struct by name.
+pub type Fields<'a> = dyn Fn(&str) -> Option<Vec<Type>> + 'a;
 
 /// Layout of `t`, or `None` for types without a fixed layout (`str`, which is a GC
-/// reference, and anything containing it).
-pub fn of<'a>(t: &Type, fields: &Fields<'a>) -> Option<Layout> {
+/// reference, and anything containing it). The struct types reachable from `t`
+/// must not contain themselves.
+pub fn of(t: &Type, fields: &Fields<'_>) -> Option<Layout> {
     Some(match t {
         Type::Unit => Layout { size: 0, align: 1 },
         Type::Bool => Layout { size: 1, align: 1 },
@@ -36,8 +37,8 @@ pub fn of<'a>(t: &Type, fields: &Fields<'a>) -> Option<Layout> {
         Type::Struct(name) => {
             let mut size = 0u64;
             let mut align = 1u64;
-            for (_, ft) in fields(name)? {
-                let f = of(ft, fields)?;
+            for ft in fields(name)? {
+                let f = of(&ft, fields)?;
                 size = size.next_multiple_of(f.align) + f.size;
                 align = align.max(f.align);
             }
@@ -58,7 +59,9 @@ mod tests {
             ("B".into(), vec![("x".into(), Type::Int(IntTy::U16)), ("a".into(), Type::Struct("A".into()))]),
             ("E".into(), vec![]),
         ];
-        let fields = |n: &str| defs.iter().find(|(d, _)| d == n).map(|(_, f)| &f[..]);
+        let fields = |n: &str| {
+            defs.iter().find(|(d, _)| d == n).map(|(_, f)| f.iter().map(|(_, t)| t.clone()).collect())
+        };
         let l = |t: Type| of(&t, &fields).unwrap();
 
         assert_eq!(l(Type::Struct("A".into())), Layout { size: 24, align: 8 });

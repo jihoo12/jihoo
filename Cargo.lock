@@ -22,6 +22,7 @@ version = "0.1.0"
 dependencies = [
  "jihoo-ir",
  "jihoo-syntax",
+ "jihoo-vm",
 ]
 
 [[package]]

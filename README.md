@@ -76,8 +76,9 @@ v0: static types with local inference; `bool`, `i8`…`u64`, structs and
 bounds-checked arrays (both profiles), `size_of`/`align_of`, `str` (hosted),
 pointers with load/store and `&` (freestanding);
 functions, `if`/`while`, `&&`/`||`, `as` casts, `print` (hosted) and `syscall`
-(freestanding, x86_64 and aarch64 Linux). See
-[examples/pointers.jh](examples/pointers.jh) and the roadmap in
+(freestanding, x86_64 and aarch64 Linux); compile-time evaluation with `const`
+and `comptime`, run on the VM. See [examples/pointers.jh](examples/pointers.jh),
+[examples/comptime.jh](examples/comptime.jh) and the roadmap in
 [docs/design.md](docs/design.md).
 
 ```sh

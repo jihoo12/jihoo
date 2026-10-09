@@ -141,12 +141,40 @@ The frontend (Rust) and the LLVM backend (C++) only talk through `.jir` files
 be developed and tested on its own with hand-written `.jir`, and keeps the Rust build
 free of LLVM.
 
-## Metaprogramming (planned)
+## Compile-time evaluation
 
-Compile-time execution will run on the VM, even when the final target is
-freestanding: the compiler lowers `comptime` code to JIR, runs it on the embedded
-VM, and splices the result back. The only rule is that comptime code cannot use
-`syscall`/asm. AST macros will build on the same mechanism.
+```jihoo
+const COUNT = 10
+const PRIMES = primes()            // runs `primes` while compiling
+
+fn primes() -> [i64; COUNT] { ... }
+
+fn main() {
+    print(PRIMES[COUNT - 1])
+    print(comptime fib(25))        // one expression, evaluated while compiling
+    let buf: [u8; size_of(Node) * 2] = [0; 32]
+}
+```
+
+- `const NAME = expr` declares a compile-time constant; `comptime e` evaluates one
+  expression (it binds like a prefix operator, so write `comptime (a * b)` for a
+  whole product); array lengths may be any integer expression.
+- Evaluation runs on the VM, for freestanding programs too: the expression is
+  lowered into a helper function, and that function plus everything it can call
+  is executed. The result (integers, bools, strings, structs, arrays) is spliced
+  back into the IR as constants. `print` during evaluation goes to stderr.
+- Compile-time code cannot use pointers or `syscall` (the VM has neither), cannot
+  read local variables, and is stopped after 100 million steps.
+- Constants are built once per function, at its start, and reused, so a lookup
+  table indexed in a loop is not rebuilt on every iteration.
+
+To make this possible, `crates/jihoo-sema/src/env.rs` analyzes module-level items
+lazily: struct fields, signatures, constants and function bodies are computed on
+first use and memoized. Items can refer to each other in any order; a query that
+needs its own result (`const A = A`, or `comptime f()` inside `f`) is reported as
+a cycle. This is the same approach as Zig's lazy analysis.
+
+Planned next: AST macros on the same machinery, and compile-time type parameters.
 
 ## GC
 
@@ -160,5 +188,5 @@ grows past twice the size that survived the last collection (1 MiB minimum).
 2. ~~Differential tests across both backends.~~ Rust-side JIR parser.
 3. ~~Sized integers, pointers with loads/stores, structs, arrays, `size_of`.~~
    Inline `asm` blocks.
-4. `comptime` on the VM.
+4. ~~`comptime` on the VM.~~
 5. `alloc` layer; AST macros.

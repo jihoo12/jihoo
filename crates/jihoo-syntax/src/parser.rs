@@ -115,18 +115,29 @@ impl Parser {
             attrs.push((pos, name));
         }
         let mut structs = Vec::new();
+        let mut consts = Vec::new();
         let mut funcs = Vec::new();
         while *self.peek() != Tok::Eof {
             match self.peek() {
                 Tok::Fn => funcs.push(self.fn_decl()?),
                 Tok::Struct => structs.push(self.struct_decl()?),
+                Tok::Const => consts.push(self.const_decl()?),
                 Tok::InnerAttr(_) => {
                     return Err(Error::new(self.pos(), "`#![...]` must come before any item"))
                 }
-                _ => return Err(self.unexpected("`fn` or `struct`")),
+                _ => return Err(self.unexpected("`fn`, `struct` or `const`")),
             }
         }
-        Ok(Program { attrs, structs, funcs })
+        Ok(Program { attrs, structs, consts, funcs })
+    }
+
+    fn const_decl(&mut self) -> PResult<ConstDecl> {
+        let pos = self.expect(&Tok::Const, "`const`")?.pos;
+        let (_, name) = self.ident("constant name")?;
+        let ty = if self.eat(&Tok::Colon) { Some(self.type_expr()?) } else { None };
+        self.expect(&Tok::Assign, "`=`")?;
+        let value = self.expr()?;
+        Ok(ConstDecl { pos, name, ty, value })
     }
 
     fn struct_decl(&mut self) -> PResult<StructDecl> {
@@ -170,22 +181,12 @@ impl Parser {
         if self.eat(&Tok::LBracket) {
             let elem = self.type_expr()?;
             self.expect(&Tok::Semi, "`;` and an array length")?;
-            let len = self.array_len()?;
+            let len = self.with_struct_lit(true, |p| p.expr())?;
             self.expect(&Tok::RBracket, "`]`")?;
-            return Ok(TypeExpr { pos, kind: TypeExprKind::Array(Box::new(elem), len) });
+            return Ok(TypeExpr { pos, kind: TypeExprKind::Array(Box::new(elem), Box::new(len)) });
         }
         let (pos, name) = self.ident("a type")?;
         Ok(TypeExpr { pos, kind: TypeExprKind::Named(name) })
-    }
-
-    fn array_len(&mut self) -> PResult<u64> {
-        match *self.peek() {
-            Tok::Int(n) => {
-                self.bump();
-                Ok(n as u64) // the lexer only produces non-negative literals
-            }
-            _ => Err(self.unexpected("an integer array length")),
-        }
     }
 
     // ---- statements ----
@@ -318,6 +319,7 @@ impl Parser {
             Tok::Bang => |e| ExprKind::Unary(UnOp::Not, e),
             Tok::Star => ExprKind::Deref,
             Tok::Amp => ExprKind::AddrOf,
+            Tok::Comptime => ExprKind::Comptime,
             _ => return self.postfix(),
         };
         self.bump();
@@ -381,9 +383,9 @@ impl Parser {
                     }
                     let first = p.expr()?;
                     if p.eat(&Tok::Semi) {
-                        let len = p.array_len()?;
+                        let len = p.expr()?;
                         p.expect(&Tok::RBracket, "`]`")?;
-                        return Ok(ExprKind::ArrayRepeat(Box::new(first), len));
+                        return Ok(ExprKind::ArrayRepeat(Box::new(first), Box::new(len)));
                     }
                     let mut items = vec![first];
                     while p.eat(&Tok::Comma) {
@@ -480,6 +482,8 @@ fn punct(t: &Tok) -> &'static str {
         Tok::False => "false",
         Tok::Struct => "struct",
         Tok::As => "as",
+        Tok::Const => "const",
+        Tok::Comptime => "comptime",
         Tok::LParen => "(",
         Tok::RParen => ")",
         Tok::LBrace => "{",
@@ -571,15 +575,30 @@ mod tests {
     fn arrays_and_size_of() {
         let s = body("let a: [u8; 4] = [1, 2, 3, 4,]\nlet b = [0; 16]\nlet n = size_of([*u8; 2]) + align_of(i64)\nlet c = []");
         let Stmt::Let { ty: Some(ty), value, .. } = &s[0] else { panic!() };
-        assert!(matches!(ty.kind, TypeExprKind::Array(_, 4)));
+        assert!(matches!(&ty.kind, TypeExprKind::Array(_, n) if matches!(n.kind, ExprKind::Int(4))));
         assert!(matches!(&value.kind, ExprKind::ArrayLit(items) if items.len() == 4));
         let Stmt::Let { value, .. } = &s[1] else { panic!() };
-        assert!(matches!(value.kind, ExprKind::ArrayRepeat(_, 16)));
+        assert!(matches!(&value.kind, ExprKind::ArrayRepeat(_, n) if matches!(n.kind, ExprKind::Int(16))));
         let Stmt::Let { value, .. } = &s[2] else { panic!() };
         let ExprKind::Binary(_, l, r) = &value.kind else { panic!() };
         assert!(matches!(l.kind, ExprKind::SizeOf(_)) && matches!(r.kind, ExprKind::AlignOf(_)));
         let Stmt::Let { value, .. } = &s[3] else { panic!() };
         assert!(matches!(&value.kind, ExprKind::ArrayLit(items) if items.is_empty()));
+    }
+
+    #[test]
+    fn comptime_and_consts() {
+        let p = parse("const N: i64 = 4 * 4\nconst M = f(N)\nfn main() { let a: [u8; N + 1] = [0; comptime f(2)] }").unwrap();
+        assert_eq!(p.consts.len(), 2);
+        assert!(p.consts[0].ty.is_some());
+        let Stmt::Let { ty: Some(ty), value, .. } = &p.funcs[0].body.stmts[0] else { panic!() };
+        assert!(matches!(&ty.kind, TypeExprKind::Array(_, n) if matches!(n.kind, ExprKind::Binary(..))));
+        let ExprKind::ArrayRepeat(_, n) = &value.kind else { panic!() };
+        // `comptime` binds like a prefix operator: `comptime f(2) + 1` is `(comptime f(2)) + 1`.
+        assert!(matches!(n.kind, ExprKind::Comptime(_)));
+        let s = body("let x = comptime f(2) + 1");
+        let Stmt::Let { value, .. } = &s[0] else { panic!() };
+        assert!(matches!(&value.kind, ExprKind::Binary(_, l, _) if matches!(l.kind, ExprKind::Comptime(_))));
     }
 
     #[test]

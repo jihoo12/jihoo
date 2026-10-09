@@ -1,0 +1,55 @@
+// Compile-time evaluation: `const` and `comptime` run ordinary functions on the
+// VM while compiling, and the results are baked into the program as constants.
+//   jihoo run examples/comptime.jh
+//   jihoo emit-ir examples/comptime.jh    // no call to `primes` or `fib` in `main`
+
+const COUNT = 10
+const PRIMES = primes()                  // a [i64; 10] lookup table
+const GREETING = repeat("ab", 3) + "!"   // strings work too (hosted only)
+
+fn primes() -> [i64; COUNT] {
+    let out = [0; COUNT]
+    let n = 0
+    let candidate = 2
+    while n < COUNT {
+        let d = 2
+        let prime = true
+        while d * d <= candidate {
+            if candidate % d == 0 {
+                prime = false
+            }
+            d = d + 1
+        }
+        if prime {
+            out[n] = candidate
+            n = n + 1
+        }
+        candidate = candidate + 1
+    }
+    print("computed the primes table while compiling") // goes to the compiler's stderr
+    return out
+}
+
+fn repeat(s: str, n: i64) -> str {
+    let out = ""
+    while n > 0 {
+        out = out + s
+        n = n - 1
+    }
+    return out
+}
+
+fn fib(n: i64) -> i64 {
+    if n < 2 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn main() {
+    print(GREETING)
+    print(PRIMES[COUNT - 1])          // 29
+    print(comptime fib(25))           // computed once, while compiling
+    let table: [u8; size_of(i64) * 2] = [0; 16]
+    print(len(table))                 // 16
+}

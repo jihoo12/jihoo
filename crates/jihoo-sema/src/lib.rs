@@ -6,18 +6,26 @@
 //! are shared with the IR verifier (`jihoo_ir::types`), so well-typed programs
 //! always produce valid IR.
 //!
-//! Errors are collected per function: one error stops the current function, but
-//! the remaining functions are still checked.
+//! Module-level items are analyzed lazily (see `env.rs`), which is what lets
+//! `comptime` code call any function (see `comptime.rs`).
+//!
+//! Errors are collected per item: one error stops the current function, but the
+//! remaining items are still checked.
 
+mod comptime;
+mod env;
 mod place;
 
 use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
 
 use jihoo_ir as ir;
-use jihoo_ir::{layout, types};
+use jihoo_ir::types;
 use jihoo_ir::{BlockId, Inst, IntTy, Profile, Reg, Terminator, Type};
 use jihoo_syntax::ast::*;
 use jihoo_syntax::{Error, Pos};
+
+use env::{Env, Sig};
 
 pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
     let mut errors = Vec::new();
@@ -30,199 +38,55 @@ pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
         }
     }
 
-    let mut env = Env { profile, structs: HashMap::new(), sigs: HashMap::new() };
-
-    // Struct names first, so field and parameter types can refer to any struct.
-    for s in &prog.structs {
-        if Type::from_name(&s.name).is_some() {
-            errors.push(Error::new(s.pos, format!("`{}` is a builtin type name", s.name)));
-        } else if env.structs.insert(s.name.clone(), Vec::new()).is_some() {
-            errors.push(Error::new(s.pos, format!("struct `{}` is defined twice", s.name)));
-        }
+    let (env, name_errors) = Env::new(profile, prog);
+    errors.extend(name_errors);
+    if !errors.is_empty() {
+        return Err(errors);
     }
+
+    // Ask for every item; the lazy queries compute what each one needs.
     let mut structs = Vec::new();
     for s in &prog.structs {
-        match env.struct_fields(s) {
-            Ok(fields) => {
-                env.structs.insert(s.name.clone(), fields.clone());
-                structs.push(ir::StructDef { name: s.name.clone(), fields });
-            }
+        match env.struct_fields(s.pos, &s.name).and_then(|f| env.check_acyclic(&s.name).map(|_| f)) {
+            Ok(fields) => structs.push(ir::StructDef { name: s.name.clone(), fields: (*fields).clone() }),
             Err(e) => errors.push(e),
         }
     }
-    for s in &prog.structs {
-        if let Err(e) = env.check_acyclic(s, &s.name, &mut Vec::new()) {
+    for c in &prog.consts {
+        if let Some(Err(e)) = env.constant(&c.name) {
             errors.push(e);
         }
     }
-
     for f in &prog.funcs {
-        match env.signature(f) {
-            Ok(sig) => {
-                if is_builtin(&f.name) {
-                    errors.push(Error::new(f.pos, format!("`{}` is a builtin and cannot be redefined", f.name)));
-                } else if env.sigs.insert(f.name.clone(), sig).is_some() {
-                    errors.push(Error::new(f.pos, format!("function `{}` is defined twice", f.name)));
-                }
-            }
-            Err(e) => errors.push(e),
+        if let Some(Err(e)) = env.signature(&f.name) {
+            errors.push(e);
         }
     }
     if let Err(e) = env.check_entry(prog) {
         errors.push(e);
     }
-    if !errors.is_empty() {
-        return Err(errors);
-    }
-
     let mut funcs = Vec::new();
     for f in &prog.funcs {
-        let sig = &env.sigs[&f.name];
-        match FnCx::new(&env, sig).lower_fn(f) {
-            Ok(func) => funcs.push(func),
-            Err(e) => errors.push(e),
+        if let Some(Ok(_)) = env.signature(&f.name) {
+            match env.function(&f.name) {
+                Ok(func) => funcs.push((*func).clone()),
+                Err(e) => errors.push(e),
+            }
         }
     }
 
     if errors.is_empty() {
         Ok(ir::Module { profile, structs, funcs })
     } else {
+        // One failing item can surface as the same error through several others.
+        let mut seen = std::collections::HashSet::new();
+        errors.retain(|e| seen.insert((e.pos.line, e.pos.col, e.msg.clone())));
         Err(errors)
     }
 }
 
-#[derive(Debug, Clone)]
-struct Sig {
-    params: Vec<Type>,
-    ret: Type,
-}
-
-/// Module-level information shared by all functions.
-struct Env {
-    profile: Profile,
-    /// Fields of each struct, in declaration order.
-    structs: HashMap<String, Vec<(String, Type)>>,
-    sigs: HashMap<String, Sig>,
-}
-
 fn is_builtin(name: &str) -> bool {
     matches!(name, "print" | "syscall" | "len" | "size_of" | "align_of")
-}
-
-impl Env {
-    fn resolve(&self, t: &TypeExpr) -> Result<Type, Error> {
-        match &t.kind {
-            TypeExprKind::Ptr(inner) => {
-                if self.profile != Profile::Freestanding {
-                    return Err(Error::new(t.pos, "pointer types are only available in freestanding mode"));
-                }
-                Ok(Type::ptr(self.resolve(inner)?))
-            }
-            TypeExprKind::Array(elem, n) => Ok(Type::array(self.resolve(elem)?, *n)),
-            TypeExprKind::Named(name) => {
-                if let Some(ty) = Type::from_name(name) {
-                    if ty == Type::Str && self.profile == Profile::Freestanding {
-                        return Err(Error::new(
-                            t.pos,
-                            "type `str` is garbage collected and is not available in freestanding mode (use `*u8`)",
-                        ));
-                    }
-                    Ok(ty)
-                } else if self.structs.contains_key(name) {
-                    Ok(Type::Struct(name.clone()))
-                } else if name == "ptr" {
-                    Err(Error::new(t.pos, "unknown type `ptr`; byte pointers are written `*u8`"))
-                } else {
-                    Err(Error::new(t.pos, format!("unknown type `{name}`")))
-                }
-            }
-        }
-    }
-
-    fn struct_fields(&self, s: &StructDecl) -> Result<Vec<(String, Type)>, Error> {
-        let mut fields: Vec<(String, Type)> = Vec::new();
-        for f in &s.fields {
-            if fields.iter().any(|(n, _)| *n == f.name) {
-                return Err(Error::new(f.pos, format!("field `{}` is declared twice", f.name)));
-            }
-            fields.push((f.name.clone(), self.resolve(&f.ty)?));
-        }
-        Ok(fields)
-    }
-
-    /// A struct may not contain itself by value; use a pointer instead.
-    fn check_acyclic(&self, decl: &StructDecl, name: &str, stack: &mut Vec<String>) -> Result<(), Error> {
-        if stack.iter().any(|s| s == name) {
-            let path = stack.join(" -> ");
-            return Err(Error::new(
-                decl.pos,
-                format!("struct `{}` contains itself ({path} -> {name}); use a pointer", decl.name),
-            ));
-        }
-        stack.push(name.to_string());
-        for (_, t) in self.structs.get(name).into_iter().flatten() {
-            // Arrays hold their elements by value; pointers break the cycle.
-            let mut t = t;
-            while let Type::Array(elem, _) = t {
-                t = elem;
-            }
-            if let Type::Struct(inner) = t {
-                self.check_acyclic(decl, inner, stack)?;
-            }
-        }
-        stack.pop();
-        Ok(())
-    }
-
-    fn signature(&self, f: &FnDecl) -> Result<Sig, Error> {
-        let params = f.params.iter().map(|p| self.resolve(&p.ty)).collect::<Result<_, _>>()?;
-        let ret = match &f.ret {
-            Some(t) => self.resolve(t)?,
-            None => Type::Unit,
-        };
-        Ok(Sig { params, ret })
-    }
-
-    fn check_entry(&self, prog: &Program) -> Result<(), Error> {
-        let entry = self.profile.entry();
-        let Some(decl) = prog.funcs.iter().find(|f| f.name == entry) else {
-            let pos = Pos { line: 1, col: 1 };
-            return Err(Error::new(pos, format!("{} program needs `fn {entry}()`", self.profile.as_str())));
-        };
-        match self.sigs.get(entry) {
-            Some(sig) if !sig.params.is_empty() => {
-                Err(Error::new(decl.pos, format!("`{entry}` must not take parameters")))
-            }
-            Some(sig) if !matches!(sig.ret, Type::Unit | Type::I64) => Err(Error::new(
-                decl.pos,
-                format!("`{entry}` must return nothing or i64, not {}", sig.ret),
-            )),
-            _ => Ok(()),
-        }
-    }
-
-    /// Index and type of field `name` of struct type `t`.
-    fn field(&self, pos: Pos, t: &Type, name: &str) -> Result<(u32, Type), Error> {
-        let Type::Struct(s) = t else {
-            return Err(Error::new(pos, format!("type {t} has no fields")));
-        };
-        self.structs[s]
-            .iter()
-            .enumerate()
-            .find(|(_, (n, _))| n == name)
-            .map(|(i, (_, t))| (i as u32, t.clone()))
-            .ok_or_else(|| Error::new(pos, format!("struct `{s}` has no field `{name}`")))
-    }
-
-    fn layout(&self, pos: Pos, t: &Type) -> Result<layout::Layout, Error> {
-        layout::of(t, &|name| self.structs.get(name).map(|f| &f[..]))
-            .ok_or_else(|| Error::new(pos, format!("type {t} has no fixed memory layout (it contains a GC reference)")))
-    }
-
-    fn field_type(&self, t: &Type, index: u32) -> Type {
-        let Type::Struct(s) = t else { unreachable!("not a struct: {t}") };
-        self.structs[s][index as usize].1.clone()
-    }
 }
 
 struct BlockBuf {
@@ -231,8 +95,14 @@ struct BlockBuf {
 }
 
 struct FnCx<'a> {
-    env: &'a Env,
-    sig: &'a Sig,
+    env: &'a Env<'a>,
+    sig: Rc<Sig>,
+    /// Lowering a `comptime` helper: there are no local variables to refer to.
+    in_comptime: bool,
+    /// Registers holding constants already built at the start of the function.
+    const_regs: HashMap<String, Reg>,
+    /// Number of hoisted instructions at the front of the entry block.
+    hoisted: usize,
     blocks: Vec<BlockBuf>,
     cur: BlockId,
     regs: Vec<Type>,
@@ -249,10 +119,13 @@ fn is_int_literal(e: &Expr) -> bool {
 }
 
 impl<'a> FnCx<'a> {
-    fn new(env: &'a Env, sig: &'a Sig) -> Self {
+    fn new(env: &'a Env<'a>, sig: Rc<Sig>) -> Self {
         FnCx {
             env,
             sig,
+            in_comptime: false,
+            const_regs: HashMap::new(),
+            hoisted: 0,
             blocks: vec![BlockBuf { insts: vec![], term: None }],
             cur: BlockId(0),
             regs: Vec::new(),
@@ -265,7 +138,7 @@ impl<'a> FnCx<'a> {
     }
 
     fn lower_fn(mut self, f: &FnDecl) -> Result<ir::Function, Error> {
-        let sig = self.sig;
+        let sig = self.sig.clone();
         for (p, ty) in f.params.iter().zip(&sig.params) {
             let r = self.new_reg(ty.clone());
             if self.scopes[0].insert(p.name.clone(), r).is_some() {
@@ -274,18 +147,20 @@ impl<'a> FnCx<'a> {
         }
 
         self.block(&f.body)?;
+        self.finish(&f.name, sig.ret.clone(), f.body.end)
+    }
 
+    /// Closes open blocks, drops unreachable ones, and builds the function.
+    /// `end` is where a missing `return` is reported.
+    fn finish(mut self, name: &str, ret: Type, end: Pos) -> Result<ir::Function, Error> {
         let reachable = self.reachable();
         // A reachable block that is still open falls off the end of the function.
         for &b in &reachable {
             if self.blocks[b].term.is_some() {
                 continue;
             }
-            if self.sig.ret != Type::Unit {
-                return Err(Error::new(
-                    f.body.end,
-                    format!("missing `return`: `{}` must return {}", f.name, self.sig.ret),
-                ));
+            if ret != Type::Unit {
+                return Err(Error::new(end, format!("missing `return`: `{name}` must return {ret}")));
             }
             let unit = self.new_reg(Type::Unit);
             self.blocks[b].insts.push(Inst::Unit { dst: unit });
@@ -310,13 +185,7 @@ impl<'a> FnCx<'a> {
             })
             .collect();
 
-        Ok(ir::Function {
-            name: f.name.clone(),
-            params: self.sig.params.clone(),
-            ret: self.sig.ret.clone(),
-            regs: self.regs,
-            blocks,
-        })
+        Ok(ir::Function { name: name.to_string(), params: self.sig.params.clone(), ret, regs: self.regs, blocks })
     }
 
     /// Blocks reachable from the entry, in breadth-first order (entry first).
@@ -387,12 +256,58 @@ impl<'a> FnCx<'a> {
         self.emit_to(Type::Unit, |dst| Inst::Unit { dst })
     }
 
+    fn local(&self, name: &str) -> Option<Reg> {
+        self.scopes.iter().rev().find_map(|s| s.get(name).copied())
+    }
+
     fn lookup(&self, pos: Pos, name: &str) -> Result<Reg, Error> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|s| s.get(name).copied())
-            .ok_or_else(|| Error::new(pos, format!("unknown variable `{name}`")))
+        self.local(name).ok_or_else(|| self.unknown_name(pos, name))
+    }
+
+    fn unknown_name(&self, pos: Pos, name: &str) -> Error {
+        if self.in_comptime && !self.env.has_function(name) {
+            Error::new(
+                pos,
+                format!("`{name}` is not known at compile time; `comptime` code can only use constants and functions"),
+            )
+        } else {
+            Error::new(pos, format!("unknown variable `{name}`"))
+        }
+    }
+
+    /// A variable: a local, or else a top-level constant spliced in as a value.
+    fn var(&mut self, pos: Pos, name: &str) -> Result<Reg, Error> {
+        if let Some(r) = self.local(name) {
+            return Ok(r);
+        }
+        if let Some(&r) = self.const_regs.get(name) {
+            return Ok(r);
+        }
+        match self.env.constant(name) {
+            Some(c) => {
+                let c = c?;
+                let r = self.hoist(|cx| cx.splice(&c.0, &c.1));
+                self.const_regs.insert(name.to_string(), r);
+                Ok(r)
+            }
+            None => Err(self.unknown_name(pos, name)),
+        }
+    }
+
+    /// Emits `build` at the start of the entry block instead of here, so a
+    /// constant used in a loop is built once per call, not once per iteration.
+    /// `build` must emit straight-line code without side effects; its result
+    /// register must never be written again (constants are not assignable).
+    fn hoist(&mut self, build: impl FnOnce(&mut Self) -> Reg) -> Reg {
+        let cur = self.cur.0 as usize;
+        let start = self.blocks[cur].insts.len();
+        let r = build(self);
+        let moved: Vec<Inst> = self.blocks[cur].insts.drain(start..).collect();
+        let n = moved.len();
+        let at = self.hoisted;
+        self.blocks[0].insts.splice(at..at, moved);
+        self.hoisted += n;
+        r
     }
 
     fn expect(&self, pos: Pos, r: Reg, want: &Type, what: &str) -> Result<(), Error> {
@@ -429,6 +344,11 @@ impl<'a> FnCx<'a> {
                 self.scopes.last_mut().unwrap().insert(name.clone(), dst);
             }
             Stmt::Assign { target, value } => {
+                if let ExprKind::Var(name) = &target.kind {
+                    if self.local(name).is_none() && self.env.constant(name).is_some() {
+                        return Err(Error::new(target.pos, format!("cannot assign to constant `{name}`")));
+                    }
+                }
                 let place = self.place(target)?;
                 let want = place.ty().clone();
                 let v = self.expr(value, Some(&want))?;
@@ -510,7 +430,11 @@ impl<'a> FnCx<'a> {
                 let ty = types::str_literal(self.profile());
                 self.emit_to(ty, |dst| Inst::Str { dst, value: s.clone() })
             }
-            ExprKind::Var(name) => self.lookup(e.pos, name)?,
+            ExprKind::Var(name) => self.var(e.pos, name)?,
+            ExprKind::Comptime(inner) => {
+                let (ty, v) = self.env.comptime(inner, expected)?;
+                self.hoist(|cx| cx.splice(&ty, &v))
+            }
             ExprKind::Unary(op, inner) => {
                 let (op, sym, hint) = match op {
                     UnOp::Neg => (ir::UnOp::Neg, "-", expected),
@@ -533,8 +457,9 @@ impl<'a> FnCx<'a> {
                     Some(Type::Array(elem, _)) => Some(&**elem),
                     _ => None,
                 };
+                let n = self.env.array_len(n)?;
                 let v = self.expr(value, hint)?;
-                let ty = Type::array(self.ty(v).clone(), *n);
+                let ty = Type::array(self.ty(v).clone(), n);
                 self.emit_to(ty, |dst| Inst::Splat { dst, value: v })
             }
             ExprKind::SizeOf(t) | ExprKind::AlignOf(t) => {
@@ -670,9 +595,7 @@ impl<'a> FnCx<'a> {
 
     fn struct_literal(&mut self, pos: Pos, name: &str, inits: &[FieldInit]) -> Result<Reg, Error> {
         let env = self.env;
-        let Some(fields) = env.structs.get(name) else {
-            return Err(Error::new(pos, format!("unknown struct `{name}`")));
-        };
+        let fields = env.struct_fields(pos, name)?;
         let mut values: Vec<Option<Reg>> = vec![None; fields.len()];
         // Evaluate in source order, store in declaration order.
         for init in inits {
@@ -754,11 +677,10 @@ impl<'a> FnCx<'a> {
                 Ok(self.emit_to(Type::I64, |dst| Inst::Syscall { dst, args: regs }))
             }
             _ => {
-                let env = self.env;
-                let sig = env
-                    .sigs
-                    .get(name)
-                    .ok_or_else(|| Error::new(pos, format!("unknown function `{name}`")))?;
+                let sig = self
+                    .env
+                    .signature(name)
+                    .ok_or_else(|| Error::new(pos, format!("unknown function `{name}`")))??;
                 if sig.params.len() != args.len() {
                     return Err(Error::new(
                         pos,

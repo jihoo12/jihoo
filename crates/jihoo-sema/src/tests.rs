@@ -272,3 +272,96 @@ fn size_and_align() {
     assert!(err("struct S { s: str }\nfn main() { print(size_of(S)) }").contains("no fixed memory layout"));
     check("fn main() { print(size_of(i32) == 4) }").unwrap();
 }
+
+// ---- comptime ----
+
+const FIB: &str = "fn fib(n: i64) -> i64 {\n  if n < 2 { return n }\n  return fib(n - 1) + fib(n - 2)\n}\n";
+
+fn main_ir(m: &ir::Module) -> String {
+    m.func("main").or_else(|| m.func("_start")).unwrap().to_string()
+}
+
+#[test]
+fn comptime_expressions_become_constants() {
+    let m = check(&format!("{FIB}fn main() {{ print(comptime fib(20) + 1) }}")).unwrap();
+    let text = main_ir(&m);
+    assert!(text.contains("= const 6765"), "{text}");
+    assert!(!text.contains("call @fib"), "{text}");
+}
+
+#[test]
+fn consts() {
+    let m = check(&format!(
+        "const A = 6\nconst B: u8 = A as u8 * 7\nconst F = comptime fib(10)\n{FIB}\
+         fn main() {{ print(B)\n print(F) }}"
+    ))
+    .unwrap();
+    let text = main_ir(&m);
+    assert!(text.contains("= const 42") && text.contains("= const 55"), "{text}");
+    // Consts may be used before they are declared, and from any function.
+    check("fn main() { print(LATE) }\nconst LATE = 1").unwrap();
+    assert!(err("const X: bool = 1\nfn main() {}").contains("the value of `X` must be bool"));
+    assert!(err("const X = Y\nconst Y = X\nfn main() {}").contains("depends on itself"));
+    assert!(err("const X = 1\nfn main() { X = 2 }").contains("cannot assign to constant `X`"));
+    // Locals shadow constants.
+    check("const X = 1\nfn main() { let X = true\n print(X) }").unwrap();
+}
+
+#[test]
+fn comptime_aggregates_and_strings() {
+    let m = check(
+        "struct P { x: i64, name: str }\n\
+         fn squares() -> [i64; 5] {\n  let a = [0; 5]\n  let i = 0\n  while i < 5 {\n    a[i] = i * i\n    i = i + 1\n  }\n  return a\n}\n\
+         fn label(n: i64) -> str {\n  if n > 1 { return \"many\" }\n  return \"one\"\n}\n\
+         const SQ = squares()\nconst ORIGIN = P { x: 0, name: label(2) + \"!\" }\nconst ZEROS = [0; 64]\n\
+         fn main() { print(SQ[4])\n print(ORIGIN.name)\n print(ZEROS[3]) }",
+    )
+    .unwrap();
+    let text = main_ir(&m);
+    assert!(text.contains("str \"many!\""), "{text}");
+    assert!(text.contains("= array(") && text.contains("= const 16"), "{text}");
+    // A uniform array is spliced as one `splat`, not 64 constants.
+    assert!(text.contains("splat"), "{text}");
+    assert!(text.matches("= const 0").count() < 10, "{text}");
+}
+
+#[test]
+fn array_lengths_are_evaluated_at_compile_time() {
+    let m = check(&fs(
+        "const CAP = 4 * 4\nstruct Node { v: i64, next: *Node }\n\
+         struct Buf { data: [u8; CAP + size_of(Node)], len: i64 }\n\
+         fn f() -> i64 { let b = Buf { data: [0; len_of_data()], len: 0 }\n return len(b.data) }\n\
+         fn len_of_data() -> i64 { return CAP + 16 }",
+    ))
+    .unwrap();
+    assert!(m.to_string().contains("[32 x u8]"), "{m}");
+    assert!(err("fn main() { let a = [0; 0 - 1] }").contains("between 0 and"));
+    assert!(err("fn main() { let a: [u8; true] = [] }").contains("must be an integer"));
+}
+
+#[test]
+fn comptime_runs_on_the_vm_even_when_freestanding() {
+    // Integer work is fine...
+    check(&fs(&format!("{FIB}const N = fib(15)\nfn g() -> i64 {{ return N }}"))).unwrap();
+    // ...but there are no pointers or syscalls while compiling.
+    let e = err(&fs("fn first(p: *u8) -> u8 { return p[0] }\nconst C = first(\"hi\")"));
+    assert!(e.contains("compile-time evaluation failed in `first`"), "{e}");
+    assert!(err(&fs("fn w() -> i64 { return syscall(39) }\nconst P = w()")).contains("compile-time evaluation failed"));
+    assert!(err(&fs("const S = \"hi\"")).contains("pointers do not exist while compiling"));
+}
+
+#[test]
+fn comptime_errors() {
+    assert!(err("fn main() { let x = 1\n print(comptime x + 1) }").contains("not known at compile time"));
+    // `f` cannot run at compile time while `f` itself is being compiled.
+    let e = err("fn f() -> i64 { return comptime f() }\nfn main() {}");
+    assert!(e.contains("still being compiled"), "{e}");
+    let e = err("fn spin() -> i64 { while true {}\n return 0 }\nconst X = spin()\nfn main() {}");
+    assert!(e.contains("step limit"), "{e}");
+    let e = err("fn div(a: i64) -> i64 { return 10 / a }\nconst X = div(0)\nfn main() {}");
+    assert!(e.contains("compile-time evaluation failed in `div`: division by zero"), "{e}");
+    // A broken callee is reported once, plus where it was needed.
+    let prog = jihoo_syntax::parse("fn bad() -> i64 { return true }\nconst X = bad()\nfn main() {}").unwrap();
+    let errs = analyze(&prog).unwrap_err();
+    assert_eq!(errs.len(), 2, "{errs:?}");
+}

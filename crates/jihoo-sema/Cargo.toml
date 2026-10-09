@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 jihoo-syntax.workspace = true
 jihoo-ir.workspace = true
+jihoo-vm.workspace = true

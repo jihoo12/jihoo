@@ -76,7 +76,7 @@ impl FnCx<'_> {
 
     pub(crate) fn place(&mut self, e: &Expr) -> Result<Place, Error> {
         match &e.kind {
-            ExprKind::Var(name) => {
+            ExprKind::Var(name) if self.local(name).is_some() => {
                 let root = self.lookup(e.pos, name)?;
                 Ok(Place::Reg { root, path: vec![], ty: self.ty(root).clone(), assignable: true })
             }

@@ -18,6 +18,8 @@ pub enum Tok {
     False,
     Struct,
     As,
+    Const,
+    Comptime,
 
     LParen,
     RParen,
@@ -250,6 +252,8 @@ impl<'a> Lexer<'a> {
                     "false" => Tok::False,
                     "struct" => Tok::Struct,
                     "as" => Tok::As,
+                    "const" => Tok::Const,
+                    "comptime" => Tok::Comptime,
                     _ => Tok::Ident(word.to_string()),
                 }
             }

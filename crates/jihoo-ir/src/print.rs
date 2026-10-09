@@ -26,7 +26,8 @@ impl Display for Module {
             let fields: Vec<String> = s.fields.iter().map(|(n, t)| format!("{n}: {}", t.jir())).collect();
             write!(f, "struct ${} {{ {} }}", s.name, fields.join(", "))?;
             // The backend checks this against LLVM's data layout.
-            if let Some(l) = layout::of(&Type::Struct(s.name.clone()), &|n| self.struct_def(n).map(|d| &d.fields[..])) {
+            let fields = |n: &str| self.struct_def(n).map(|d| d.fields.iter().map(|(_, t)| t.clone()).collect());
+            if let Some(l) = layout::of(&Type::Struct(s.name.clone()), &fields) {
                 write!(f, " size {} align {}", l.size, l.align)?;
             }
             writeln!(f)?;
