@@ -21,6 +21,11 @@ impl Display for Module {
         writeln!(f, "; jihoo IR")?;
         writeln!(f, "jir 0")?;
         writeln!(f, "profile {}", self.profile.as_str())?;
+        for s in &self.structs {
+            writeln!(f)?;
+            let fields: Vec<String> = s.fields.iter().map(|(n, t)| format!("{n}: {}", t.jir())).collect();
+            writeln!(f, "struct ${} {{ {} }}", s.name, fields.join(", "))?;
+        }
         for func in &self.funcs {
             writeln!(f)?;
             write!(f, "{func}")?;
@@ -31,11 +36,11 @@ impl Display for Module {
 
 impl Display for Function {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let params = self.params.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ");
-        writeln!(f, "fn @{}({params}) -> {} {{", self.name, self.ret)?;
+        let params = self.params.iter().map(|t| t.jir()).collect::<Vec<_>>().join(", ");
+        writeln!(f, "fn @{}({params}) -> {} {{", self.name, self.ret.jir())?;
         write!(f, "  regs")?;
         for t in &self.regs {
-            write!(f, " {t}")?;
+            write!(f, " {}", t.jir())?;
         }
         writeln!(f)?;
         for (i, b) in self.blocks.iter().enumerate() {
@@ -60,7 +65,17 @@ impl Display for Inst {
             Inst::Binary { dst, op, lhs, rhs } => {
                 write!(f, "{dst} = {} {lhs}, {rhs}", op.mnemonic())
             }
+            Inst::Cast { dst, src } => write!(f, "{dst} = cast {src}"),
             Inst::Call { dst, func, args } => write!(f, "{dst} = call @{func}({})", list(args)),
+            Inst::Struct { dst, name, fields } => write!(f, "{dst} = struct ${name}({})", list(fields)),
+            Inst::Field { dst, src, index } => write!(f, "{dst} = field {src}, {index}"),
+            Inst::SetField { dst, src, index, value } => {
+                write!(f, "{dst} = setfield {src}, {index}, {value}")
+            }
+            Inst::Load { dst, ptr } => write!(f, "{dst} = load {ptr}"),
+            Inst::Store { ptr, value } => write!(f, "store {ptr}, {value}"),
+            Inst::Addr { dst, src } => write!(f, "{dst} = addr {src}"),
+            Inst::FieldPtr { dst, ptr, index } => write!(f, "{dst} = fieldptr {ptr}, {index}"),
             Inst::Syscall { dst, args } => write!(f, "{dst} = syscall({})", list(args)),
             Inst::Print { src } => write!(f, "print {src}"),
         }

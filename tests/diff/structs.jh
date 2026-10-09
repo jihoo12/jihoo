@@ -1,0 +1,35 @@
+// Struct value semantics: copies are independent, nested updates rebuild.
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+struct Rect {
+    min: Point
+    max: Point
+    tag: u8
+}
+
+fn area(r: Rect) -> i64 {
+    return (r.max.x - r.min.x) * (r.max.y - r.min.y)
+}
+
+fn grow(r: Rect, by: i64) -> Rect {
+    r.min.x = r.min.x - by
+    r.min.y = r.min.y - by
+    r.max.x = r.max.x + by
+    r.max.y = r.max.y + by
+    r.tag = r.tag + 1
+    return r
+}
+
+fn entry() -> i64 {
+    let r = Rect { min: Point { x: 0, y: 0 }, max: Point { x: 3, y: 2 }, tag: 254 }
+    let g = grow(grow(r, 1), 1)
+    let copy = r
+    copy.max.x = 100
+    // r is unchanged by grow() and by changes to its copy.
+    return area(r) + area(g) * 10 + r.max.x * 1000 + (g.tag as i64) * 7
+
+}

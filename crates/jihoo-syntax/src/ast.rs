@@ -4,7 +4,22 @@ use crate::Pos;
 pub struct Program {
     /// File-level attributes such as `#![freestanding]`.
     pub attrs: Vec<(Pos, String)>,
+    pub structs: Vec<StructDecl>,
     pub funcs: Vec<FnDecl>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StructDecl {
+    pub pos: Pos,
+    pub name: String,
+    pub fields: Vec<FieldDecl>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FieldDecl {
+    pub pos: Pos,
+    pub name: String,
+    pub ty: TypeExpr,
 }
 
 #[derive(Debug, Clone)]
@@ -26,7 +41,15 @@ pub struct Param {
 #[derive(Debug, Clone)]
 pub struct TypeExpr {
     pub pos: Pos,
-    pub name: String,
+    pub kind: TypeExprKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum TypeExprKind {
+    /// `i64`, `bool`, `Point`, ...
+    Named(String),
+    /// `*T`
+    Ptr(Box<TypeExpr>),
 }
 
 #[derive(Debug, Clone)]
@@ -44,9 +67,10 @@ pub enum Stmt {
         ty: Option<TypeExpr>,
         value: Expr,
     },
+    /// `target = value`. The target is any expression; the checker makes sure it
+    /// is a place (variable, field, `*ptr`, `ptr[i]`).
     Assign {
-        pos: Pos,
-        name: String,
+        target: Expr,
         value: Expr,
     },
     Return {
@@ -81,6 +105,25 @@ pub enum ExprKind {
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Call(String, Vec<Expr>),
+    /// `Point { x: 1, y: 2 }`
+    StructLit(String, Vec<FieldInit>),
+    /// `base.field`
+    Field(Box<Expr>, String),
+    /// `ptr[index]`
+    Index(Box<Expr>, Box<Expr>),
+    /// `*ptr`
+    Deref(Box<Expr>),
+    /// `&place`
+    AddrOf(Box<Expr>),
+    /// `value as T`
+    Cast(Box<Expr>, TypeExpr),
+}
+
+#[derive(Debug, Clone)]
+pub struct FieldInit {
+    pub pos: Pos,
+    pub name: String,
+    pub value: Expr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -3,28 +3,79 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace jir {
 
 enum class Profile { Hosted, Freestanding };
 
-enum class Type { Unit, I64, Bool, Str, Ptr };
+struct Type {
+  enum Kind { Unit, Bool, Int, Str, Ptr, Struct } kind = Unit;
+  unsigned bits = 0;               // Int
+  bool is_signed = false;          // Int
+  std::shared_ptr<Type> pointee;   // Ptr
+  std::string name;                // Struct
+
+  static Type unit() { return {}; }
+  static Type integer(unsigned bits, bool is_signed) {
+    Type t;
+    t.kind = Int;
+    t.bits = bits;
+    t.is_signed = is_signed;
+    return t;
+  }
+  static Type pointer(Type to) {
+    Type t;
+    t.kind = Ptr;
+    t.pointee = std::make_shared<Type>(std::move(to));
+    return t;
+  }
+
+  bool operator==(const Type &o) const {
+    if (kind != o.kind) return false;
+    switch (kind) {
+      case Int: return bits == o.bits && is_signed == o.is_signed;
+      case Ptr: return *pointee == *o.pointee;
+      case Struct: return name == o.name;
+      default: return true;
+    }
+  }
+  bool operator!=(const Type &o) const { return !(*this == o); }
+
+  std::string str() const {
+    switch (kind) {
+      case Unit: return "unit";
+      case Bool: return "bool";
+      case Int: return (is_signed ? "i" : "u") + std::to_string(bits);
+      case Str: return "str";
+      case Ptr: return "*" + pointee->str();
+      case Struct: return "$" + name;
+    }
+    return "?";
+  }
+};
+
+struct StructDef {
+  std::string name;
+  std::vector<std::pair<std::string, Type>> fields;
+};
 
 enum class Op {
-  // instructions
   Const, Unit, Str, Copy, Neg, Not,
   Add, Sub, Mul, Div, Rem, Eq, Ne, Lt, Le, Gt, Ge,
-  Call, Syscall, Print,
+  Cast, Call, Struct, Field, SetField, Load, Store, Addr, FieldPtr,
+  Syscall, Print,
 };
 
 struct Inst {
   Op op;
-  uint32_t dst = 0;            // unused for Print
+  uint32_t dst = 0;            // unused for Store and Print
   std::vector<uint32_t> args;  // operand registers
-  int64_t imm = 0;             // Const
-  std::string text;            // Str bytes, or Call callee name
+  int64_t imm = 0;             // Const value, or field index
+  std::string text;            // Str bytes, Call callee, or Struct name
 };
 
 enum class TermKind { Jump, Branch, Ret, Unreachable };
@@ -43,13 +94,14 @@ struct Block {
 struct Function {
   std::string name;
   std::vector<Type> params;
-  Type ret = Type::Unit;
+  Type ret;
   std::vector<Type> regs;  // starts with the parameter types
   std::vector<Block> blocks;
 };
 
 struct Module {
   Profile profile = Profile::Hosted;
+  std::vector<StructDef> structs;
   std::vector<Function> funcs;
 };
 

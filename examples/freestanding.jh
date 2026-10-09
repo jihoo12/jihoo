@@ -4,7 +4,7 @@
 //
 // Returning from `_start` exits the process with that value.
 
-fn write(fd: i64, buf: ptr, len: i64) -> i64 {
+fn write(fd: i64, buf: *u8, len: i64) -> i64 {
     return syscall(1, fd, buf, len) // SYS_write on x86_64 Linux
 }
 

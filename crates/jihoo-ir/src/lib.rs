@@ -11,7 +11,7 @@ mod print;
 pub mod types;
 mod verify;
 
-pub use types::Type;
+pub use types::{IntTy, Type};
 pub use verify::verify;
 
 /// Language profile, selected with `#![freestanding]` at the top of a source file.
@@ -49,6 +49,7 @@ pub struct BlockId(pub u32);
 #[derive(Debug, Clone)]
 pub struct Module {
     pub profile: Profile,
+    pub structs: Vec<StructDef>,
     pub funcs: Vec<Function>,
 }
 
@@ -56,6 +57,17 @@ impl Module {
     pub fn func(&self, name: &str) -> Option<&Function> {
         self.funcs.iter().find(|f| f.name == name)
     }
+
+    pub fn struct_def(&self, name: &str) -> Option<&StructDef> {
+        self.structs.iter().find(|s| s.name == name)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StructDef {
+    pub name: String,
+    /// Field names are kept for readability; instructions address fields by index.
+    pub fields: Vec<(String, Type)>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,8 +83,8 @@ pub struct Function {
 }
 
 impl Function {
-    pub fn reg_type(&self, r: Reg) -> Type {
-        self.regs[r.0 as usize]
+    pub fn reg_type(&self, r: Reg) -> &Type {
+        &self.regs[r.0 as usize]
     }
 }
 
@@ -132,7 +144,8 @@ impl UnOp {
 
 #[derive(Debug, Clone)]
 pub enum Inst {
-    /// An `i64` or `bool` (0/1) constant, depending on the type of `dst`.
+    /// An integer or `bool` (0/1) constant, depending on the type of `dst`.
+    /// Integers are stored in canonical form (see [`IntTy::wrap`]).
     Const { dst: Reg, value: i64 },
     /// The unit value.
     Unit { dst: Reg },
@@ -141,7 +154,23 @@ pub enum Inst {
     Copy { dst: Reg, src: Reg },
     Unary { dst: Reg, op: UnOp, src: Reg },
     Binary { dst: Reg, op: BinOp, lhs: Reg, rhs: Reg },
+    /// Converts between integer types, bool to integer, and pointers.
+    Cast { dst: Reg, src: Reg },
     Call { dst: Reg, func: String, args: Vec<Reg> },
+    /// Builds a struct value from all of its fields, in declaration order.
+    Struct { dst: Reg, name: String, fields: Vec<Reg> },
+    /// Reads field `index` of a struct value.
+    Field { dst: Reg, src: Reg, index: u32 },
+    /// A copy of struct `src` with field `index` replaced by `value`.
+    SetField { dst: Reg, src: Reg, index: u32, value: Reg },
+    /// Freestanding only: `*ptr`.
+    Load { dst: Reg, ptr: Reg },
+    /// Freestanding only: `*ptr = value`.
+    Store { ptr: Reg, value: Reg },
+    /// Freestanding only: the address of register `src`.
+    Addr { dst: Reg, src: Reg },
+    /// Freestanding only: the address of field `index` of the struct `ptr` points to.
+    FieldPtr { dst: Reg, ptr: Reg, index: u32 },
     /// Freestanding only. First argument is the syscall number, then up to 6 more.
     Syscall { dst: Reg, args: Vec<Reg> },
     /// Hosted-only builtin.

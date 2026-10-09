@@ -1,7 +1,7 @@
 //! VM-managed heap with a simple stop-the-world mark & sweep collector.
 //!
-//! Only strings live here for now. The worklist-based mark phase is written so that
-//! objects with children (arrays, structs, closures) can be added later.
+//! Strings and structs live here. Struct objects are immutable: the VM implements
+//! struct value semantics by allocating a new object on every field update.
 
 use crate::Value;
 
@@ -11,18 +11,22 @@ pub struct GcRef(u32);
 #[derive(Debug)]
 enum Obj {
     Str(Box<str>),
+    Struct(Box<[Value]>),
 }
 
 impl Obj {
     fn size(&self) -> usize {
-        match self {
-            Obj::Str(s) => s.len() + std::mem::size_of::<Obj>(),
-        }
+        std::mem::size_of::<Obj>()
+            + match self {
+                Obj::Str(s) => s.len(),
+                Obj::Struct(fields) => std::mem::size_of_val(&**fields),
+            }
     }
 
-    fn children(&self, _out: &mut Vec<GcRef>) {
+    fn children(&self, out: &mut Vec<GcRef>) {
         match self {
             Obj::Str(_) => {}
+            Obj::Struct(fields) => out.extend(fields.iter().filter_map(Value::gc_ref)),
         }
     }
 }
@@ -73,6 +77,10 @@ impl Heap {
         self.alloc(Obj::Str(s.into()))
     }
 
+    pub fn alloc_struct(&mut self, fields: Vec<Value>) -> GcRef {
+        self.alloc(Obj::Struct(fields.into()))
+    }
+
     fn alloc(&mut self, obj: Obj) -> GcRef {
         self.live_bytes += obj.size();
         let slot = Slot { obj: Some(obj), marked: false };
@@ -91,19 +99,22 @@ impl Heap {
     pub fn str(&self, r: GcRef) -> &str {
         match &self.slots[r.0 as usize].obj {
             Some(Obj::Str(s)) => s,
+            Some(_) => panic!("{r:?} is not a string"),
+            None => panic!("use of freed object {r:?}"),
+        }
+    }
+
+    pub fn fields(&self, r: GcRef) -> &[Value] {
+        match &self.slots[r.0 as usize].obj {
+            Some(Obj::Struct(f)) => f,
+            Some(_) => panic!("{r:?} is not a struct"),
             None => panic!("use of freed object {r:?}"),
         }
     }
 
     pub fn collect<'a>(&mut self, roots: impl IntoIterator<Item = &'a Value>) {
         // Mark.
-        let mut work: Vec<GcRef> = roots
-            .into_iter()
-            .filter_map(|v| match v {
-                Value::Str(r) => Some(*r),
-                Value::Unit | Value::Int(_) | Value::Bool(_) => None,
-            })
-            .collect();
+        let mut work: Vec<GcRef> = roots.into_iter().filter_map(Value::gc_ref).collect();
         while let Some(r) = work.pop() {
             let slot = &mut self.slots[r.0 as usize];
             if slot.marked {

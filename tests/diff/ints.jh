@@ -1,0 +1,32 @@
+// Width, signedness and casts must agree between the VM and LLVM.
+
+
+fn entry() -> i64 {
+    let score = 0
+
+    let a: u8 = 250
+    a = a + 10                        // wraps to 4
+    if a == 4 { score = score + 1 }
+
+    let b: i8 = 127
+    b = b + 1                         // wraps to -128
+    if b == -128 { score = score + 2 }
+
+    let c: u64 = 0
+    c = c - 1                         // u64::MAX
+    if c / 2 > 4611686018427387903 { score = score + 4 }  // unsigned division
+    if c > 0 { score = score + 8 }                        // unsigned compare
+
+    let d: i16 = -7
+    if d / 2 == -3 && d % 2 == -1 { score = score + 16 }  // truncating division
+
+    let e: i32 = -1
+    if e as u8 == 255 && e as u64 > 0 && (e as u16) as i64 == 65535 { score = score + 32 }
+
+    let f: u16 = 65535
+    if (f as i8) == -1 && (f as i64) == 65535 { score = score + 64 }
+
+    if (300 as u8) as i64 == 44 && (true as i32) + 1 == 2 { score = score + 128 }
+
+    return score % 256 // 255 when everything holds
+}

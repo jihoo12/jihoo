@@ -10,7 +10,7 @@
 namespace jir {
 namespace {
 
-enum class TokKind { Word, Reg, Global, Int, Str, Punct };
+enum class TokKind { Word, Reg, Global, StructName, Int, Str, Punct };
 
 struct Tok {
   TokKind kind;
@@ -77,7 +77,7 @@ std::vector<Tok> tokenize(int line, const std::string &src) {
         }
       }
       out.push_back({TokKind::Str, s});
-    } else if (c == '%' || c == '@') {
+    } else if (c == '%' || c == '@' || c == '$') {
       size_t j = ++i;
       while (i < src.size() && ident_char(src[i])) i++;
       std::string name = src.substr(j, i - j);
@@ -85,7 +85,7 @@ std::vector<Tok> tokenize(int line, const std::string &src) {
       if (c == '%') {
         out.push_back({TokKind::Reg, name, number(line, name)});
       } else {
-        out.push_back({TokKind::Global, name});
+        out.push_back({c == '@' ? TokKind::Global : TokKind::StructName, name});
       }
     } else if (c == '-' && i + 1 < src.size() && src[i + 1] == '>') {
       out.push_back({TokKind::Punct, "->"});
@@ -98,7 +98,7 @@ std::vector<Tok> tokenize(int line, const std::string &src) {
       size_t j = i;
       while (i < src.size() && ident_char(src[i])) i++;
       out.push_back({TokKind::Word, src.substr(j, i - j)});
-    } else if (std::string("=,(){}:").find(c) != std::string::npos) {
+    } else if (std::string("=,(){}:*").find(c) != std::string::npos) {
       out.push_back({TokKind::Punct, std::string(1, c)});
       i++;
     } else {
@@ -145,16 +145,41 @@ struct Line {
     if (t.kind != TokKind::Word || t.text.rfind("bb", 0) != 0) fail(no, "expected a block like bb0");
     return uint32_t(number(no, t.text.substr(2)));
   }
+  // unit | bool | str | i8..i64 | u8..u64 | *T | $Name
   Type type() {
     const Tok &t = next("a type");
-    if (t.kind == TokKind::Word) {
-      if (t.text == "unit") return Type::Unit;
-      if (t.text == "i64") return Type::I64;
-      if (t.text == "bool") return Type::Bool;
-      if (t.text == "str") return Type::Str;
-      if (t.text == "ptr") return Type::Ptr;
+    if (t.kind == TokKind::Punct && t.text == "*") return Type::pointer(type());
+    if (t.kind == TokKind::StructName) {
+      Type s;
+      s.kind = Type::Struct;
+      s.name = t.text;
+      return s;
     }
-    fail(no, "expected a type (unit, i64, bool, str, ptr)");
+    if (t.kind == TokKind::Word) {
+      const std::string &w = t.text;
+      if (w == "unit") return Type::unit();
+      if (w == "bool") {
+        Type b;
+        b.kind = Type::Bool;
+        return b;
+      }
+      if (w == "str") {
+        Type s;
+        s.kind = Type::Str;
+        return s;
+      }
+      if (w.size() >= 2 && (w[0] == 'i' || w[0] == 'u')) {
+        std::string digits = w.substr(1);
+        if (digits == "8" || digits == "16" || digits == "32" || digits == "64")
+          return Type::integer(unsigned(std::stoi(digits)), w[0] == 'i');
+      }
+    }
+    fail(no, "expected a type");
+  }
+  uint32_t index() {
+    int64_t n = integer();
+    if (n < 0) fail(no, "field index must not be negative");
+    return uint32_t(n);
   }
   bool peek_punct(const char *p) const {
     return !done() && toks[i].kind == TokKind::Punct && toks[i].text == p;
@@ -217,6 +242,27 @@ Inst parse_assign(Line &l) {
   } else if (w == "syscall") {
     inst.op = Op::Syscall;
     inst.args = l.reg_list();
+  } else if (w == "cast" || w == "load" || w == "addr") {
+    inst.op = w == "cast" ? Op::Cast : w == "load" ? Op::Load : Op::Addr;
+    inst.args = {l.reg()};
+  } else if (w == "struct") {
+    const Tok &s = l.next("a struct");
+    if (s.kind != TokKind::StructName) fail(l.no, "expected a struct like $Name");
+    inst.op = Op::Struct;
+    inst.text = s.text;
+    inst.args = l.reg_list();
+  } else if (w == "field" || w == "fieldptr") {
+    inst.op = w == "field" ? Op::Field : Op::FieldPtr;
+    inst.args = {l.reg()};
+    l.punct(",");
+    inst.imm = l.index();
+  } else if (w == "setfield") {
+    inst.op = Op::SetField;
+    uint32_t src = l.reg();
+    l.punct(",");
+    inst.imm = l.index();
+    l.punct(",");
+    inst.args = {src, l.reg()};
   } else {
     fail(l.no, "unknown opcode `" + w + "`");
   }
@@ -254,6 +300,20 @@ Module parse(const std::string &text) {
         else if (p.text == "freestanding") m.profile = Profile::Freestanding;
         else fail(no, "unknown profile `" + p.text + "`");
         saw_profile = true;
+      } else if (first.kind == TokKind::Word && first.text == "struct") {
+        const Tok &name = l.next("a struct name");
+        if (name.kind != TokKind::StructName) fail(no, "expected a struct like $Name");
+        StructDef def{name.text, {}};
+        l.punct("{");
+        while (!l.peek_punct("}")) {
+          const Tok &field = l.next("a field name");
+          if (field.kind != TokKind::Word) fail(no, "expected a field name");
+          l.punct(":");
+          def.fields.emplace_back(field.text, l.type());
+          if (!l.peek_punct("}")) l.punct(",");
+        }
+        l.punct("}");
+        m.structs.push_back(std::move(def));
       } else if (first.kind == TokKind::Word && first.text == "fn") {
         if (!saw_version || !saw_profile) fail(no, "missing `jir 0` / `profile` header");
         const Tok &name = l.next("a function name");
@@ -275,7 +335,7 @@ Module parse(const std::string &text) {
         l.punct("{");
         need_regs = true;
       } else {
-        fail(no, "expected `jir`, `profile`, or `fn`");
+        fail(no, "expected `jir`, `profile`, `struct`, or `fn`");
       }
       l.end();
       continue;
@@ -310,10 +370,14 @@ Module parse(const std::string &text) {
       }
       const std::string &w = l.next("an instruction").text;
       Terminator &t = block->term;
-      if (w == "print") {
+      if (w == "print" || w == "store") {
         Inst inst{};
-        inst.op = Op::Print;
+        inst.op = w == "print" ? Op::Print : Op::Store;
         inst.args = {l.reg()};
+        if (inst.op == Op::Store) {
+          l.punct(",");
+          inst.args.push_back(l.reg());
+        }
         block->insts.push_back(inst);
         l.end();
         continue;

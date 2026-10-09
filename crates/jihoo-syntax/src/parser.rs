@@ -1,7 +1,12 @@
 //! Recursive descent parser.
 //!
-//! Semicolons are optional. A newline ends a statement, and a binary operator or a call's
-//! `(` at the start of the next line does not continue the expression (similar to Go).
+//! Semicolons are optional. A newline ends a statement, and a binary operator or a
+//! postfix `(`, `[`, `.` or `as` at the start of the next line does not continue the
+//! expression (similar to Go).
+//!
+//! As in Rust, struct literals are not allowed directly in `if`/`while` conditions,
+//! so that `if x == y { ... }` is not read as a literal `y { ... }`. Parenthesize
+//! them there.
 
 use crate::ast::*;
 use crate::lexer::{lex, Tok, Token};
@@ -9,12 +14,14 @@ use crate::{Error, Pos};
 
 pub fn parse(src: &str) -> Result<Program, Error> {
     let toks = lex(src)?;
-    Parser { toks, i: 0 }.program()
+    Parser { toks, i: 0, no_struct_lit: false }.program()
 }
 
 struct Parser {
     toks: Vec<Token>,
     i: usize,
+    /// Set while parsing an `if`/`while` condition.
+    no_struct_lit: bool,
 }
 
 type PResult<T> = Result<T, Error>;
@@ -71,6 +78,34 @@ impl Parser {
         }
     }
 
+    /// True if the current token is `t` on the same line as the previous token.
+    fn same_line(&self, t: &Tok) -> bool {
+        self.peek() == t && !self.cur().newline_before
+    }
+
+    /// Runs `f` with struct literals allowed or not, restoring the old setting.
+    fn with_struct_lit<T>(&mut self, allowed: bool, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+        let saved = std::mem::replace(&mut self.no_struct_lit, !allowed);
+        let r = f(self);
+        self.no_struct_lit = saved;
+        r
+    }
+
+    /// Parses `{ item, item ... }` where items are separated by `,` or newlines.
+    fn braced_list<T>(&mut self, mut item: impl FnMut(&mut Self) -> PResult<T>) -> PResult<Vec<T>> {
+        self.expect(&Tok::LBrace, "`{`")?;
+        let mut items = Vec::new();
+        loop {
+            if self.eat(&Tok::RBrace) {
+                return Ok(items);
+            }
+            items.push(item(self)?);
+            if !self.eat(&Tok::Comma) && *self.peek() != Tok::RBrace && !self.cur().newline_before {
+                return Err(self.unexpected("`,` or `}`"));
+            }
+        }
+    }
+
     // ---- items ----
 
     fn program(&mut self) -> PResult<Program> {
@@ -79,17 +114,31 @@ impl Parser {
             let pos = self.bump().pos;
             attrs.push((pos, name));
         }
+        let mut structs = Vec::new();
         let mut funcs = Vec::new();
         while *self.peek() != Tok::Eof {
             match self.peek() {
                 Tok::Fn => funcs.push(self.fn_decl()?),
+                Tok::Struct => structs.push(self.struct_decl()?),
                 Tok::InnerAttr(_) => {
                     return Err(Error::new(self.pos(), "`#![...]` must come before any item"))
                 }
-                _ => return Err(self.unexpected("`fn`")),
+                _ => return Err(self.unexpected("`fn` or `struct`")),
             }
         }
-        Ok(Program { attrs, funcs })
+        Ok(Program { attrs, structs, funcs })
+    }
+
+    fn struct_decl(&mut self) -> PResult<StructDecl> {
+        let pos = self.expect(&Tok::Struct, "`struct`")?.pos;
+        let (_, name) = self.ident("struct name")?;
+        let fields = self.braced_list(|p| {
+            let (pos, name) = p.ident("field name")?;
+            p.expect(&Tok::Colon, "`:` and a field type")?;
+            let ty = p.type_expr()?;
+            Ok(FieldDecl { pos, name, ty })
+        })?;
+        Ok(StructDecl { pos, name, fields })
     }
 
     fn fn_decl(&mut self) -> PResult<FnDecl> {
@@ -113,27 +162,34 @@ impl Parser {
     }
 
     fn type_expr(&mut self) -> PResult<TypeExpr> {
+        let pos = self.pos();
+        if self.eat(&Tok::Star) {
+            let inner = self.type_expr()?;
+            return Ok(TypeExpr { pos, kind: TypeExprKind::Ptr(Box::new(inner)) });
+        }
         let (pos, name) = self.ident("a type")?;
-        Ok(TypeExpr { pos, name })
+        Ok(TypeExpr { pos, kind: TypeExprKind::Named(name) })
     }
 
     // ---- statements ----
 
     fn block(&mut self) -> PResult<Block> {
         self.expect(&Tok::LBrace, "`{`")?;
-        let mut stmts = Vec::new();
-        loop {
-            while self.eat(&Tok::Semi) {}
-            if *self.peek() == Tok::RBrace {
-                let end = self.bump().pos;
-                return Ok(Block { stmts, end });
+        self.with_struct_lit(true, |p| {
+            let mut stmts = Vec::new();
+            loop {
+                while p.eat(&Tok::Semi) {}
+                if *p.peek() == Tok::RBrace {
+                    let end = p.bump().pos;
+                    return Ok(Block { stmts, end });
+                }
+                if *p.peek() == Tok::Eof {
+                    return Err(p.unexpected("`}`"));
+                }
+                stmts.push(p.stmt()?);
+                p.end_of_stmt()?;
             }
-            if *self.peek() == Tok::Eof {
-                return Err(self.unexpected("`}`"));
-            }
-            stmts.push(self.stmt()?);
-            self.end_of_stmt()?;
-        }
+        })
     }
 
     /// A statement must be followed by `;`, `}`, or a newline.
@@ -143,6 +199,10 @@ impl Parser {
         } else {
             Err(self.unexpected("end of statement"))
         }
+    }
+
+    fn cond(&mut self) -> PResult<Expr> {
+        self.with_struct_lit(false, |p| p.expr())
     }
 
     fn stmt(&mut self) -> PResult<Stmt> {
@@ -165,23 +225,26 @@ impl Parser {
             Tok::If => self.if_stmt(),
             Tok::While => {
                 self.bump();
-                let cond = self.expr()?;
+                let cond = self.cond()?;
                 let body = self.block()?;
                 Ok(Stmt::While { cond, body })
             }
-            Tok::Ident(_) if self.toks[self.i + 1].tok == Tok::Assign => {
-                let (pos, name) = self.ident("variable name")?;
-                self.bump(); // `=`
-                let value = self.expr()?;
-                Ok(Stmt::Assign { pos, name, value })
+            _ => {
+                let e = self.expr()?;
+                if self.same_line(&Tok::Assign) {
+                    self.bump();
+                    let value = self.expr()?;
+                    Ok(Stmt::Assign { target: e, value })
+                } else {
+                    Ok(Stmt::Expr(e))
+                }
             }
-            _ => Ok(Stmt::Expr(self.expr()?)),
         }
     }
 
     fn if_stmt(&mut self) -> PResult<Stmt> {
         self.expect(&Tok::If, "`if`")?;
-        let cond = self.expr()?;
+        let cond = self.cond()?;
         let then = self.block()?;
         let els = if self.eat(&Tok::Else) {
             if *self.peek() == Tok::If {
@@ -204,7 +267,7 @@ impl Parser {
     }
 
     fn binary(&mut self, min_prec: u8) -> PResult<Expr> {
-        let mut lhs = self.unary()?;
+        let mut lhs = self.cast()?;
         loop {
             if self.cur().newline_before {
                 break;
@@ -220,15 +283,47 @@ impl Parser {
         Ok(lhs)
     }
 
+    /// `unary (as T)*` — binds tighter than any binary operator, like in Rust.
+    fn cast(&mut self) -> PResult<Expr> {
+        let mut e = self.unary()?;
+        while self.same_line(&Tok::As) {
+            let pos = self.bump().pos;
+            let ty = self.type_expr()?;
+            e = Expr { pos, kind: ExprKind::Cast(Box::new(e), ty) };
+        }
+        Ok(e)
+    }
+
     fn unary(&mut self) -> PResult<Expr> {
-        let op = match self.peek() {
-            Tok::Minus => UnOp::Neg,
-            Tok::Bang => UnOp::Not,
-            _ => return self.primary(),
+        let pos = self.pos();
+        let wrap: fn(Box<Expr>) -> ExprKind = match self.peek() {
+            Tok::Minus => |e| ExprKind::Unary(UnOp::Neg, e),
+            Tok::Bang => |e| ExprKind::Unary(UnOp::Not, e),
+            Tok::Star => ExprKind::Deref,
+            Tok::Amp => ExprKind::AddrOf,
+            _ => return self.postfix(),
         };
-        let pos = self.bump().pos;
+        self.bump();
         let inner = self.unary()?;
-        Ok(Expr { pos, kind: ExprKind::Unary(op, Box::new(inner)) })
+        Ok(Expr { pos, kind: wrap(Box::new(inner)) })
+    }
+
+    fn postfix(&mut self) -> PResult<Expr> {
+        let mut e = self.primary()?;
+        loop {
+            if self.same_line(&Tok::Dot) {
+                let pos = self.bump().pos;
+                let (_, field) = self.ident("a field name")?;
+                e = Expr { pos, kind: ExprKind::Field(Box::new(e), field) };
+            } else if self.same_line(&Tok::LBracket) {
+                let pos = self.bump().pos;
+                let index = self.with_struct_lit(true, |p| p.expr())?;
+                self.expect(&Tok::RBracket, "`]`")?;
+                e = Expr { pos, kind: ExprKind::Index(Box::new(e), Box::new(index)) };
+            } else {
+                return Ok(e);
+            }
+        }
     }
 
     fn primary(&mut self) -> PResult<Expr> {
@@ -252,24 +347,37 @@ impl Parser {
             }
             Tok::Ident(name) => {
                 self.bump();
-                if *self.peek() == Tok::LParen && !self.cur().newline_before {
+                if self.same_line(&Tok::LParen) {
                     self.bump();
-                    let mut args = Vec::new();
-                    while *self.peek() != Tok::RParen {
-                        args.push(self.expr()?);
-                        if !self.eat(&Tok::Comma) {
-                            break;
+                    let args = self.with_struct_lit(true, |p| {
+                        let mut args = Vec::new();
+                        while *p.peek() != Tok::RParen {
+                            args.push(p.expr()?);
+                            if !p.eat(&Tok::Comma) {
+                                break;
+                            }
                         }
-                    }
+                        Ok(args)
+                    })?;
                     self.expect(&Tok::RParen, "`)`")?;
                     ExprKind::Call(name, args)
+                } else if self.same_line(&Tok::LBrace) && !self.no_struct_lit {
+                    let fields = self.with_struct_lit(true, |p| {
+                        p.braced_list(|p| {
+                            let (pos, name) = p.ident("a field name")?;
+                            p.expect(&Tok::Colon, "`:`")?;
+                            let value = p.expr()?;
+                            Ok(FieldInit { pos, name, value })
+                        })
+                    })?;
+                    ExprKind::StructLit(name, fields)
                 } else {
                     ExprKind::Var(name)
                 }
             }
             Tok::LParen => {
                 self.bump();
-                let e = self.expr()?;
+                let e = self.with_struct_lit(true, |p| p.expr())?;
                 self.expect(&Tok::RParen, "`)`")?;
                 return Ok(e);
             }
@@ -319,10 +427,15 @@ fn punct(t: &Tok) -> &'static str {
         Tok::While => "while",
         Tok::True => "true",
         Tok::False => "false",
+        Tok::Struct => "struct",
+        Tok::As => "as",
         Tok::LParen => "(",
         Tok::RParen => ")",
         Tok::LBrace => "{",
         Tok::RBrace => "}",
+        Tok::LBracket => "[",
+        Tok::RBracket => "]",
+        Tok::Dot => ".",
         Tok::Comma => ",",
         Tok::Colon => ":",
         Tok::Semi => ";",
@@ -340,15 +453,20 @@ fn punct(t: &Tok) -> &'static str {
         Tok::Slash => "/",
         Tok::Percent => "%",
         Tok::Bang => "!",
+        Tok::Amp => "&",
         Tok::AndAnd => "&&",
         Tok::OrOr => "||",
-        _ => "?",
+        Tok::Ident(_) | Tok::Int(_) | Tok::Str(_) | Tok::InnerAttr(_) | Tok::Eof => "?",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn body(src: &str) -> Vec<Stmt> {
+        parse(&format!("fn main() {{\n{src}\n}}")).unwrap().funcs.remove(0).body.stmts
+    }
 
     #[test]
     fn parses_function_with_control_flow() {
@@ -363,9 +481,9 @@ mod tests {
 
     #[test]
     fn newline_ends_expression() {
-        // `-1` does not continue `x` from the previous line.
-        let p = parse("fn main() {\n  let x = 1\n  -1\n}").unwrap();
-        assert_eq!(p.funcs[0].body.stmts.len(), 2);
+        // `-1` does not continue `x` from the previous line, and `*p` is a new statement.
+        assert_eq!(body("let x = 1\n-1").len(), 2);
+        assert_eq!(body("let x = 1\n*p = 2").len(), 2);
     }
 
     #[test]
@@ -378,5 +496,35 @@ mod tests {
     fn reports_position() {
         let err = parse("fn main() {\n  let = 3\n}").unwrap_err();
         assert_eq!(err.pos, Pos { line: 2, col: 7 });
+    }
+
+    #[test]
+    fn structs() {
+        let p = parse("struct P {\n  x: i64\n  next: *P,\n}\nfn main() { let p = P { x: 1, next: n } }")
+            .unwrap();
+        assert_eq!(p.structs[0].fields.len(), 2);
+        assert!(matches!(p.structs[0].fields[1].ty.kind, TypeExprKind::Ptr(_)));
+        let Stmt::Let { value, .. } = &p.funcs[0].body.stmts[0] else { panic!() };
+        assert!(matches!(&value.kind, ExprKind::StructLit(name, f) if name == "P" && f.len() == 2));
+    }
+
+    #[test]
+    fn no_struct_literal_in_conditions() {
+        let s = body("if x == y { }");
+        let Stmt::If { cond, then, .. } = &s[0] else { panic!() };
+        assert!(matches!(cond.kind, ExprKind::Binary(BinOp::Eq, _, _)));
+        assert!(then.stmts.is_empty());
+    }
+
+    #[test]
+    fn postfix_and_prefix() {
+        let s = body("*p.next[2] = &q.x as *u8");
+        let Stmt::Assign { target, value } = &s[0] else { panic!() };
+        // `*` applies to the whole postfix chain.
+        let ExprKind::Deref(inner) = &target.kind else { panic!() };
+        assert!(matches!(inner.kind, ExprKind::Index(_, _)));
+        // Prefix operators bind tighter than `as`.
+        let ExprKind::Cast(inner, _) = &value.kind else { panic!() };
+        assert!(matches!(inner.kind, ExprKind::AddrOf(_)));
     }
 }

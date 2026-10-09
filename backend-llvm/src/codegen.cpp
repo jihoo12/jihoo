@@ -1,10 +1,11 @@
 // JIR -> LLVM IR.
 //
 // Every JIR register becomes an alloca of its type in the entry block; mem2reg
-// (part of the optimization pipeline) turns them back into SSA values.
+// (part of the optimization pipeline) turns them back into SSA values. `addr %r`
+// is simply the address of that alloca, which mem2reg then leaves in memory.
 //
-// Type mapping: i64 -> i64, bool -> i1, ptr -> ptr, unit -> {} (empty struct).
-// `str` is a GC type and never reaches this backend.
+// Type mapping: iN/uN -> iN, bool -> i1, *T -> ptr, unit -> {} (empty struct),
+// $S -> a named LLVM struct. `str` is a GC type and never reaches this backend.
 
 #include "codegen.h"
 
@@ -25,22 +26,65 @@ namespace {
   throw CodegenError("@" + fn + ": " + msg);
 }
 
-Type *lower_type(LLVMContext &ctx, jir::Type t) {
-  switch (t) {
-    case jir::Type::Unit: return StructType::get(ctx);
-    case jir::Type::I64: return Type::getInt64Ty(ctx);
-    case jir::Type::Bool: return Type::getInt1Ty(ctx);
-    case jir::Type::Ptr: return PointerType::get(ctx, 0);
-    case jir::Type::Str: break;
+// Module-wide type information.
+class Types {
+ public:
+  Types(LLVMContext &ctx, const jir::Module &m) : ctx_(ctx) {
+    // Create all structs first so fields can refer to any of them through pointers.
+    for (const auto &s : m.structs) {
+      if (structs_.count(s.name)) throw CodegenError("duplicate struct $" + s.name);
+      structs_[s.name] = {StructType::create(ctx, "jihoo." + s.name), &s};
+    }
+    for (const auto &s : m.structs) {
+      std::vector<Type *> fields;
+      for (const auto &f : s.fields) fields.push_back(lower(f.second));
+      structs_[s.name].ty->setBody(fields);
+    }
   }
-  throw CodegenError("type `str` is garbage collected and cannot be compiled natively");
-}
 
-FunctionType *lower_sig(LLVMContext &ctx, const jir::Function &f) {
-  std::vector<Type *> params;
-  for (auto t : f.params) params.push_back(lower_type(ctx, t));
-  return FunctionType::get(lower_type(ctx, f.ret), params, false);
-}
+  Type *lower(const jir::Type &t) const {
+    switch (t.kind) {
+      case jir::Type::Unit: return StructType::get(ctx_);
+      case jir::Type::Bool: return Type::getInt1Ty(ctx_);
+      case jir::Type::Int: return Type::getIntNTy(ctx_, t.bits);
+      case jir::Type::Ptr: return PointerType::get(ctx_, 0);
+      case jir::Type::Struct: return info(t.name).ty;
+      case jir::Type::Str: break;
+    }
+    throw CodegenError("type `str` is garbage collected and cannot be compiled natively");
+  }
+
+  FunctionType *signature(const jir::Function &f) const {
+    std::vector<Type *> params;
+    for (const auto &t : f.params) params.push_back(lower(t));
+    return FunctionType::get(lower(f.ret), params, false);
+  }
+
+  // JIR type of field `index` of struct type `t`.
+  const jir::Type &field(const jir::Type &t, int64_t index) const {
+    if (t.kind != jir::Type::Struct) throw CodegenError(t.str() + " is not a struct");
+    const auto &fields = info(t.name).def->fields;
+    if (index < 0 || size_t(index) >= fields.size())
+      throw CodegenError(t.str() + " has no field " + std::to_string(index));
+    return fields[index].second;
+  }
+
+  StructType *struct_type(const std::string &name) const { return info(name).ty; }
+
+ private:
+  struct Info {
+    StructType *ty;
+    const jir::StructDef *def;
+  };
+  LLVMContext &ctx_;
+  std::unordered_map<std::string, Info> structs_;
+
+  const Info &info(const std::string &name) const {
+    auto it = structs_.find(name);
+    if (it == structs_.end()) throw CodegenError("unknown struct $" + name);
+    return it->second;
+  }
+};
 
 // Builds the inline asm for a raw Linux syscall. args[0] is the syscall number;
 // all operands are i64.
@@ -75,9 +119,9 @@ InlineAsm *syscall_asm(LLVMContext &ctx, const Triple &triple, size_t nargs) {
 
 class FnGen {
  public:
-  FnGen(const jir::Function &f, Function *llfn, Module &mod,
+  FnGen(const jir::Function &f, Function *llfn, Module &mod, const Types &types,
         const std::unordered_map<std::string, Function *> &fns, const Triple &triple)
-      : f_(f), fn_(llfn), mod_(mod), fns_(fns), triple_(triple),
+      : f_(f), fn_(llfn), mod_(mod), types_(types), fns_(fns), triple_(triple),
         ctx_(mod.getContext()), b_(ctx_), i64_(Type::getInt64Ty(ctx_)) {}
 
   void run() {
@@ -87,7 +131,7 @@ class FnGen {
 
     b_.SetInsertPoint(entry);
     for (size_t r = 0; r < f_.regs.size(); r++)
-      slots_.push_back(b_.CreateAlloca(lower_type(ctx_, f_.regs[r]), nullptr, "r" + std::to_string(r)));
+      slots_.push_back(b_.CreateAlloca(types_.lower(f_.regs[r]), nullptr, "r" + std::to_string(r)));
     for (size_t p = 0; p < f_.params.size(); p++) b_.CreateStore(fn_->getArg(p), slots_[p]);
     b_.CreateBr(blocks_[0]);
 
@@ -102,6 +146,7 @@ class FnGen {
   const jir::Function &f_;
   Function *fn_;
   Module &mod_;
+  const Types &types_;
   const std::unordered_map<std::string, Function *> &fns_;
   const Triple &triple_;
   LLVMContext &ctx_;
@@ -114,7 +159,7 @@ class FnGen {
     if (r >= slots_.size()) fail(f_.name, "register %" + std::to_string(r) + " out of range");
     return slots_[r];
   }
-  jir::Type type(uint32_t r) {
+  const jir::Type &type(uint32_t r) {
     slot(r);
     return f_.regs[r];
   }
@@ -130,33 +175,62 @@ class FnGen {
   }
   Value *unit() { return ConstantStruct::get(StructType::get(ctx_), {}); }
 
-  // Comparisons are signed for i64 and unsigned for pointers.
-  Value *compare(jir::Op op, Value *a, Value *b, bool is_ptr) {
+  // The type `*T` points to, as an LLVM type.
+  Type *pointee(uint32_t r) {
+    const jir::Type &t = type(r);
+    if (t.kind != jir::Type::Ptr) fail(f_.name, "%" + std::to_string(r) + " is not a pointer");
+    return types_.lower(*t.pointee);
+  }
+
+  // Integers keep their signedness in JIR; LLVM wants it on each operation.
+  bool is_signed(uint32_t r) {
+    const jir::Type &t = type(r);
+    return t.kind == jir::Type::Int && t.is_signed;
+  }
+
+  Value *compare(jir::Op op, Value *a, Value *b, bool is_signed) {
     using P = CmpInst::Predicate;
     using jir::Op;
     P pred;
     switch (op) {
       case Op::Eq: pred = P::ICMP_EQ; break;
       case Op::Ne: pred = P::ICMP_NE; break;
-      case Op::Lt: pred = is_ptr ? P::ICMP_ULT : P::ICMP_SLT; break;
-      case Op::Le: pred = is_ptr ? P::ICMP_ULE : P::ICMP_SLE; break;
-      case Op::Gt: pred = is_ptr ? P::ICMP_UGT : P::ICMP_SGT; break;
-      default: pred = is_ptr ? P::ICMP_UGE : P::ICMP_SGE; break;
+      case Op::Lt: pred = is_signed ? P::ICMP_SLT : P::ICMP_ULT; break;
+      case Op::Le: pred = is_signed ? P::ICMP_SLE : P::ICMP_ULE; break;
+      case Op::Gt: pred = is_signed ? P::ICMP_SGT : P::ICMP_UGT; break;
+      default: pred = is_signed ? P::ICMP_SGE : P::ICMP_UGE; break;
     }
     return b_.CreateICmp(pred, a, b);
+  }
+
+  Value *cast(uint32_t src, const jir::Type &to) {
+    const jir::Type &from = type(src);
+    Value *v = load(src);
+    Type *ty = types_.lower(to);
+    if (from == to) return v;
+    if (to.kind == jir::Type::Int) {
+      if (from.kind == jir::Type::Ptr) return b_.CreatePtrToInt(v, ty);
+      if (from.kind == jir::Type::Int || from.kind == jir::Type::Bool)
+        return b_.CreateIntCast(v, ty, from.kind == jir::Type::Int && from.is_signed);
+    }
+    if (to.kind == jir::Type::Ptr) {
+      if (from.kind == jir::Type::Ptr) return v;  // pointers are untyped in LLVM
+      if (from.kind == jir::Type::Int) return b_.CreateIntToPtr(v, ty);
+    }
+    fail(f_.name, "cannot cast " + from.str() + " to " + to.str());
   }
 
   void emit(const jir::Inst &inst) {
     using jir::Op;
     auto arg = [&](size_t i) { return load(inst.args.at(i)); };
-    auto arg_is_ptr = [&](size_t i) { return type(inst.args.at(i)) == jir::Type::Ptr; };
+    auto arg_reg = [&](size_t i) { return inst.args.at(i); };
     switch (inst.op) {
-      case Op::Const:
-        if (type(inst.dst) == jir::Type::Bool)
-          store(inst.dst, b_.getInt1(inst.imm != 0));
-        else
-          store(inst.dst, b_.getInt64(inst.imm));
+      case Op::Const: {
+        Type *ty = slot(inst.dst)->getAllocatedType();
+        if (!ty->isIntegerTy()) fail(f_.name, "`const` needs an integer or bool register");
+        store(inst.dst, ConstantInt::get(ty, uint64_t(inst.imm), /*isSigned=*/true));
         return;
+      }
       case Op::Unit: store(inst.dst, unit()); return;
       case Op::Str:
         // Freestanding strings are addresses of NUL-terminated constant bytes.
@@ -166,19 +240,29 @@ class FnGen {
       case Op::Neg: store(inst.dst, b_.CreateNeg(arg(0))); return;
       case Op::Not: store(inst.dst, b_.CreateNot(arg(0))); return;
       case Op::Add:
-        store(inst.dst, arg_is_ptr(0) ? b_.CreatePtrAdd(arg(0), arg(1)) : b_.CreateAdd(arg(0), arg(1)));
+        if (type(arg_reg(0)).kind == jir::Type::Ptr)
+          store(inst.dst, b_.CreateGEP(pointee(arg_reg(0)), arg(0), {arg(1)}));
+        else
+          store(inst.dst, b_.CreateAdd(arg(0), arg(1)));
         return;
       case Op::Sub:
-        store(inst.dst, arg_is_ptr(0) ? b_.CreatePtrAdd(arg(0), b_.CreateNeg(arg(1)))
-                                      : b_.CreateSub(arg(0), arg(1)));
+        if (type(arg_reg(0)).kind == jir::Type::Ptr)
+          store(inst.dst, b_.CreateGEP(pointee(arg_reg(0)), arg(0), {b_.CreateNeg(arg(1))}));
+        else
+          store(inst.dst, b_.CreateSub(arg(0), arg(1)));
         return;
       case Op::Mul: store(inst.dst, b_.CreateMul(arg(0), arg(1))); return;
       // TODO: division by zero is undefined behaviour here; the VM traps instead.
-      case Op::Div: store(inst.dst, b_.CreateSDiv(arg(0), arg(1))); return;
-      case Op::Rem: store(inst.dst, b_.CreateSRem(arg(0), arg(1))); return;
-      case Op::Eq: case Op::Ne: case Op::Lt: case Op::Le: case Op::Gt: case Op::Ge:
-        store(inst.dst, compare(inst.op, arg(0), arg(1), arg_is_ptr(0)));
+      case Op::Div:
+        store(inst.dst, is_signed(arg_reg(0)) ? b_.CreateSDiv(arg(0), arg(1)) : b_.CreateUDiv(arg(0), arg(1)));
         return;
+      case Op::Rem:
+        store(inst.dst, is_signed(arg_reg(0)) ? b_.CreateSRem(arg(0), arg(1)) : b_.CreateURem(arg(0), arg(1)));
+        return;
+      case Op::Eq: case Op::Ne: case Op::Lt: case Op::Le: case Op::Gt: case Op::Ge:
+        store(inst.dst, compare(inst.op, arg(0), arg(1), is_signed(arg_reg(0))));
+        return;
+      case Op::Cast: store(inst.dst, cast(arg_reg(0), type(inst.dst))); return;
       case Op::Call: {
         auto it = fns_.find(inst.text);
         if (it == fns_.end()) fail(f_.name, "call to unknown function @" + inst.text);
@@ -194,13 +278,44 @@ class FnGen {
         store(inst.dst, b_.CreateCall(callee, args));
         return;
       }
+      case Op::Struct: {
+        Value *v = PoisonValue::get(types_.struct_type(inst.text));
+        for (unsigned i = 0; i < inst.args.size(); i++) v = b_.CreateInsertValue(v, arg(i), {i});
+        store(inst.dst, v);
+        return;
+      }
+      case Op::Field:
+        types_.field(type(arg_reg(0)), inst.imm);  // bounds check
+        store(inst.dst, b_.CreateExtractValue(arg(0), {unsigned(inst.imm)}));
+        return;
+      case Op::SetField:
+        types_.field(type(arg_reg(0)), inst.imm);
+        store(inst.dst, b_.CreateInsertValue(arg(0), arg(1), {unsigned(inst.imm)}));
+        return;
+      case Op::Load: store(inst.dst, b_.CreateLoad(pointee(arg_reg(0)), arg(0))); return;
+      case Op::Store: {
+        Value *v = arg(1);
+        if (v->getType() != pointee(arg_reg(0))) fail(f_.name, "stored value has the wrong type");
+        b_.CreateStore(v, arg(0));
+        return;
+      }
+      case Op::Addr: store(inst.dst, slot(arg_reg(0))); return;
+      case Op::FieldPtr: {
+        const jir::Type &t = type(arg_reg(0));
+        if (t.kind != jir::Type::Ptr) fail(f_.name, "`fieldptr` needs a pointer");
+        types_.field(*t.pointee, inst.imm);
+        store(inst.dst, b_.CreateStructGEP(types_.lower(*t.pointee), arg(0), unsigned(inst.imm)));
+        return;
+      }
       case Op::Syscall: {
         if (inst.args.empty() || inst.args.size() > 7) fail(f_.name, "syscall takes 1 to 7 arguments");
         std::vector<Value *> args;
         for (size_t i = 0; i < inst.args.size(); i++) {
+          const jir::Type &t = type(arg_reg(i));
           Value *v = arg(i);
-          if (v->getType()->isPointerTy()) v = b_.CreatePtrToInt(v, i64_);
-          if (v->getType() != i64_) fail(f_.name, "syscall arguments must be i64 or ptr");
+          if (t.kind == jir::Type::Ptr) v = b_.CreatePtrToInt(v, i64_);
+          else if (t.kind == jir::Type::Int) v = b_.CreateIntCast(v, i64_, t.is_signed);
+          else fail(f_.name, "syscall arguments must be integers or pointers");
           args.push_back(v);
         }
         store(inst.dst, b_.CreateCall(syscall_asm(ctx_, triple_, args.size()), args));
@@ -214,7 +329,7 @@ class FnGen {
     switch (t.kind) {
       case jir::TermKind::Jump: b_.CreateBr(block(t.target)); return;
       case jir::TermKind::Branch:
-        if (type(t.reg) != jir::Type::Bool) fail(f_.name, "branch condition must be bool");
+        if (type(t.reg).kind != jir::Type::Bool) fail(f_.name, "branch condition must be bool");
         b_.CreateCondBr(load(t.reg), block(t.target), block(t.els));
         return;
       case jir::TermKind::Unreachable: b_.CreateUnreachable(); return;
@@ -222,7 +337,7 @@ class FnGen {
         if (type(t.reg) != f_.ret) fail(f_.name, "returned value has the wrong type");
         if (f_.name == "_start") {
           // There is nothing to return to: returning from `_start` means exit(value).
-          Value *code = f_.ret == jir::Type::I64 ? load(t.reg) : b_.getInt64(0);
+          Value *code = f_.ret.kind == jir::Type::Int ? load(t.reg) : b_.getInt64(0);
           int64_t exit_nr = triple_.getArch() == Triple::aarch64 ? 93 : 60;
           b_.CreateCall(syscall_asm(ctx_, triple_, 2), {b_.getInt64(exit_nr), code});
           b_.CreateUnreachable();
@@ -241,13 +356,14 @@ std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, co
     throw CodegenError("only freestanding modules can be compiled natively (for now)");
 
   auto mod = std::make_unique<Module>("jihoo", ctx);
+  Types types(ctx, m);
 
   // Declare everything first so calls can refer to any function.
   std::unordered_map<std::string, Function *> fns;
   for (const auto &f : m.funcs) {
     if (fns.count(f.name)) throw CodegenError("duplicate function @" + f.name);
     bool is_entry = f.name == "_start";
-    auto *fn = Function::Create(lower_sig(ctx, f),
+    auto *fn = Function::Create(types.signature(f),
                                 is_entry ? GlobalValue::ExternalLinkage : GlobalValue::InternalLinkage,
                                 f.name, mod.get());
     // No libc to fall back on: never turn loops into memcpy/memset calls.
@@ -264,7 +380,7 @@ std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, co
   if (entry == fns.end()) throw CodegenError("freestanding module needs @_start");
   if (entry->second->arg_size() != 0) throw CodegenError("@_start must take no parameters");
 
-  for (const auto &f : m.funcs) FnGen(f, fns[f.name], *mod, fns, triple).run();
+  for (const auto &f : m.funcs) FnGen(f, fns[f.name], *mod, types, fns, triple).run();
 
   std::string err;
   raw_string_ostream os(err);

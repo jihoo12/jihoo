@@ -1,0 +1,90 @@
+#![freestanding]
+// Pointers, structs and sized integers, with no libc and no GC.
+//   jihoo build examples/pointers.jh -o out/pointers && ./out/pointers
+
+struct Buf {
+    data: *u8
+    len: i64
+}
+
+struct Node {
+    value: i64
+    next: *Node
+}
+
+// 32 bytes of stack space (there are no arrays yet).
+struct Scratch {
+    a: i64
+    b: i64
+    c: i64
+    d: i64
+}
+
+fn strlen(s: *u8) -> i64 {
+    let n = 0
+    while s[n] != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn write(s: *u8, len: i64) {
+    syscall(1, 1, s, len) // SYS_write on x86_64 Linux
+}
+
+fn push_byte(buf: *Buf, c: u8) {
+    buf.data[buf.len] = c
+    buf.len = buf.len + 1
+}
+
+fn push_str(buf: *Buf, s: *u8) {
+    let i = 0
+    while s[i] != 0 {
+        push_byte(buf, s[i])
+        i = i + 1
+    }
+}
+
+// Appends the decimal digits of `n` (n >= 0).
+fn push_int(buf: *Buf, n: i64) {
+    let digits = 1
+    let tmp = n / 10
+    while tmp > 0 {
+        digits = digits + 1
+        tmp = tmp / 10
+    }
+    let i = buf.len + digits - 1
+    while i >= buf.len {
+        buf.data[i] = 48 + (n % 10) as u8 // '0' + digit
+        n = n / 10
+        i = i - 1
+    }
+    buf.len = buf.len + digits
+}
+
+fn sum(list: *Node) -> i64 {
+    let total = 0
+    while list != 0 as *Node {
+        total = total + list.value
+        list = list.next
+    }
+    return total
+}
+
+fn _start() -> i64 {
+    // A linked list on the stack: c -> b -> a.
+    let a = Node { value: 10, next: 0 as *Node }
+    let b = Node { value: 20, next: &a }
+    let c = Node { value: 12, next: &b }
+    let s = sum(&c)
+
+    // Format the message into a stack buffer and write it out in one syscall.
+    let storage = Scratch { a: 0, b: 0, c: 0, d: 0 }
+    let out = Buf { data: &storage as *u8, len: 0 }
+    push_str(&out, "sum = ")
+    push_int(&out, s)
+    push_byte(&out, 10) // '\n'
+    write(out.data, out.len)
+
+    return s
+}

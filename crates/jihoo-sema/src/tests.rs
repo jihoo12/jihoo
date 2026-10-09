@@ -1,0 +1,214 @@
+use super::*;
+
+fn check(src: &str) -> Result<ir::Module, String> {
+    let prog = jihoo_syntax::parse(src).map_err(|e| e.to_string())?;
+    let m = analyze(&prog).map_err(|es| es[0].to_string())?;
+    if let Err(e) = ir::verify(&m) {
+        panic!("sema produced invalid IR: {e}\n{m}");
+    }
+    Ok(m)
+}
+
+fn err(src: &str) -> String {
+    check(src).expect_err("expected a type error")
+}
+
+/// Wraps `body` in a freestanding program.
+fn fs(body: &str) -> String {
+    format!("#![freestanding]\n{body}\nfn _start() {{}}")
+}
+
+#[test]
+fn well_typed_programs_pass() {
+    check(
+        "fn fib(n: i64) -> i64 {\n  if n < 2 { return n }\n  return fib(n - 1) + fib(n - 2)\n}\n\
+         fn main() { let s = \"a\" + \"b\"\n print(s == \"ab\" && fib(3) == 2) }",
+    )
+    .unwrap();
+    check("#![freestanding]\nfn _start() -> i64 { let p = \"hi\" + 1\n return syscall(1, 1, p, 1) }")
+        .unwrap();
+}
+
+#[test]
+fn infers_let_types() {
+    assert!(err("fn main() { let x = 1\n x = \"s\" }").contains("must be i64, found str"));
+    assert!(err("fn main() { let x: bool = 1 }").contains("must be bool, found i64"));
+}
+
+#[test]
+fn operator_errors() {
+    assert_eq!(err("fn main() { print(1 + true) }"), "1:21: cannot apply `+` to i64 and bool");
+    assert!(err("fn main() { print(!1) }").contains("must be bool") || err("fn main() { print(!1) }").contains("`!`"));
+    assert!(err("fn main() { print(1 && true) }").contains("left side of `&&` must be bool"));
+}
+
+#[test]
+fn conditions_must_be_bool() {
+    assert!(err("fn main() { if 1 { } }").contains("`if` condition must be bool"));
+    assert!(err("fn main() { while 0 { } }").contains("`while` condition must be bool"));
+}
+
+#[test]
+fn calls_are_checked() {
+    let src = "fn f(a: i64, b: str) {}\nfn main() { f(1, 2) }";
+    assert!(err(src).contains("argument 2 of `f` must be str, found i64"));
+    assert!(err("fn main() { let x = main() }").contains("type unit"));
+}
+
+#[test]
+fn returns_are_checked() {
+    assert!(err("fn f() -> i64 { return true }\nfn main() {}").contains("return value must be i64"));
+    assert!(err("fn f() -> i64 { return }\nfn main() {}").contains("missing return value"));
+    assert_eq!(
+        err("fn f(x: bool) -> i64 {\n  if x { return 1 }\n}\nfn main() {}"),
+        "3:1: missing `return`: `f` must return i64"
+    );
+    // Both branches return, so the end is unreachable.
+    check("fn f(x: bool) -> i64 {\n  if x { return 1 } else { return 2 }\n}\nfn main() {}").unwrap();
+}
+
+#[test]
+fn profile_rules() {
+    assert!(err("#![freestanding]\nfn _start() { print(1) }").contains("not available in freestanding"));
+    assert!(err("fn main() { syscall(60, 0) }").contains("only available in freestanding"));
+    assert!(err(&fs("fn f(s: str) {}")).contains("garbage collected"));
+    assert!(err("fn f(p: *u8) {}\nfn main() {}").contains("only available in freestanding"));
+    assert!(err("fn main() { let x = 1\n let p = &x }").contains("only available in freestanding"));
+    assert!(err(&fs("fn f(p: ptr) {}")).contains("written `*u8`"));
+    assert!(err("fn start() {}").contains("needs `fn main()`"));
+    assert!(err("fn main() -> bool { return true }").contains("must return nothing or i64"));
+}
+
+#[test]
+fn reports_errors_from_every_function() {
+    let prog = jihoo_syntax::parse("fn a() { 1 + true }\nfn b() { if 1 {} }\nfn main() {}").unwrap();
+    assert_eq!(analyze(&prog).unwrap_err().len(), 2);
+}
+
+#[test]
+fn unreachable_blocks_are_removed() {
+    let m = check("fn main() {\n  return\n  print(1)\n}").unwrap();
+    assert_eq!(m.funcs[0].blocks.len(), 1);
+}
+
+#[test]
+fn text_format_snapshot() {
+    let m = check("fn add(a: i64, b: i64) -> i64 {\n  return a + b\n}\nfn main() {}").unwrap();
+    assert_eq!(
+        m.funcs[0].to_string(),
+        "fn @add(i64, i64) -> i64 {\n  regs i64 i64 i64\nbb0:\n  %2 = add %0, %1\n  ret %2\n}\n"
+    );
+}
+
+// ---- sized integers ----
+
+#[test]
+fn literals_take_their_type_from_context() {
+    check("fn f(x: u8) -> u8 { return x + 1 }\nfn main() { let y: i16 = -300\n let z = f(2) * 3 }").unwrap();
+    check("fn main() { let x: u32 = 7\n print(1 + x == 8) }").unwrap();
+    assert!(err("fn main() { let x: u8 = 256 }").contains("integer literal 256 does not fit in u8"));
+    assert!(err("fn main() { let x: i8 = -129 }").contains("-129 does not fit in i8"));
+    check("fn main() { let x: i8 = -128 }").unwrap();
+}
+
+#[test]
+fn integer_types_do_not_mix() {
+    assert!(err("fn main() { let a: u8 = 1\n let b = 2\n print(a + b) }").contains("cannot apply `+` to u8 and i64"));
+    assert!(err("fn main() { let a: u8 = 1\n print(-a) }").contains("cannot apply `-` to u8"));
+}
+
+#[test]
+fn casts() {
+    check("fn main() { let a: u8 = 200\n let b = a as i64 + 1\n let c = true as u8\n print(b) }").unwrap();
+    check(&fs("fn f(p: *u8) -> i64 { let q = p as *i64\n return p as i64 }")).unwrap();
+    assert!(err("fn main() { let s = \"x\" as i64 }").contains("cannot cast str to i64"));
+    assert!(err(&fs("fn f(p: *u8) -> i32 { return p as i32 }")).contains("cannot cast *u8 to i32"));
+}
+
+// ---- structs ----
+
+const POINT: &str = "struct Point { x: i64, y: i64 }\nstruct Line { a: Point, b: Point }\n";
+
+#[test]
+fn struct_literals_and_fields() {
+    check(&format!(
+        "{POINT}fn len2(l: Line) -> i64 {{\n  let dx = l.b.x - l.a.x\n  let dy = l.b.y - l.a.y\n  return dx * dx + dy * dy\n}}\n\
+         fn main() {{ print(len2(Line {{ a: Point {{ x: 0, y: 0 }}, b: Point {{ y: 4, x: 3 }} }})) }}"
+    ))
+    .unwrap();
+    assert!(err(&format!("{POINT}fn main() {{ let p = Point {{ x: 1 }} }}")).contains("missing fields in `Point`: y"));
+    assert!(err(&format!("{POINT}fn main() {{ let p = Point {{ x: 1, x: 2, y: 3 }} }}")).contains("given twice"));
+    assert!(err(&format!("{POINT}fn main() {{ let p = Point {{ x: 1, z: 2 }} }}")).contains("has no field `z`"));
+    assert!(err(&format!("{POINT}fn main() {{ let p = Point {{ x: true, y: 2 }} }}")).contains("field `x` must be i64"));
+    assert!(err("fn main() { let x = 1\n print(x.y) }").contains("type i64 has no fields"));
+}
+
+#[test]
+fn nested_field_assignment_rebuilds_the_struct() {
+    let m = check(&format!("{POINT}fn main() {{\n let l = Line {{ a: Point {{ x: 0, y: 0 }}, b: Point {{ x: 0, y: 0 }} }}\n l.b.y = 5\n}}"))
+        .unwrap();
+    let text = m.funcs[0].to_string();
+    // l.b.y = 5  =>  t = field l, 1; t2 = setfield t, 1, 5; l = setfield l, 1, t2
+    assert!(text.contains("= field %"), "{text}");
+    assert_eq!(text.matches("setfield").count(), 2, "{text}");
+    assert!(err(&format!("{POINT}fn p() -> Point {{ return Point {{ x: 0, y: 0 }} }}\nfn main() {{ p().x = 1 }}"))
+        .contains("cannot assign"));
+}
+
+#[test]
+fn structs_cannot_contain_themselves() {
+    assert!(err("struct A { b: B }\nstruct B { a: A }\nfn main() {}").contains("contains itself"));
+    check(&fs("struct Node { value: i64, next: *Node }")).unwrap();
+    assert!(err("struct i64 { x: bool }\nfn main() {}").contains("builtin type name"));
+    assert!(err("struct P { x: i64, x: i64 }\nfn main() {}").contains("declared twice"));
+}
+
+#[test]
+fn struct_literal_needs_parens_in_conditions() {
+    // `P { ... }` in an `if` condition is not a struct literal: `P` is the condition
+    // and `{ x: 1 }` the body, which does not parse.
+    assert!(check("struct P { x: i64 }\nfn main() { if P { x: 1 }.x == 1 {} }").is_err());
+    check("struct P { x: i64 }\nfn main() { if (P { x: 1 }).x == 1 {} }").unwrap();
+}
+
+// ---- pointers ----
+
+#[test]
+fn loads_and_stores() {
+    let m = check(&fs(
+        "fn strlen(s: *u8) -> i64 {\n  let n = 0\n  while s[n] != 0 { n = n + 1 }\n  return n\n}\n\
+         fn fill(p: *u8, len: i64, c: u8) {\n  let i = 0\n  while i < len {\n    p[i] = c\n    i = i + 1\n  }\n}\n\
+         fn swap(a: *i64, b: *i64) {\n  let t = *a\n  *a = *b\n  *b = t\n}",
+    ))
+    .unwrap();
+    let text = m.to_string();
+    assert!(text.contains("= load %"), "{text}");
+    assert!(text.contains("store %"), "{text}");
+    assert!(err(&fs("fn f(x: i64) -> i64 { return *x }")).contains("cannot dereference i64"));
+    assert!(err(&fs("fn f(x: i64) -> i64 { return x[0] }")).contains("cannot index into i64"));
+    assert!(err(&fs("fn f(p: *u8) { *p = 300 }")).contains("does not fit in u8"));
+}
+
+#[test]
+fn address_of() {
+    let m = check(&fs(
+        "struct P { x: i64, y: i64 }\n\
+         fn bump(n: *i64) { *n = *n + 1 }\n\
+         fn f() -> i64 {\n  let p = P { x: 1, y: 2 }\n  bump(&p.y)\n  let a = 5\n  bump(&a)\n  return p.y + a\n}",
+    ))
+    .unwrap();
+    let text = m.to_string();
+    assert!(text.contains("= addr %"), "{text}");
+    assert!(text.contains("= fieldptr %"), "{text}");
+    assert!(err(&fs("fn g() -> i64 { return 1 }\nfn f() { let p = &g() }")).contains("temporary"));
+}
+
+#[test]
+fn field_access_through_pointers() {
+    check(&fs(
+        "struct Node { value: i64, next: *Node }\n\
+         fn sum(n: *Node) -> i64 {\n  let total = 0\n  while n != 0 as *Node {\n    total = total + n.value\n    n = n.next\n  }\n  return total\n}\n\
+         fn set(n: *Node, v: i64) { n.value = v\n (*n).value = v }",
+    ))
+    .unwrap();
+}

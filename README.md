@@ -72,9 +72,11 @@ nix build
 
 ## Status
 
-v0: static types with local inference (`unit`, `i64`, `bool`, `str` hosted,
-`ptr` freestanding), functions, `if`/`while`, `&&`/`||`, `print` (hosted) and
-`syscall` (freestanding, x86_64 and aarch64 Linux). See the roadmap in
+v0: static types with local inference; `bool`, `i8`…`u64`, structs (both
+profiles), `str` (hosted), pointers with load/store and `&` (freestanding);
+functions, `if`/`while`, `&&`/`||`, `as` casts, `print` (hosted) and `syscall`
+(freestanding, x86_64 and aarch64 Linux). See
+[examples/pointers.jh](examples/pointers.jh) and the roadmap in
 [docs/design.md](docs/design.md).
 
 ```sh

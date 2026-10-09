@@ -14,9 +14,21 @@ const MAX_CALL_DEPTH: usize = 10_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Value {
     Unit,
+    /// Every integer type, in canonical form (see `IntTy::wrap`).
     Int(i64),
     Bool(bool),
     Str(GcRef),
+    Struct(GcRef),
+}
+
+impl Value {
+    /// The heap object this value refers to, if any.
+    pub fn gc_ref(&self) -> Option<GcRef> {
+        match self {
+            Value::Str(r) | Value::Struct(r) => Some(*r),
+            Value::Unit | Value::Int(_) | Value::Bool(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -149,15 +161,46 @@ impl<'m> Vm<'m> {
                 self.set(*dst, v);
             }
             Inst::Unary { dst, op, src } => {
-                let v = match op {
-                    UnOp::Neg => Value::Int(self.int(*src)?.wrapping_neg()),
-                    UnOp::Not => Value::Bool(!self.bool(*src)?),
+                let v = match (op, f.reg_type(*dst)) {
+                    (UnOp::Neg, Type::Int(t)) => Value::Int(t.wrap(self.int(*src)?.wrapping_neg())),
+                    (UnOp::Not, _) => Value::Bool(!self.bool(*src)?),
+                    (UnOp::Neg, t) => return Err(self.error(&format!("cannot negate {t}"))),
                 };
                 self.set(*dst, v);
             }
             Inst::Binary { dst, op, lhs, rhs } => {
-                let v = self.binary(*op, self.get(*lhs), self.get(*rhs))?;
+                let v = self.binary(*op, f.reg_type(*lhs), self.get(*lhs), self.get(*rhs))?;
                 self.set(*dst, v);
+            }
+            Inst::Cast { dst, src } => {
+                let v = match (f.reg_type(*dst), self.get(*src)) {
+                    (Type::Int(t), Value::Int(n)) => Value::Int(t.wrap(n)),
+                    (Type::Int(_), Value::Bool(b)) => Value::Int(b as i64),
+                    (_, v) => v, // a cast to the same type
+                };
+                self.set(*dst, v);
+            }
+            Inst::Struct { dst, fields, .. } => {
+                let values = fields.iter().map(|r| self.get(*r)).collect();
+                let r = self.alloc_struct(values);
+                self.set(*dst, Value::Struct(r));
+            }
+            Inst::Field { dst, src, index } => {
+                let r = self.struct_ref(*src)?;
+                let v = self.heap.fields(r)[*index as usize];
+                self.set(*dst, v);
+            }
+            Inst::SetField { dst, src, index, value } => {
+                let r = self.struct_ref(*src)?;
+                let mut values = self.heap.fields(r).to_vec();
+                values[*index as usize] = self.get(*value);
+                // `src` and `value` are still in registers, so everything in
+                // `values` stays rooted if this allocation collects.
+                let new = self.alloc_struct(values);
+                self.set(*dst, Value::Struct(new));
+            }
+            Inst::Load { .. } | Inst::Store { .. } | Inst::Addr { .. } | Inst::FieldPtr { .. } => {
+                return Err(self.error("pointers are not available on the VM"))
             }
             Inst::Call { dst, func, args } => {
                 let callee = self.fn_index[func.as_str()];
@@ -166,10 +209,13 @@ impl<'m> Vm<'m> {
             }
             Inst::Print { src } => {
                 let line = match self.get(*src) {
+                    Value::Int(n) if f.reg_type(*src) == &Type::Int(jihoo_ir::IntTy::U64) => (n as u64).to_string(),
                     Value::Int(n) => n.to_string(),
                     Value::Bool(b) => b.to_string(),
                     Value::Str(r) => self.heap.str(r).to_string(),
-                    Value::Unit => return Err(self.error("cannot print unit")),
+                    v @ (Value::Unit | Value::Struct(_)) => {
+                        return Err(self.error(&format!("cannot print {}", type_name(v))))
+                    }
                 };
                 writeln!(out, "{line}").map_err(|e| self.error(&format!("print failed: {e}")))?;
             }
@@ -178,19 +224,30 @@ impl<'m> Vm<'m> {
         Ok(())
     }
 
-    fn binary(&mut self, op: BinOp, a: Value, b: Value) -> Result<Value, VmError> {
+    /// `operand` is the type of `a` (and `b`): integer ops depend on width and signedness.
+    fn binary(&mut self, op: BinOp, operand: &Type, a: Value, b: Value) -> Result<Value, VmError> {
         use Value::*;
+        if let (Type::Int(t), Int(x), Int(y)) = (operand, a, b) {
+            let (ux, uy) = (x as u64, y as u64);
+            let signed = t.signed();
+            return Ok(match op {
+                BinOp::Add => Int(t.wrap(x.wrapping_add(y))),
+                BinOp::Sub => Int(t.wrap(x.wrapping_sub(y))),
+                BinOp::Mul => Int(t.wrap(x.wrapping_mul(y))),
+                BinOp::Div | BinOp::Rem if y == 0 => return Err(self.error("division by zero")),
+                BinOp::Div if signed => Int(t.wrap(x.wrapping_div(y))),
+                BinOp::Div => Int(t.wrap((ux / uy) as i64)),
+                BinOp::Rem if signed => Int(t.wrap(x.wrapping_rem(y))),
+                BinOp::Rem => Int(t.wrap((ux % uy) as i64)),
+                BinOp::Eq => Bool(x == y),
+                BinOp::Ne => Bool(x != y),
+                BinOp::Lt => Bool(if signed { x < y } else { ux < uy }),
+                BinOp::Le => Bool(if signed { x <= y } else { ux <= uy }),
+                BinOp::Gt => Bool(if signed { x > y } else { ux > uy }),
+                BinOp::Ge => Bool(if signed { x >= y } else { ux >= uy }),
+            });
+        }
         Ok(match (op, a, b) {
-            (BinOp::Add, Int(x), Int(y)) => Int(x.wrapping_add(y)),
-            (BinOp::Sub, Int(x), Int(y)) => Int(x.wrapping_sub(y)),
-            (BinOp::Mul, Int(x), Int(y)) => Int(x.wrapping_mul(y)),
-            (BinOp::Div | BinOp::Rem, Int(_), Int(0)) => return Err(self.error("division by zero")),
-            (BinOp::Div, Int(x), Int(y)) => Int(x.wrapping_div(y)),
-            (BinOp::Rem, Int(x), Int(y)) => Int(x.wrapping_rem(y)),
-            (BinOp::Lt, Int(x), Int(y)) => Bool(x < y),
-            (BinOp::Le, Int(x), Int(y)) => Bool(x <= y),
-            (BinOp::Gt, Int(x), Int(y)) => Bool(x > y),
-            (BinOp::Ge, Int(x), Int(y)) => Bool(x >= y),
             (BinOp::Add, Str(x), Str(y)) => {
                 let s = format!("{}{}", self.heap.str(x), self.heap.str(y));
                 Str(self.alloc_str(&s))
@@ -198,9 +255,7 @@ impl<'m> Vm<'m> {
             (BinOp::Eq | BinOp::Ne, Str(x), Str(y)) => {
                 Bool((self.heap.str(x) == self.heap.str(y)) == (op == BinOp::Eq))
             }
-            (BinOp::Eq | BinOp::Ne, Int(_), Int(_)) | (BinOp::Eq | BinOp::Ne, Bool(_), Bool(_)) => {
-                Bool((a == b) == (op == BinOp::Eq))
-            }
+            (BinOp::Eq | BinOp::Ne, Bool(x), Bool(y)) => Bool((x == y) == (op == BinOp::Eq)),
             _ => {
                 return Err(self.error(&format!(
                     "`{}` is not supported for {} and {}",
@@ -215,10 +270,26 @@ impl<'m> Vm<'m> {
     /// Allocates on the GC heap, collecting first if the heap is over its threshold.
     /// Every live value is in some frame's registers, so the frames are the roots.
     fn alloc_str(&mut self, s: &str) -> GcRef {
+        self.maybe_collect();
+        self.heap.alloc_str(s)
+    }
+
+    fn alloc_struct(&mut self, fields: Vec<Value>) -> GcRef {
+        self.maybe_collect();
+        self.heap.alloc_struct(fields)
+    }
+
+    fn maybe_collect(&mut self) {
         if self.heap.should_collect() {
             self.heap.collect(self.stack.iter().flat_map(|f| f.regs.iter()));
         }
-        self.heap.alloc_str(s)
+    }
+
+    fn struct_ref(&self, r: Reg) -> Result<GcRef, VmError> {
+        match self.get(r) {
+            Value::Struct(s) => Ok(s),
+            v => Err(self.error(&format!("expected a struct, found {}", type_name(v)))),
+        }
     }
 
     fn get(&self, r: Reg) -> Value {
@@ -258,6 +329,7 @@ fn type_name(v: Value) -> &'static str {
         Value::Int(_) => "i64",
         Value::Bool(_) => "bool",
         Value::Str(_) => "str",
+        Value::Struct(_) => "struct",
     }
 }
 
@@ -315,6 +387,82 @@ fn main() {
     fn bools() {
         let (_, out) = run_src("fn main() { print(1 < 2 && !(3 == 4))\n print(\"a\" != \"a\") }");
         assert_eq!(out, "true\nfalse\n");
+    }
+
+    #[test]
+    fn sized_integers_wrap() {
+        let src = "
+fn main() {
+    let a: u8 = 250
+    a = a + 10
+    print(a)                    // 4
+    let b: i8 = 127
+    print(b + 1)                // -128
+    let c: u32 = 7
+    print(c / 2 * 2 == 6)       // true
+    let d: u64 = 0
+    print(d - 1)                // 18446744073709551615
+    print((d - 1) / 2 > 0)      // unsigned compare: true
+    let e: i16 = -1
+    print(e as u16)             // 65535
+    print(300 as u8)            // 44
+    print(true as i32 + 1)      // 2
+}";
+        let (_, out) = run_src(src);
+        assert_eq!(out, "4\n-128\ntrue\n18446744073709551615\ntrue\n65535\n44\n2\n");
+    }
+
+    #[test]
+    fn structs_are_values() {
+        let src = "
+struct Point { x: i64, y: i64 }
+struct Line { a: Point, b: Point }
+
+fn moved(p: Point) -> Point {
+    p.x = p.x + 100
+    return p
+}
+
+fn main() {
+    let p = Point { x: 1, y: 2 }
+    let q = p
+    q.x = 10
+    print(p.x)                  // 1: `q` is a copy
+    print(moved(p).x)           // 101
+    print(p.x)                  // 1: arguments are copies
+    let l = Line { a: p, b: q }
+    l.b.y = 7
+    print(l.b.y + l.a.y)        // 9
+    print(q.y)                  // 2
+}";
+        let (_, out) = run_src(src);
+        assert_eq!(out, "1\n101\n1\n9\n2\n");
+    }
+
+    #[test]
+    fn gc_traces_struct_fields() {
+        // Lots of garbage structs, while one struct keeps a string alive across
+        // collections.
+        let src = "
+struct Named { name: str, n: i64 }
+fn main() {
+    let keep = Named { name: \"kept\" + \"!\", n: 0 }
+    let chunk = \"................................................................\"
+    let i = 0
+    while i < 3000 {
+        let tmp = Named { name: chunk + chunk + chunk + chunk + chunk, n: i }
+        keep.n = keep.n + tmp.n
+        i = i + 1
+    }
+    print(keep.name)
+    print(keep.n)
+}";
+        let m = compile(src);
+        let mut vm = Vm::new(&m);
+        let mut out = Vec::new();
+        vm.run_main(&mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "kept!\n4498500\n");
+        assert!(vm.heap().stats().collections > 0, "{:?}", vm.heap().stats());
     }
 
     #[test]

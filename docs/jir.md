@@ -13,23 +13,30 @@ in `backend-llvm/src/jir.h`. The typing rules are implemented once, in
 jir 0
 profile freestanding
 
-fn @fib(i64) -> i64 {
-  regs i64 i64 bool i64 i64 i64 i64 i64 i64 i64
+struct $Node { value: i64, next: *$Node }
+
+fn @sum(*$Node) -> i64 {
+  regs *$Node i64 i64 i64 *$Node bool *i64 i64 i64 **$Node *$Node
 bb0:
-  %1 = const 2
-  %2 = lt %0, %1
-  br %2, bb1, bb2
+  %1 = const 0
+  %2 = copy %1
+  jmp bb1
 bb1:
-  ret %0
+  %3 = const 0
+  %4 = cast %3
+  %5 = ne %0, %4
+  br %5, bb2, bb3
 bb2:
-  %3 = const 1
-  %4 = sub %0, %3
-  %5 = call @fib(%4)
-  %6 = const 2
-  %7 = sub %0, %6
-  %8 = call @fib(%7)
-  %9 = add %5, %8
-  ret %9
+  %6 = fieldptr %0, 0
+  %7 = load %6
+  %8 = add %2, %7
+  %2 = copy %8
+  %9 = fieldptr %0, 1
+  %10 = load %9
+  %0 = copy %10
+  jmp bb1
+bb3:
+  ret %2
 }
 ```
 
@@ -37,7 +44,7 @@ bb2:
 
 - The format is line-oriented: one header, label, instruction or terminator per line.
 - `;` starts a comment that runs to the end of the line (outside string literals).
-- `%N` is a register, `@name` a function, `bbN` a block.
+- `%N` is a register, `@name` a function, `$Name` a struct, `bbN` a block.
 - Integers are signed 64-bit decimals (`-5`, `42`).
 - Strings are double-quoted. Escapes: `\n`, `\t`, `\\`, `\"`, `\xHH` (any byte).
 
@@ -46,29 +53,48 @@ bb2:
 ```
 jir 0                          ; format version, must come first
 profile hosted|freestanding    ; language profile
+struct ...                     ; zero or more structs
 fn ...                         ; zero or more functions
 ```
 
-| profile        | runs on | GC  | allowed builtins | types                 |
-|----------------|---------|-----|------------------|-----------------------|
-| `hosted`       | VM      | yes | `print`          | `unit i64 bool str`   |
-| `freestanding` | LLVM    | no  | `syscall`        | `unit i64 bool ptr`   |
+| profile        | runs on | GC  | allowed builtins | pointers |
+|----------------|---------|-----|------------------|----------|
+| `hosted`       | VM      | yes | `print`          | no       |
+| `freestanding` | LLVM    | no  | `syscall`        | yes      |
 
 The entry point is `@main` for hosted modules and `@_start` for freestanding ones.
 It takes no parameters and returns `unit` or `i64`.
 
 ## Types
 
-| type   | meaning                                   | LLVM    |
-|--------|-------------------------------------------|---------|
-| `unit` | no value                                  | `{}`    |
-| `i64`  | 64-bit signed integer                     | `i64`   |
-| `bool` | `true` / `false`                          | `i1`    |
-| `str`  | GC-managed string, hosted only            | —       |
-| `ptr`  | raw byte pointer, freestanding only       | `ptr`   |
+| type              | meaning                                  | LLVM          |
+|-------------------|------------------------------------------|---------------|
+| `unit`            | no value                                 | `{}`          |
+| `bool`            | `true` / `false`                         | `i1`          |
+| `i8` … `i64`      | signed integers                          | `i8` … `i64`  |
+| `u8` … `u64`      | unsigned integers                        | `i8` … `i64`  |
+| `str`             | GC-managed string, hosted only           | —             |
+| `*T`              | raw pointer to `T`, freestanding only    | `ptr`         |
+| `$Name`           | struct, by value                         | named struct  |
 
-`str` and `ptr` are deliberately separate types: GC references and raw pointers
-must never mix. That separation is what will later allow GC-enabled native builds.
+`str` and `*T` are deliberately separate: GC references and raw pointers must never
+mix. That separation is what will later allow GC-enabled native builds.
+
+In the Rust IR and in the VM, an integer is stored as an `i64` in canonical form:
+sign-extended for signed types, zero-extended for unsigned ones (`u64` keeps its bit
+pattern). `const` values must already be canonical.
+
+## Structs
+
+```
+struct $Name { field: T, field: T, ... }
+```
+
+Field names are only for readability; instructions refer to fields by index. A
+struct may contain other structs by value, but not itself (directly or through
+other structs); use a pointer for recursive data.
+
+Structs are values: `copy` copies all fields, and `setfield` produces a new value.
 
 ## Functions
 
@@ -92,26 +118,54 @@ type. The LLVM backend gives each register an `alloca` and relies on `mem2reg`.
 
 ## Instructions
 
-In the table, `%a: T` means `%a` must have type `T`, and the result type is what the
-destination register must be declared as.
+In the table, `int` means any integer type and `%a: T` means `%a` has type `T`.
+The result type is what the destination register must be declared as.
 
-| syntax                          | operands             | result | meaning |
-|---------------------------------|----------------------|--------|---------|
-| `%d = const N`                  |                      | `i64` or `bool` | constant; for `bool`, nonzero is true |
-| `%d = unit`                     |                      | `unit` | the unit value |
-| `%d = str "..."`                |                      | `str` (hosted) / `ptr` (freestanding) | string literal; freestanding strings are NUL-terminated constant bytes |
-| `%d = copy %a`                  | `%a: T`              | `T`    | copy |
-| `%d = neg %a`                   | `i64`                | `i64`  | wrapping negation |
-| `%d = not %a`                   | `bool`               | `bool` | logical not |
-| `%d = add\|sub\|mul %a, %b`     | `i64, i64`           | `i64`  | wrapping arithmetic |
-| `%d = div\|rem %a, %b`          | `i64, i64`           | `i64`  | signed division (VM traps on zero; native: undefined for now) |
-| `%d = add %a, %b`               | `str, str`           | `str`  | concatenation |
-| `%d = add\|sub %a, %b`          | `ptr, i64`           | `ptr`  | pointer offset in bytes |
-| `%d = eq\|ne %a, %b`            | `T, T` (`T` ≠ `unit`) | `bool` | equality (`str` compares contents) |
-| `%d = lt\|le\|gt\|ge %a, %b`    | `i64, i64` / `ptr, ptr` | `bool` | signed (`i64`) or unsigned (`ptr`) comparison |
-| `%d = call @f(%a, ...)`         | the parameter types of `@f` | return type of `@f` | call |
-| `%d = syscall(%n, %a, ...)`     | `i64` or `ptr`, 1 to 7 operands | `i64` | freestanding only: raw Linux syscall `%n` |
-| `print %a`                      | `i64`, `bool` or `str` |      | hosted only: print the value and a newline |
+### Values and arithmetic
+
+| syntax                          | operands              | result | meaning |
+|---------------------------------|-----------------------|--------|---------|
+| `%d = const N`                  |                       | int or `bool` | constant; `bool` is 0 or 1 |
+| `%d = unit`                     |                       | `unit` | the unit value |
+| `%d = str "..."`                |                       | `str` (hosted) / `*u8` (freestanding) | string literal; freestanding strings are NUL-terminated constant bytes |
+| `%d = copy %a`                  | `T`                   | `T`    | copy |
+| `%d = neg %a`                   | signed int            | same   | wrapping negation |
+| `%d = not %a`                   | `bool`                | `bool` | logical not |
+| `%d = add\|sub\|mul %a, %b`     | `T, T` (int)          | `T`    | wrapping arithmetic |
+| `%d = div\|rem %a, %b`          | `T, T` (int)          | `T`    | signed or unsigned by type; truncating (VM traps on zero; native: undefined for now) |
+| `%d = add %a, %b`               | `str, str`            | `str`  | concatenation |
+| `%d = add\|sub %a, %b`          | `*T, i64`             | `*T`   | pointer offset in elements of `T` |
+| `%d = eq\|ne %a, %b`            | `T, T`: `bool`, int, `str`, `*U` | `bool` | equality (`str` compares contents) |
+| `%d = lt\|le\|gt\|ge %a, %b`    | `T, T`: int or `*U`   | `bool` | ordered comparison, signed or unsigned by type; pointers unsigned |
+| `%d = cast %a`                  | see below             | dst type | conversion |
+| `%d = call @f(%a, ...)`         | parameter types of `@f` | return type of `@f` | call |
+
+`cast` allows: int → int (truncate, or sign-/zero-extend by the *source* type),
+`bool` → int (0/1), `*T` → `*U`, `*T` ↔ `i64`/`u64`, and any type to itself.
+
+### Structs
+
+| syntax                              | operands              | result | meaning |
+|-------------------------------------|-----------------------|--------|---------|
+| `%d = struct $S(%a, %b, ...)`       | every field, in order | `$S`   | build a struct |
+| `%d = field %s, N`                  | `$S`                  | type of field N | read a field |
+| `%d = setfield %s, N, %v`           | `$S`, type of field N | `$S`   | copy of `%s` with field N replaced |
+
+### Memory (freestanding only)
+
+| syntax                          | operands              | result | meaning |
+|---------------------------------|-----------------------|--------|---------|
+| `%d = load %p`                  | `*T`                  | `T`    | read memory |
+| `store %p, %v`                  | `*T, T`               |        | write memory |
+| `%d = addr %r`                  | `T`                   | `*T`   | address of register `%r` (valid until the function returns) |
+| `%d = fieldptr %p, N`           | `*$S`                 | `*F` (F = type of field N) | address of a field |
+
+### Builtins
+
+| syntax                          | operands              | result | meaning |
+|---------------------------------|-----------------------|--------|---------|
+| `%d = syscall(%n, %a, ...)`     | int or `*T`, 1 to 7 operands | `i64` | freestanding only: raw Linux syscall `%n` |
+| `print %a`                      | int, `bool` or `str`  |        | hosted only: print the value and a newline |
 
 ## Terminators
 
@@ -127,7 +181,6 @@ returns `i64`, with 0 if it returns `unit`.
 
 ## Planned
 
-- Sized integers (`i8`..`i32`, `u*`), loads/stores, structs, and inline `asm`
-  blocks for freestanding code.
-- `gcref` types for GC-managed objects beyond `str`.
+- Arrays, inline `asm` blocks, `size_of`.
+- `gcref` types for GC-managed objects beyond `str` and structs.
 - A Rust-side JIR parser so `jihoo run file.jir` works.

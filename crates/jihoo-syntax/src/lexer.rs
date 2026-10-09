@@ -16,11 +16,16 @@ pub enum Tok {
     While,
     True,
     False,
+    Struct,
+    As,
 
     LParen,
     RParen,
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
+    Dot,
     Comma,
     Colon,
     Semi,
@@ -38,6 +43,7 @@ pub enum Tok {
     Slash,
     Percent,
     Bang,
+    Amp,
     AndAnd,
     OrOr,
 
@@ -153,6 +159,9 @@ impl<'a> Lexer<'a> {
             b')' => Tok::RParen,
             b'{' => Tok::LBrace,
             b'}' => Tok::RBrace,
+            b'[' => Tok::LBracket,
+            b']' => Tok::RBracket,
+            b'.' => Tok::Dot,
             b',' => Tok::Comma,
             b':' => Tok::Colon,
             b';' => Tok::Semi,
@@ -189,6 +198,7 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 Tok::AndAnd
             }
+            b'&' => Tok::Amp,
             b'|' if self.peek() == b'|' => {
                 self.bump();
                 Tok::OrOr
@@ -238,6 +248,8 @@ impl<'a> Lexer<'a> {
                     "while" => Tok::While,
                     "true" => Tok::True,
                     "false" => Tok::False,
+                    "struct" => Tok::Struct,
+                    "as" => Tok::As,
                     _ => Tok::Ident(word.to_string()),
                 }
             }

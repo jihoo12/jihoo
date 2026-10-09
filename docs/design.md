@@ -22,6 +22,7 @@ A program chooses its profile with a file attribute.
 | backend         | VM                      | LLVM, native static binary        |
 | memory          | GC, managed by the VM   | manual                            |
 | library         | std (strings, `print`…) | core only                         |
+| pointers        | no                      | `*T`, `&x`, `*p`, `p[i]`          |
 | syscalls / asm  | no                      | yes                               |
 | entry point     | `fn main()`             | `fn _start()`                     |
 
@@ -52,9 +53,12 @@ fn area(w: i64, h: i64) -> i64 {   // signatures are written out
 }
 ```
 
-- Types: `unit`, `i64`, `bool`, plus `str` (hosted only, garbage collected) and
-  `ptr` (freestanding only, raw byte pointer). A string literal is a `str` when
-  hosted and a `ptr` to constant bytes when freestanding.
+- Types: `unit`, `bool`, `i8`…`i64`, `u8`…`u64`, structs, plus `str` (hosted
+  only, garbage collected) and `*T` (freestanding only, raw pointer). A string
+  literal is a `str` when hosted and a `*u8` to constant bytes when freestanding.
+- Integer literals take their type from context (`let c: u8 = 65`, `p[i] == 0`,
+  arguments, fields), defaulting to `i64`, and must fit that type. Different
+  integer types never mix implicitly; convert with `as`.
 - A function without `-> T` returns `unit`.
 - `if`/`while` conditions and the operands of `&&`, `||`, `!` must be `bool`;
   there is no implicit integer-to-bool conversion.
@@ -66,6 +70,39 @@ shape as Zig's Sema): each expression is checked and turned into typed JIR at th
 same time. The operator rules live in `crates/jihoo-ir/src/types.rs` and are shared
 with the IR verifier, so the checker and the verifier cannot disagree. Errors are
 reported per function, so one run shows the first error in every function.
+
+## Structs and pointers
+
+```jihoo
+struct Node {
+    value: i64
+    next: *Node          // recursion only through pointers
+}
+
+fn sum(list: *Node) -> i64 {
+    let total = 0
+    while list != 0 as *Node {
+        total = total + list.value   // `p.field` reads through a pointer
+        list = list.next
+    }
+    return total
+}
+```
+
+- Structs are values, in both profiles: assignment and argument passing copy them,
+  and `p.x = 1` changes only `p`. Nested updates (`line.a.x = 1`) rebuild the outer
+  struct with `setfield`.
+- On the VM, a struct is an immutable GC object; a field update allocates a new
+  one. Natively, structs are plain LLVM aggregates.
+- Pointer arithmetic counts in elements (`p + 1` on `*i64` moves 8 bytes);
+  `p[i]` is `*(p + i)`.
+- `&x` takes the address of a local variable or a field of one; the pointer is
+  valid until the function returns. `&*p` and `&p[i]` are just pointers.
+- Assignment targets are *places*: variables, fields, `*p` and `p[i]`
+  (`crates/jihoo-sema/src/place.rs`).
+
+As in Rust, a struct literal cannot appear directly in an `if`/`while` condition
+(`if p == Point { ... }` would be ambiguous); wrap it in parentheses.
 
 ## Testing
 
@@ -98,6 +135,7 @@ grows past twice the size that survived the last collection (1 MiB minimum).
 
 1. ~~Type checker (static types with inference) and typed JIR.~~
 2. ~~Differential tests across both backends.~~ Rust-side JIR parser.
-3. Sized integers, pointers with loads/stores, structs, inline `asm` blocks.
+3. ~~Sized integers, pointers with loads/stores, structs.~~ Arrays, `size_of`,
+   inline `asm` blocks.
 4. `comptime` on the VM.
 5. `alloc` layer; AST macros.
