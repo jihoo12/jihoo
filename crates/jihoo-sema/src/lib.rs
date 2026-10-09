@@ -16,6 +16,7 @@ mod asm;
 mod comptime;
 mod env;
 mod generic;
+mod macros;
 mod place;
 
 use std::collections::{HashMap, VecDeque};
@@ -60,7 +61,9 @@ pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
             errors.push(e);
         }
     }
-    let plain: Vec<&FnDecl> = prog.funcs.iter().filter(|f| env.generic(&f.name).is_none()).collect();
+    // Generic functions are compiled per instance; macros only run while compiling.
+    let plain: Vec<&FnDecl> =
+        prog.funcs.iter().filter(|f| env.generic(&f.name).is_none() && !f.is_macro).collect();
     for f in &plain {
         if let Some(Err(e)) = env.signature(&f.name) {
             errors.push(e);
@@ -76,6 +79,18 @@ pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
                 Ok(func) => funcs.push((*func).clone()),
                 Err(e) => errors.push(e),
             }
+        }
+    }
+    // Macros are checked even when unused, but are not part of the program.
+    for f in prog.funcs.iter().filter(|f| f.is_macro) {
+        match env.signature(&f.name) {
+            Some(Ok(_)) => {
+                if let Err(e) = env.function(&f.name) {
+                    errors.push(e);
+                }
+            }
+            Some(Err(e)) => errors.push(e),
+            None => {}
         }
     }
     // Compiling functions asks for generic instances, which may ask for more.
@@ -97,7 +112,7 @@ pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
 }
 
 fn is_builtin(name: &str) -> bool {
-    matches!(name, "print" | "syscall" | "len" | "size_of" | "align_of")
+    matches!(name, "print" | "syscall" | "len" | "size_of" | "align_of" | "stringify")
 }
 
 struct BlockBuf {
@@ -112,6 +127,10 @@ struct FnCx<'a> {
     bindings: Rc<Bindings>,
     /// Lowering a `comptime` helper: there are no local variables to refer to.
     in_comptime: bool,
+    /// Lowering a macro body: `quote`, `expr` and `str` are available.
+    in_macro: bool,
+    /// How many macro expansions we are inside of.
+    macro_depth: u32,
     /// Registers holding constants already built at the start of the function.
     const_regs: HashMap<String, Reg>,
     /// Number of hoisted instructions at the front of the entry block.
@@ -138,6 +157,8 @@ impl<'a> FnCx<'a> {
             sig,
             bindings,
             in_comptime: false,
+            in_macro: false,
+            macro_depth: 0,
             const_regs: HashMap::new(),
             hoisted: 0,
             blocks: vec![BlockBuf { insts: vec![], term: None }],
@@ -154,6 +175,7 @@ impl<'a> FnCx<'a> {
     /// Lowers `f` as the JIR function `name` (an instance name for generics).
     fn lower_fn(mut self, f: &FnDecl, name: &str) -> Result<ir::Function, Error> {
         let sig = self.sig.clone();
+        self.in_macro = f.is_macro;
         // Comptime parameters are bindings, not registers.
         for (p, ty) in f.params.iter().filter(|p| !p.comptime).zip(&sig.params) {
             let r = self.new_reg(ty.clone());
@@ -272,6 +294,10 @@ impl<'a> FnCx<'a> {
         self.emit_to(Type::Unit, |dst| Inst::Unit { dst })
     }
 
+    fn resolve(&self, t: &TypeExpr) -> Result<Type, Error> {
+        self.env.resolve_in(t, &self.bindings, self.in_macro)
+    }
+
     fn local(&self, name: &str) -> Option<Reg> {
         self.scopes.iter().rev().find_map(|s| s.get(name).copied())
     }
@@ -359,7 +385,7 @@ impl<'a> FnCx<'a> {
     fn stmt(&mut self, s: &Stmt) -> Result<(), Error> {
         match s {
             Stmt::Let { pos, name, ty, value } => {
-                let want = ty.as_ref().map(|t| self.env.resolve(t, &self.bindings)).transpose()?;
+                let want = ty.as_ref().map(|t| self.resolve(t)).transpose()?;
                 let v = self.expr(value, want.as_ref())?;
                 if let Some(want) = &want {
                     self.expect(value.pos, v, want, &format!("the value of `{name}`"))?;
@@ -460,11 +486,15 @@ impl<'a> FnCx<'a> {
             }
             ExprKind::Bool(b) => self.konst(Type::Bool, *b as i64),
             ExprKind::Str(s) => {
-                let ty = types::str_literal(self.profile());
+                // Macros run on the VM, where strings are always `str`.
+                let ty = if self.in_macro { Type::Str } else { types::str_literal(self.profile()) };
                 self.emit_to(ty, |dst| Inst::Str { dst, value: s.clone() })
             }
             ExprKind::Var(name) => self.var(e.pos, name)?,
             ExprKind::Asm(a) => self.inline_asm(e.pos, a)?,
+            ExprKind::MacroCall(name, args) => self.macro_call(e.pos, name, args, expected)?,
+            ExprKind::Quote(pieces, holes) => self.quote(e.pos, pieces, holes)?,
+            ExprKind::Hole(_) => unreachable!("holes only exist inside quote templates"),
             ExprKind::Comptime(inner) => {
                 let (ty, v) = self.env.comptime(inner, expected, &self.bindings)?;
                 self.hoist(|cx| cx.splice(&ty, &v))
@@ -497,7 +527,7 @@ impl<'a> FnCx<'a> {
                 self.emit_to(ty, |dst| Inst::Splat { dst, value: v })
             }
             ExprKind::SizeOf(t) | ExprKind::AlignOf(t) => {
-                let ty = self.env.resolve(t, &self.bindings)?;
+                let ty = self.resolve(t)?;
                 let l = self.env.layout(t.pos, &ty)?;
                 let n = if matches!(e.kind, ExprKind::SizeOf(_)) { l.size } else { l.align };
                 let n = i64::try_from(n).map_err(|_| Error::new(e.pos, format!("{ty} is too large")))?;
@@ -515,7 +545,7 @@ impl<'a> FnCx<'a> {
                 self.addr_of(e.pos, place)?
             }
             ExprKind::Cast(inner, ty) => {
-                let to = self.env.resolve(ty, &self.bindings)?;
+                let to = self.resolve(ty)?;
                 let src = self.expr(inner, None)?;
                 let from = self.ty(src).clone();
                 if !types::can_cast(&from, &to) {
@@ -674,6 +704,7 @@ impl<'a> FnCx<'a> {
                 self.emit(Inst::Print { src: r });
                 Ok(self.unit())
             }
+            "stringify" => self.stringify(pos, args),
             "len" => {
                 let [arg] = args else {
                     return Err(Error::new(pos, "`len` takes exactly 1 argument"));
@@ -713,6 +744,9 @@ impl<'a> FnCx<'a> {
             _ => {
                 if let Some(decl) = self.env.generic(name) {
                     return self.call_generic(pos, decl, args);
+                }
+                if self.env.macro_decl(name).is_some() {
+                    return Err(Error::new(pos, format!("`{name}` is a macro; call it as `{name}!(...)`")));
                 }
                 let sig = self
                     .env

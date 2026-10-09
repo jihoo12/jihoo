@@ -82,6 +82,11 @@ impl<'m> Vm<'m> {
         self
     }
 
+    /// Allocates a string on this VM's heap, to pass as an argument.
+    pub fn alloc_string(&mut self, s: &str) -> Value {
+        Value::Str(self.alloc_str(s))
+    }
+
     /// Calls the function `name` with `args`, regardless of the module's profile.
     /// Instructions the VM cannot run (pointers, `syscall`) are runtime errors.
     pub fn call_named(&mut self, name: &str, args: &[Value], out: &mut dyn Write) -> Result<Value, VmError> {
@@ -278,6 +283,26 @@ impl<'m> Vm<'m> {
             }
             Inst::Syscall { .. } => return Err(self.error("`syscall` is not available on the VM")),
             Inst::Asm { .. } => return Err(self.error("inline asm is not available on the VM")),
+            Inst::Quote { dst, pieces, holes } => {
+                let mut code = pieces[0].clone();
+                for (hole, piece) in holes.iter().zip(&pieces[1..]) {
+                    let text = match (f.reg_type(*hole), self.get(*hole)) {
+                        // Parenthesized, so `$x * 2` keeps its meaning whatever `x` is.
+                        (Type::Expr, Value::Str(r)) => format!("({})", self.heap.str(r)),
+                        (Type::Str, Value::Str(r)) => string_literal(self.heap.str(r)),
+                        (Type::Int(jihoo_ir::IntTy::U64), Value::Int(n)) => (n as u64).to_string(),
+                        // Parenthesized so that a negative number stays one operand.
+                        (_, Value::Int(n)) if n < 0 => format!("({n})"),
+                        (_, Value::Int(n)) => n.to_string(),
+                        (_, Value::Bool(b)) => b.to_string(),
+                        (t, _) => return Err(self.error(&format!("cannot insert a value of type {t} into code"))),
+                    };
+                    code.push_str(&text);
+                    code.push_str(piece);
+                }
+                let r = self.alloc_str(&code);
+                self.set(*dst, Value::Str(r));
+            }
         }
         Ok(())
     }
@@ -388,6 +413,24 @@ impl<'m> Vm<'m> {
         };
         VmError { func, msg: msg.into() }
     }
+}
+
+/// `s` as jihoo source: a string literal that reads back as `s`.
+fn string_literal(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\0' => out.push_str("\\0"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn type_name(v: Value) -> &'static str {

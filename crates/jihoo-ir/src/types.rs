@@ -90,6 +90,9 @@ pub enum Type {
     Struct(String),
     /// `[T; N]`, a fixed-size array. Also a value type.
     Array(Box<Type>, u64),
+    /// A piece of code (an expression), inside macros. Only exists while
+    /// compiling: the VM represents it as the expression's source text.
+    Expr,
 }
 
 impl Type {
@@ -134,6 +137,7 @@ impl Type {
             Type::Str => profile == Profile::Hosted,
             Type::Ptr(inner) => profile == Profile::Freestanding && inner.available_in(profile),
             Type::Array(elem, _) => elem.available_in(profile),
+            Type::Expr => false,
             Type::Unit | Type::Bool | Type::Int(_) | Type::Struct(_) => true,
         }
     }
@@ -168,6 +172,7 @@ impl fmt::Display for Type {
             Type::Ptr(t) => write!(f, "*{t}"),
             Type::Struct(name) => f.write_str(name),
             Type::Array(elem, n) => write!(f, "[{elem}; {n}]"),
+            Type::Expr => f.write_str("expr"),
         }
     }
 }

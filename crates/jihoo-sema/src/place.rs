@@ -121,6 +121,14 @@ impl FnCx<'_> {
                     t => Err(Error::new(base_expr.pos, format!("cannot index into {t}"))),
                 }
             }
+            // A macro may expand to a place: `field!(p) = 1`.
+            ExprKind::MacroCall(name, args) => {
+                let expanded = self.expand(e.pos, name, args)?;
+                self.macro_depth += 1;
+                let r = self.place(&expanded);
+                self.macro_depth -= 1;
+                r
+            }
             ExprKind::Deref(inner) => {
                 let p = self.expr(inner, None)?;
                 let Some(ty) = self.ty(p).pointee().cloned() else {

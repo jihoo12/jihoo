@@ -35,6 +35,8 @@ pub struct FieldDecl {
 #[derive(Debug, Clone)]
 pub struct FnDecl {
     pub pos: Pos,
+    /// `macro name(...) -> expr { ... }`: run at compile time by `name!(...)`.
+    pub is_macro: bool,
     pub name: String,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
@@ -139,12 +141,27 @@ pub enum ExprKind {
     ArrayRepeat(Box<Expr>, Box<Expr>),
     /// `asm("template", out(...) T, in(...) x, clobber(...))`
     Asm(Box<AsmExpr>),
+    /// `name!(args)`: a macro call, replaced by the code the macro returns.
+    MacroCall(String, Vec<MacroArg>),
+    /// `quote(a + $x)`: code as a value, inside macros. `pieces` is the template
+    /// text around the holes, so `pieces.len() == holes.len() + 1`.
+    Quote(Vec<String>, Vec<Expr>),
+    /// `$x` or `$(expr)` inside a quote template; only appears in the template's
+    /// parsed form, which exists to check that the template is an expression.
+    Hole(Box<Expr>),
     /// `comptime expr`: evaluated while compiling, then used as a constant.
     Comptime(Box<Expr>),
     /// `size_of(T)`
     SizeOf(TypeExpr),
     /// `align_of(T)`
     AlignOf(TypeExpr),
+}
+
+/// An argument of a macro call: its source text and its parsed form.
+#[derive(Debug, Clone)]
+pub struct MacroArg {
+    pub text: String,
+    pub expr: Expr,
 }
 
 /// Inline assembly. Freestanding only.
@@ -197,4 +214,54 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+}
+
+/// Sets the position of `e` and everything inside it to `pos`. Code produced by a
+/// macro has no source of its own, so errors in it point at the macro call.
+pub fn set_pos(e: &mut Expr, pos: Pos) {
+    e.pos = pos;
+    let ty = |t: &mut TypeExpr| set_type_pos(t, pos);
+    match &mut e.kind {
+        ExprKind::Int(_) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::Var(_) => {}
+        ExprKind::Unary(_, x)
+        | ExprKind::Field(x, _)
+        | ExprKind::Deref(x)
+        | ExprKind::AddrOf(x)
+        | ExprKind::Comptime(x)
+        | ExprKind::Hole(x) => set_pos(x, pos),
+        ExprKind::Binary(_, l, r) | ExprKind::Index(l, r) | ExprKind::ArrayRepeat(l, r) => {
+            set_pos(l, pos);
+            set_pos(r, pos);
+        }
+        ExprKind::Call(_, args) | ExprKind::ArrayLit(args) => args.iter_mut().for_each(|a| set_pos(a, pos)),
+        ExprKind::Quote(_, holes) => holes.iter_mut().for_each(|a| set_pos(a, pos)),
+        ExprKind::MacroCall(_, args) => args.iter_mut().for_each(|a| set_pos(&mut a.expr, pos)),
+        ExprKind::StructLit(_, fields) => fields.iter_mut().for_each(|f| {
+            f.pos = pos;
+            set_pos(&mut f.value, pos);
+        }),
+        ExprKind::Cast(x, t) => {
+            set_pos(x, pos);
+            ty(t);
+        }
+        ExprKind::SizeOf(t) | ExprKind::AlignOf(t) => ty(t),
+        ExprKind::Asm(a) => {
+            if let Some((_, t)) = &mut a.output {
+                ty(t);
+            }
+            a.inputs.iter_mut().for_each(|(_, x)| set_pos(x, pos));
+        }
+    }
+}
+
+fn set_type_pos(t: &mut TypeExpr, pos: Pos) {
+    t.pos = pos;
+    match &mut t.kind {
+        TypeExprKind::Named(_) => {}
+        TypeExprKind::Ptr(inner) => set_type_pos(inner, pos),
+        TypeExprKind::Array(elem, n) => {
+            set_type_pos(elem, pos);
+            set_pos(n, pos);
+        }
+    }
 }

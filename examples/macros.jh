@@ -1,0 +1,49 @@
+// Macros are functions that run while compiling and return code.
+//   jihoo run examples/macros.jh
+//   jihoo emit-ir examples/macros.jh    // `main` contains only the expanded code
+
+// `expr` parameters receive code; other parameters receive compile-time values.
+macro power(x: expr, n: i64) -> expr {
+    let e = quote(1)
+    let i = 0
+    while i < n {
+        e = quote($e * $x)       // `$x` is inserted in parentheses
+        i = i + 1
+    }
+    return e
+}
+
+// `stringify` turns code back into text: handy for messages.
+macro expect(cond: expr) -> expr {
+    return quote(report($cond, $(stringify(cond))))
+}
+
+// Macros can make any expression, including struct literals and other macro calls.
+macro point(x: expr) -> expr {
+    return quote(Point { x: $x, y: power!($x, 2) })
+}
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+fn report(ok: bool, what: str) -> i64 {
+    if ok {
+        print("ok:     " + what)
+        return 0
+    }
+    print("FAILED: " + what)
+    return 1
+}
+
+fn main() -> i64 {
+    let y = 3
+    print(power!(y, 4))              // 81, as y * y * y * y with no loop at runtime
+    print(power!(y + 1, 2))          // 16: (y + 1) * (y + 1)
+    let p = point!(y)
+    let failures = expect!(p.y == 9)
+    failures = failures + expect!(power!(2, 10) == 1024)
+    failures = failures + expect!(p.x + 1 == 5)
+    return failures                  // 1: the last check fails on purpose
+}

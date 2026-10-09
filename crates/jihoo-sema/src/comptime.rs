@@ -39,6 +39,18 @@ impl Env<'_> {
     /// Evaluates `e` at compile time.
     /// `b` gives the comptime parameters in scope, which the expression may use.
     pub fn comptime(&self, e: &Expr, expected: Option<&Type>, b: &Rc<Bindings>) -> Result<(Type, ConstValue), Error> {
+        self.comptime_in(e, expected, b, false)
+    }
+
+    /// Like `comptime`; `in_macro` evaluates `e` with the rules of macro bodies
+    /// (strings are `str` even in freestanding programs), for macro arguments.
+    pub fn comptime_in(
+        &self,
+        e: &Expr,
+        expected: Option<&Type>,
+        b: &Rc<Bindings>,
+        in_macro: bool,
+    ) -> Result<(Type, ConstValue), Error> {
         let id = self.comptime_ids.get();
         self.comptime_ids.set(id + 1);
         let name = format!("comptime.{id}"); // `.` keeps it apart from user functions
@@ -46,14 +58,30 @@ impl Env<'_> {
         // Lower `e` into `fn comptime.N() -> T { return e }`.
         let mut cx = FnCx::new(self, Rc::new(Sig { params: vec![], ret: Type::Unit }), b.clone());
         cx.in_comptime = true;
+        cx.in_macro = in_macro;
         let r = cx.expr(e, expected)?;
         let ty = cx.ty(r).clone();
         cx.terminate(Terminator::Ret(r));
         let helper = cx.finish(&name, ty.clone(), e.pos)?;
+        let v = self.run(e.pos, vec![helper], &name, &[], &ty)?;
+        Ok((ty, v))
+    }
 
-        // Everything the helper can call, transitively.
-        let mut funcs = vec![helper];
-        let mut seen = HashSet::new();
+    /// Runs function `entry` on the VM with `args` and returns its result of type
+    /// `ty`. `funcs` are functions that exist only for this run (such as a
+    /// `comptime` helper); everything they call is looked up and compiled.
+    pub fn run(
+        &self,
+        pos: Pos,
+        mut funcs: Vec<jihoo_ir::Function>,
+        entry: &str,
+        args: &[ConstValue],
+        ty: &Type,
+    ) -> Result<ConstValue, Error> {
+        if funcs.is_empty() {
+            funcs.push((*self.function(entry)?).clone());
+        }
+        let mut seen: HashSet<String> = funcs.iter().map(|f| f.name.clone()).collect();
         let mut i = 0;
         while i < funcs.len() {
             for callee in callees(&funcs[i]) {
@@ -62,12 +90,12 @@ impl Env<'_> {
                 }
                 if self.function_in_progress(&callee) {
                     return Err(Error::new(
-                        e.pos,
+                        pos,
                         format!("cannot call `{callee}` at compile time here: `{callee}` is still being compiled"),
                     ));
                 }
                 let f = self.function(&callee).map_err(|_| {
-                    Error::new(e.pos, format!("cannot evaluate this at compile time: `{callee}` has errors"))
+                    Error::new(pos, format!("cannot evaluate this at compile time: `{callee}` has errors"))
                 })?;
                 funcs.push((*f).clone());
             }
@@ -76,17 +104,26 @@ impl Env<'_> {
 
         let module = jihoo_ir::Module { profile: self.profile, structs: vec![], funcs };
         let mut vm = Vm::new(&module).with_fuel(FUEL);
+        let mut values = Vec::new();
+        for a in args {
+            values.push(match a {
+                ConstValue::Unit => Value::Unit,
+                ConstValue::Int(n) => Value::Int(*n),
+                ConstValue::Bool(b) => Value::Bool(*b),
+                ConstValue::Str(s) => vm.alloc_string(s),
+                ConstValue::Agg(_) => unreachable!("aggregate arguments are rejected earlier"),
+            });
+        }
         let mut out = Vec::new();
-        let result = vm.call_named(&name, &[], &mut out);
+        let result = vm.call_named(entry, &values, &mut out);
         if !out.is_empty() {
             eprint!("{}", String::from_utf8_lossy(&out));
         }
         let v = result.map_err(|err| {
-            let at = if err.func == name { String::new() } else { format!(" in `{}`", err.func) };
-            Error::new(e.pos, format!("compile-time evaluation failed{at}: {}", err.msg))
+            let at = if err.func.starts_with("comptime.") { String::new() } else { format!(" in `{}`", err.func) };
+            Error::new(pos, format!("compile-time evaluation failed{at}: {}", err.msg))
         })?;
-        let cv = self.to_const(e.pos, v, &ty, vm.heap())?;
-        Ok((ty, cv))
+        self.to_const(pos, v, ty, vm.heap())
     }
 
     fn to_const(&self, pos: Pos, v: Value, ty: &Type, heap: &Heap) -> Result<ConstValue, Error> {
@@ -94,7 +131,7 @@ impl Env<'_> {
             (Value::Unit, Type::Unit) => ConstValue::Unit,
             (Value::Int(n), Type::Int(_)) => ConstValue::Int(n),
             (Value::Bool(b), Type::Bool) => ConstValue::Bool(b),
-            (Value::Str(r), Type::Str) => ConstValue::Str(heap.str(r).to_string()),
+            (Value::Str(r), Type::Str | Type::Expr) => ConstValue::Str(heap.str(r).to_string()),
             (Value::Agg(r), Type::Struct(_)) => {
                 let fields = heap.items(r).to_vec();
                 let tys: Vec<Type> = (0..fields.len() as u32).map(|i| self.field_type(ty, i)).collect();

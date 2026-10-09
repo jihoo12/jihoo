@@ -13,20 +13,43 @@ use crate::lexer::{lex, Tok, Token};
 use crate::{Error, Pos};
 
 pub fn parse(src: &str) -> Result<Program, Error> {
-    let toks = lex(src)?;
-    Parser { toks, i: 0, no_struct_lit: false }.program()
+    Parser::new(src)?.program()
+}
+
+/// Parses a single expression, such as the code a macro produced.
+pub fn parse_expr(src: &str) -> Result<Expr, Error> {
+    let mut p = Parser::new(src)?;
+    let e = p.expr()?;
+    if *p.peek() != Tok::Eof {
+        return Err(p.unexpected("end of expression"));
+    }
+    Ok(e)
 }
 
 struct Parser {
+    src: String,
     toks: Vec<Token>,
     i: usize,
     /// Set while parsing an `if`/`while` condition.
     no_struct_lit: bool,
+    /// Set while parsing a `quote(...)` template: the holes found so far, with
+    /// their byte ranges in the source.
+    holes: Option<Vec<(usize, usize, Expr)>>,
 }
 
 type PResult<T> = Result<T, Error>;
 
 impl Parser {
+    fn new(src: &str) -> Result<Self, Error> {
+        let toks = lex(src)?;
+        Ok(Parser { src: src.to_string(), toks, i: 0, no_struct_lit: false, holes: None })
+    }
+
+    /// Byte offset where the previous token ended.
+    fn prev_end(&self) -> usize {
+        self.toks[self.i.saturating_sub(1)].end
+    }
+
     fn cur(&self) -> &Token {
         &self.toks[self.i]
     }
@@ -119,13 +142,13 @@ impl Parser {
         let mut funcs = Vec::new();
         while *self.peek() != Tok::Eof {
             match self.peek() {
-                Tok::Fn => funcs.push(self.fn_decl()?),
+                Tok::Fn | Tok::Macro => funcs.push(self.fn_decl()?),
                 Tok::Struct => structs.push(self.struct_decl()?),
                 Tok::Const => consts.push(self.const_decl()?),
                 Tok::InnerAttr(_) => {
                     return Err(Error::new(self.pos(), "`#![...]` must come before any item"))
                 }
-                _ => return Err(self.unexpected("`fn`, `struct` or `const`")),
+                _ => return Err(self.unexpected("`fn`, `macro`, `struct` or `const`")),
             }
         }
         Ok(Program { attrs, structs, consts, funcs })
@@ -153,7 +176,8 @@ impl Parser {
     }
 
     fn fn_decl(&mut self) -> PResult<FnDecl> {
-        let pos = self.expect(&Tok::Fn, "`fn`")?.pos;
+        let is_macro = *self.peek() == Tok::Macro;
+        let pos = self.bump().pos; // `fn` or `macro`
         let (_, name) = self.ident("function name")?;
         self.expect(&Tok::LParen, "`(`")?;
         let mut params = Vec::new();
@@ -170,7 +194,7 @@ impl Parser {
         self.expect(&Tok::RParen, "`)`")?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
         let body = self.block()?;
-        Ok(FnDecl { pos, name, params, ret, body })
+        Ok(FnDecl { pos, is_macro, name, params, ret, body })
     }
 
     fn type_expr(&mut self) -> PResult<TypeExpr> {
@@ -365,6 +389,14 @@ impl Parser {
                 self.bump();
                 ExprKind::Str(s)
             }
+            Tok::Ident(name) if self.toks[self.i + 1].tok == Tok::Bang
+                && !self.toks[self.i + 1].newline_before
+                && self.toks[self.i + 2].tok == Tok::LParen =>
+            {
+                self.bump();
+                self.bump();
+                ExprKind::MacroCall(name, self.macro_args()?)
+            }
             Tok::Ident(name) if matches!(name.as_str(), "size_of" | "align_of") && self.toks[self.i + 1].tok == Tok::LParen => {
                 self.bump();
                 self.bump();
@@ -433,6 +465,25 @@ impl Parser {
                 self.bump();
                 ExprKind::Asm(Box::new(self.asm_args()?))
             }
+            Tok::Quote => {
+                self.bump();
+                self.quote()?
+            }
+            Tok::Dollar => {
+                let start = self.cur().start;
+                self.bump();
+                let Some(_) = self.holes else {
+                    return Err(Error::new(pos, "`$` can only be used inside `quote(...)`"));
+                };
+                // The hole itself is ordinary code; it may not contain holes.
+                let saved = self.holes.take();
+                let inner = self.hole_body();
+                self.holes = saved;
+                let inner = inner?;
+                let end = self.prev_end();
+                self.holes.as_mut().unwrap().push((start, end, inner.clone()));
+                ExprKind::Hole(Box::new(inner))
+            }
             Tok::LParen => {
                 self.bump();
                 let e = self.with_struct_lit(true, |p| p.expr())?;
@@ -446,6 +497,66 @@ impl Parser {
 }
 
 impl Parser {
+    /// What follows `$`: a name, or a parenthesized expression.
+    fn hole_body(&mut self) -> PResult<Expr> {
+        if self.eat(&Tok::LParen) {
+            let e = self.with_struct_lit(true, |p| p.expr())?;
+            self.expect(&Tok::RParen, "`)`")?;
+            Ok(e)
+        } else {
+            let (pos, n) = self.ident("a name or `(` after `$`")?;
+            Ok(Expr { pos, kind: ExprKind::Var(n) })
+        }
+    }
+
+    /// `(arg, arg, ...)` of a macro call; each argument keeps its source text.
+    fn macro_args(&mut self) -> PResult<Vec<MacroArg>> {
+        self.expect(&Tok::LParen, "`(`")?;
+        let args = self.with_struct_lit(true, |p| {
+            let mut args = Vec::new();
+            while *p.peek() != Tok::RParen {
+                let start = p.cur().start;
+                let expr = p.expr()?;
+                let text = p.src[start..p.prev_end()].to_string();
+                args.push(MacroArg { text, expr });
+                if !p.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            Ok(args)
+        })?;
+        self.expect(&Tok::RParen, "`)`")?;
+        Ok(args)
+    }
+
+    /// `quote(template)`: the template must parse as an expression, with `$x` and
+    /// `$(expr)` holes standing in for code inserted when the macro runs.
+    fn quote(&mut self) -> PResult<ExprKind> {
+        let pos = self.pos();
+        if self.holes.is_some() {
+            return Err(Error::new(pos, "`quote` cannot be nested"));
+        }
+        self.expect(&Tok::LParen, "`(`")?;
+        let start = self.cur().start;
+        self.holes = Some(Vec::new());
+        let parsed = self.with_struct_lit(true, |p| p.expr());
+        let holes = self.holes.take().unwrap();
+        parsed?;
+        let end = self.prev_end();
+        self.expect(&Tok::RParen, "`)`")?;
+
+        let mut pieces = Vec::new();
+        let mut exprs = Vec::new();
+        let mut at = start;
+        for (s, e, expr) in holes {
+            pieces.push(self.src[at..s].to_string());
+            exprs.push(expr);
+            at = e;
+        }
+        pieces.push(self.src[at..end].to_string());
+        Ok(ExprKind::Quote(pieces, exprs))
+    }
+
     /// `("line", "line", out(reg) T, in("rdi") x, clobber("rcx", "memory"))`
     fn asm_args(&mut self) -> PResult<AsmExpr> {
         self.expect(&Tok::LParen, "`(`")?;
@@ -550,6 +661,9 @@ fn punct(t: &Tok) -> &'static str {
         Tok::Const => "const",
         Tok::Comptime => "comptime",
         Tok::Asm => "asm",
+        Tok::Macro => "macro",
+        Tok::Quote => "quote",
+        Tok::Dollar => "$",
         Tok::LParen => "(",
         Tok::RParen => ")",
         Tok::LBrace => "{",
@@ -690,6 +804,27 @@ mod tests {
         assert!(parse("fn f() { let x = 0x1_0000_0000_0000_0000 }").unwrap_err().msg.contains("too large"));
         assert!(parse("fn f() { let x = 0xg }").unwrap_err().msg.contains("not a valid number"));
         assert!(parse("fn f() { let x = 12ab }").unwrap_err().msg.contains("not a valid number"));
+    }
+
+    #[test]
+    fn macros() {
+        let p = parse("macro twice(x: expr) -> expr { return quote($x + $(x) * 2) }\nfn main() { let y = twice!(a + 1, f(b, c)) }")
+            .unwrap();
+        assert!(p.funcs[0].is_macro && !p.funcs[1].is_macro);
+        let Stmt::Return { value: Some(q), .. } = &p.funcs[0].body.stmts[0] else { panic!() };
+        let ExprKind::Quote(pieces, holes) = &q.kind else { panic!() };
+        assert_eq!(pieces, &["", " + ", " * 2"]);
+        assert_eq!(holes.len(), 2);
+        let Stmt::Let { value, .. } = &p.funcs[1].body.stmts[0] else { panic!() };
+        let ExprKind::MacroCall(name, args) = &value.kind else { panic!() };
+        assert_eq!(name, "twice");
+        assert_eq!(args.iter().map(|a| a.text.as_str()).collect::<Vec<_>>(), ["a + 1", "f(b, c)"]);
+        // `x != y` is not a macro call.
+        assert!(matches!(body("let z = x != y")[0], Stmt::Let { .. }));
+        assert!(parse("fn f() { let x = $y }").unwrap_err().msg.contains("only be used inside `quote"));
+        assert!(parse("macro m() -> expr { return quote(quote(1)) }").unwrap_err().msg.contains("cannot be nested"));
+        assert!(parse("macro m() -> expr { return quote(1 +) }").is_err());
+        assert_eq!(parse_expr("(1) * (2)").unwrap().pos, Pos { line: 1, col: 5 });
     }
 
     #[test]

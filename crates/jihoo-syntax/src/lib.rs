@@ -6,7 +6,7 @@ mod parser;
 
 use std::fmt;
 
-pub use parser::parse;
+pub use parser::{parse, parse_expr};
 
 /// Source position (1-based).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

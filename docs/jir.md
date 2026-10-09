@@ -77,6 +77,7 @@ It takes no parameters and returns `unit` or `i64`.
 | `str`             | GC-managed string, hosted only           | —             |
 | `*T`              | raw pointer to `T`, freestanding only    | `ptr`         |
 | `$Name`           | struct, by value                         | named struct  |
+| `expr`            | code, inside macros; compile time only   | —             |
 | `[N x T]`         | array of `N` `T`s, by value              | `[N x T]`     |
 
 `str` and `*T` are deliberately separate: GC references and raw pointers must never
@@ -189,6 +190,7 @@ runtime error and native code traps.
 | `%d = syscall(%n, %a, ...)`     | int or `*T`, 1 to 7 operands | `i64` | freestanding only: raw Linux syscall `%n` |
 | `print %a`                      | int, `bool` or `str`  |        | hosted only: print the value and a newline |
 | `%d = asm "tmpl", "cons"(%a, ...)` | int, `bool` or `*T` | int, `*T` or `unit` | freestanding only: inline assembly |
+| `%d = quote ["p0", "p1", ...](%h, ...)` | `expr`, int, `bool` or `str` | `expr` | compile time only: code from template pieces and holes |
 
 `asm` passes `tmpl` and `cons` to LLVM unchanged: the template uses LLVM operand
 references (`${0}` is the output if there is one, then the inputs, in order;

@@ -464,3 +464,77 @@ fn inline_asm_lowering() {
     let e = err(&fs("fn f() -> i64 { return asm(\"mov {out}, 1\", out(reg) i64) }\nconst X = f()"));
     assert!(e.contains("inline asm is not available"), "{e}");
 }
+
+// ---- macros ----
+
+/// Compiles and runs a hosted program, returning what it printed.
+fn run(src: &str) -> String {
+    let m = check(src).unwrap_or_else(|e| panic!("{e}"));
+    let mut out = Vec::new();
+    jihoo_vm::run(&m, &mut out).unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+const POWER: &str = "macro power(x: expr, n: i64) -> expr {\n  let e = quote(1)\n  let i = 0\n  while i < n {\n    e = quote($e * $x)\n    i = i + 1\n  }\n  return e\n}\n";
+
+#[test]
+fn macros_expand_to_code() {
+    let src = format!("{POWER}fn main() {{\n  let y = 3\n  print(power!(y, 4))\n  print(power!(y + 1, 2))\n}}");
+    // `y + 1` is inserted in parentheses: (1 * (y + 1)) * (y + 1), not 1 * y + 1 * y + 1.
+    assert_eq!(run(&src), "81\n16\n");
+    let m = check(&src).unwrap();
+    // The macro runs while compiling and is not part of the program.
+    assert!(m.func("power").is_none());
+    assert!(!main_ir(&m).contains("call"), "{m}");
+}
+
+#[test]
+fn macro_value_parameters_and_literals() {
+    let src = "const N = 3\n\
+               macro sum_to(n: i64) -> expr {\n  let e = quote(0)\n  let i = 1\n  while i <= n {\n    e = quote($e + $i)\n    i = i + 1\n  }\n  return e\n}\n\
+               macro greet(who: str, loud: bool) -> expr {\n  if loud { return quote($(\"HELLO \" + who) + \"!\") }\n  return quote($(\"hello \" + who))\n}\n\
+               macro neg() -> expr { return quote($(0 - 5) * 2) }\n\
+               fn main() {\n  print(sum_to!(N * 2))\n  print(greet!(\"jihoo\", true))\n  print(greet!(\"vm\", 1 == 2))\n  print(neg!())\n}";
+    assert_eq!(run(src), "21\nHELLO jihoo!\nhello vm\n-10\n");
+}
+
+#[test]
+fn stringify_and_nested_macros() {
+    let src = "fn check(ok: bool, what: str) -> i64 {\n  if ok { return 0 }\n  print(\"failed: \" + what)\n  return 1\n}\n\
+               macro expect(cond: expr) -> expr { return quote(check($cond, $(stringify(cond)))) }\n\
+               macro square(x: expr) -> expr { return quote($x * $x) }\n\
+               fn main() {\n  let a = 4\n  let failures = expect!(square!(a) == 16) + expect!(a + 1 == 6)\n  print(failures)\n}";
+    assert_eq!(run(src), "failed: a + 1 == 6\n1\n");
+}
+
+#[test]
+fn macros_in_freestanding_programs() {
+    // Macro bodies run on the VM, so they may use `str` even when freestanding;
+    // a `str` inserted into code becomes a string literal (a `*u8` here).
+    let m = check(&fs(
+        "macro msg(s: str) -> expr { return quote($(s + \"\\n\")) }\n\
+         fn f() -> i64 { let p = msg!(\"hi\")\n return syscall(1, 1, p, 3) }",
+    ))
+    .unwrap();
+    assert!(m.to_string().contains(r#"str "hi\n""#), "{m}");
+}
+
+#[test]
+fn macro_errors() {
+    assert!(err("fn main() { let x = quote(1) }").contains("only be used inside a macro"));
+    assert!(err("fn f(x: expr) {}\nfn main() {}").contains("only available in macros"));
+    assert!(err(&format!("{POWER}fn main() {{ print(power(1, 2)) }}")).contains("call it as `power!(...)`"));
+    assert!(err("fn main() { print(nope!(1)) }").contains("`nope` is not a macro"));
+    assert!(err("macro m(x: expr) -> i64 { return 1 }\nfn main() {}").contains("must return `expr`"));
+    assert!(err("macro m(x: [i64; 2]) -> expr { return quote(1) }\nfn main() {}").contains("macro parameters must be"));
+    assert!(err(&format!("{POWER}fn main() {{ print(power!(1)) }}")).contains("takes 2 arguments, 1 given"));
+    assert!(err(&format!("{POWER}fn main() {{ let k = 2\n print(power!(1, k)) }}")).contains("not known at compile time"));
+    // Errors in the produced code point at the call and name the macro.
+    let e = err(&format!("{POWER}fn main() {{ print(power!(true, 2)) }}"));
+    assert!(e.contains("cannot apply `*` to i64 and bool (in code produced by `power!`)"), "{e}");
+    assert!(e.starts_with("10:"), "{e}");
+    let e = err("macro forever(x: expr) -> expr { return quote(forever!($x)) }\nfn main() { print(forever!(1)) }");
+    assert!(e.contains("too deep"), "{e}");
+    // Macro bodies are checked even if the macro is never used.
+    assert!(err("macro bad() -> expr { return 1 }\nfn main() {}").contains("return value must be expr"));
+}

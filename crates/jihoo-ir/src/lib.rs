@@ -192,6 +192,10 @@ pub enum Inst {
     /// LLVM constraint string with one input entry per register in `args`. `dst`
     /// is the output, or `unit`.
     Asm { dst: Reg, template: String, constraints: String, args: Vec<Reg> },
+    /// Compile time only (macros): builds an `expr` from template text and holes.
+    /// `pieces.len() == holes.len() + 1`. An `expr` hole is inserted in
+    /// parentheses, other values as literals.
+    Quote { dst: Reg, pieces: Vec<String>, holes: Vec<Reg> },
 }
 
 #[derive(Debug, Clone)]

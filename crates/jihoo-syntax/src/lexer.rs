@@ -21,6 +21,8 @@ pub enum Tok {
     Const,
     Comptime,
     Asm,
+    Macro,
+    Quote,
 
     LParen,
     RParen,
@@ -47,6 +49,7 @@ pub enum Tok {
     Percent,
     Bang,
     Amp,
+    Dollar,
     AndAnd,
     OrOr,
 
@@ -59,6 +62,9 @@ pub struct Token {
     pub pos: Pos,
     /// Whether a newline preceded this token. Used to end statements without `;`.
     pub newline_before: bool,
+    /// Byte range in the source, used to recover the text of macro arguments.
+    pub start: usize,
+    pub end: usize,
 }
 
 struct Lexer<'a> {
@@ -150,10 +156,10 @@ impl<'a> Lexer<'a> {
     fn next(&mut self) -> Result<Token, Error> {
         let newline_before = self.skip_trivia();
         let pos = self.pos();
-        let mk = |tok| Ok(Token { tok, pos, newline_before });
+        let start = self.i;
 
         if self.i >= self.src.len() {
-            return mk(Tok::Eof);
+            return Ok(Token { tok: Tok::Eof, pos, newline_before, start, end: start });
         }
 
         let c = self.bump();
@@ -168,6 +174,7 @@ impl<'a> Lexer<'a> {
             b',' => Tok::Comma,
             b':' => Tok::Colon,
             b';' => Tok::Semi,
+            b'$' => Tok::Dollar,
             b'+' => Tok::Plus,
             b'*' => Tok::Star,
             b'/' => Tok::Slash,
@@ -269,6 +276,8 @@ impl<'a> Lexer<'a> {
                     "const" => Tok::Const,
                     "comptime" => Tok::Comptime,
                     "asm" => Tok::Asm,
+                    "macro" => Tok::Macro,
+                    "quote" => Tok::Quote,
                     _ => Tok::Ident(word.to_string()),
                 }
             }
@@ -279,7 +288,7 @@ impl<'a> Lexer<'a> {
                 ))
             }
         };
-        mk(tok)
+        Ok(Token { tok, pos, newline_before, start, end: self.i })
     }
 }
 

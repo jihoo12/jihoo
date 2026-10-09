@@ -230,8 +230,44 @@ ramp(5)              // returns [i64; 5]
 - Instances needed only at compile time (`comptime ramp(3)`) still appear in the
   module; natively they are internal and dropped by LLVM.
 
-Planned next: AST macros on the same machinery, and generic structs (functions
-that return types).
+## Macros
+
+```jihoo
+macro power(x: expr, n: i64) -> expr {
+    let e = quote(1)
+    let i = 0
+    while i < n {
+        e = quote($e * $x)
+        i = i + 1
+    }
+    return e
+}
+macro expect(cond: expr) -> expr {
+    return quote(report($cond, $(stringify(cond))))
+}
+
+power!(y + 1, 2)    // expands to ((1) * (y + 1)) * (y + 1)
+```
+
+- A macro is a function that runs at compile time, on the VM, and returns code
+  (`expr`). It is called as `name!(...)` and the code it returns replaces the call
+  (`crates/jihoo-sema/src/macros.rs`).
+- `expr` parameters receive the arguments as code, unevaluated; integer, bool and
+  `str` parameters receive values computed at compile time.
+- `quote(template)` builds code. The template must be an expression, checked when
+  the macro is parsed; `$x` and `$(e)` are holes. An `expr` is inserted in
+  parentheses, so precedence cannot change; integers, bools and strings are
+  inserted as literals. `stringify(e)` gives the source text of code.
+- The result is compiled in the caller's scope, so it can use the caller's
+  variables: macros are not hygienic, like C macros. Errors in produced code point
+  at the call and say which macro produced it. Expansion stops 64 levels deep.
+- Macro bodies may use `str` even in freestanding programs, since they only run on
+  the VM; a `str` inserted into code becomes a string literal. Macros are
+  type checked even when unused, and are never part of the compiled program.
+- Macros produce expressions only, not statements or items.
+
+Planned next: statement and item macros, and generic structs (functions that
+return types).
 
 ## GC
 
@@ -246,4 +282,4 @@ grows past twice the size that survived the last collection (1 MiB minimum).
 3. ~~Sized integers, pointers with loads/stores, structs, arrays, `size_of`,
    inline asm.~~
 4. ~~`comptime` on the VM, generic functions.~~
-5. `alloc` layer; AST macros.
+5. ~~Expression macros.~~ `alloc` layer; statement and item macros.

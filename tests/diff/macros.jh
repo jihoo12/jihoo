@@ -1,0 +1,49 @@
+// Macros expand before code generation, so both backends see the same code.
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+macro power(x: expr, n: i64) -> expr {
+    let e = quote(1)
+    let i = 0
+    while i < n {
+        e = quote($e * $x)
+        i = i + 1
+    }
+    return e
+}
+
+macro sum_to(n: i64) -> expr {
+    let e = quote(0)
+    let i = 1
+    while i <= n {
+        e = quote($e + $i)
+        i = i + 1
+    }
+    return e
+}
+
+macro point(x: expr) -> expr {
+    return quote(Point { x: $x, y: power!($x, 2) })
+}
+
+macro pick(first: bool, a: expr, b: expr) -> expr {
+    if first {
+        return a
+    }
+    return b
+}
+
+const TEN = 10
+
+fn entry() -> i64 {
+    let y = 3
+    let p = point!(y + 1)                 // x = 4, y = 16
+    let total = power!(y, 3)              // 27
+    total = total + sum_to!(TEN)          // 55
+    total = total + p.x * p.y             // 64
+    total = total + pick!(TEN > 5, 100, 0 - 100)
+    return total                          // 246
+}

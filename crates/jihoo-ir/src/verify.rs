@@ -276,6 +276,8 @@ impl Cx<'_> {
                             t => Err(format!("asm result {dst} has type {}", t.jir())),
                         }
                     }
+                    // Macros run on the VM while compiling and never end up in a module.
+                    Inst::Quote { .. } => Err("`quote` only exists at compile time".into()),
                     Inst::Print { src } => {
                         if profile != Profile::Hosted {
                             Err("`print` needs std and is not available in freestanding mode".into())

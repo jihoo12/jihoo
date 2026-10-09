@@ -132,14 +132,22 @@ impl<'p> Env<'p> {
 
     /// Resolves a type expression. `b` gives the comptime parameters in scope.
     pub fn resolve(&self, t: &TypeExpr, b: &Rc<Bindings>) -> Result<Type, Error> {
+        self.resolve_in(t, b, false)
+    }
+
+    /// Like `resolve`; `in_macro` also allows the types that only exist while
+    /// compiling: `expr`, and `str` in freestanding programs.
+    pub fn resolve_in(&self, t: &TypeExpr, b: &Rc<Bindings>, in_macro: bool) -> Result<Type, Error> {
         match &t.kind {
             TypeExprKind::Ptr(inner) => {
                 if self.profile != Profile::Freestanding {
                     return Err(Error::new(t.pos, "pointer types are only available in freestanding mode"));
                 }
-                Ok(Type::ptr(self.resolve(inner, b)?))
+                Ok(Type::ptr(self.resolve_in(inner, b, in_macro)?))
             }
-            TypeExprKind::Array(elem, n) => Ok(Type::array(self.resolve(elem, b)?, self.array_len(n, b)?)),
+            TypeExprKind::Array(elem, n) => {
+                Ok(Type::array(self.resolve_in(elem, b, in_macro)?, self.array_len(n, b)?))
+            }
             TypeExprKind::Named(name) => {
                 match b.get(name) {
                     Some(Binding::Type(t)) => return Ok(t.clone()),
@@ -151,8 +159,15 @@ impl<'p> Env<'p> {
                 if name == "type" {
                     return Err(Error::new(t.pos, "`type` can only be the type of a `comptime` parameter"));
                 }
+                if name == "expr" {
+                    return if in_macro {
+                        Ok(Type::Expr)
+                    } else {
+                        Err(Error::new(t.pos, "`expr` (a piece of code) is only available in macros"))
+                    };
+                }
                 if let Some(ty) = Type::from_name(name) {
-                    if ty == Type::Str && self.profile == Profile::Freestanding {
+                    if ty == Type::Str && self.profile == Profile::Freestanding && !in_macro {
                         return Err(Error::new(
                             t.pos,
                             "type `str` is garbage collected and is not available in freestanding mode (use `*u8`)",
@@ -268,7 +283,12 @@ impl<'p> Env<'p> {
 
     /// The declaration of `name` if it is a generic function.
     pub fn generic(&self, name: &str) -> Option<&'p FnDecl> {
-        self.fn_decls.get(name).copied().filter(|d| d.params.iter().any(|p| p.comptime))
+        self.fn_decls.get(name).copied().filter(|d| !d.is_macro && d.params.iter().any(|p| p.comptime))
+    }
+
+    /// The declaration of `name` if it is a macro.
+    pub fn macro_decl(&self, name: &str) -> Option<&'p FnDecl> {
+        self.fn_decls.get(name).copied().filter(|d| d.is_macro)
     }
 
     /// The signature of function `name`, or `None` if there is no such function.
@@ -287,12 +307,29 @@ impl<'p> Env<'p> {
                         return Err(Error::new(p.ty.pos, "`type` can only be the type of a `comptime` parameter"));
                     }
                 }
-                let params =
-                    decl.params.iter().map(|p| self.resolve(&p.ty, &self.empty)).collect::<Result<_, _>>()?;
+                let m = decl.is_macro;
+                let params: Vec<Type> =
+                    decl.params.iter().map(|p| self.resolve_in(&p.ty, &self.empty, m)).collect::<Result<_, _>>()?;
                 let ret = match &decl.ret {
-                    Some(t) => self.resolve(t, &self.empty)?,
+                    Some(t) => self.resolve_in(t, &self.empty, m)?,
                     None => Type::Unit,
                 };
+                if m {
+                    if ret != Type::Expr {
+                        return Err(Error::new(decl.pos, format!("macro `{name}` must return `expr`, not {ret}")));
+                    }
+                    for (p, t) in decl.params.iter().zip(&params) {
+                        if p.comptime {
+                            return Err(Error::new(p.pos, "macro parameters are already compile-time; drop `comptime`"));
+                        }
+                        if !matches!(t, Type::Expr | Type::Int(_) | Type::Bool | Type::Str) {
+                            return Err(Error::new(
+                                p.ty.pos,
+                                format!("macro parameters must be `expr`, integers, bools or `str`, not {t}"),
+                            ));
+                        }
+                    }
+                }
                 Ok(Rc::new(Sig { params, ret }))
             },
         ))
