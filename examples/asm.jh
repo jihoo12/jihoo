@@ -1,0 +1,46 @@
+#![freestanding]
+// Inline assembly (x86_64 Linux, Intel syntax). No libc, no `syscall` builtin:
+// everything below talks to the kernel and the CPU directly.
+//   jihoo build examples/asm.jh -o out/asm && ./out/asm; echo $?
+
+fn write(fd: i64, buf: *u8, len: i64) -> i64 {
+    return asm("syscall",
+        out("rax") i64,
+        in("rax") 1, in("rdi") fd, in("rsi") buf, in("rdx") len,
+        clobber("rcx", "r11", "memory"))
+}
+
+fn exit(code: i64) {
+    asm("syscall", in("rax") 60, in("rdi") code, clobber("rcx", "r11", "memory"))
+}
+
+// `reg` lets LLVM pick the registers.
+fn bswap(x: u64) -> u64 {
+    return asm("mov {out}, {0}", "bswap {out}", out(reg) u64, in(reg) x)
+}
+
+fn lea3(a: i64, b: i64) -> i64 {
+    return asm("lea {out}, [{0} + {1}*2 + 3]", out(reg) i64, in(reg) a, in(reg) b)
+}
+
+// A memory operand through a pointer.
+fn swap_mem(p: *i64, v: i64) -> i64 {
+    return asm("xchg {out}, qword ptr [{1}]", out(reg) i64, in(out) v, in(reg) p, clobber("memory"))
+}
+
+fn add32(a: i32, b: i32) -> i32 {
+    return asm("mov {out}, {0}", "add {out}, {1}", out(reg) i32, in(reg) a, in(reg) b)
+}
+
+fn _start() {
+    let msg = "inline asm says hi\n"
+    write(1, msg, 19)
+
+    let ok = 0
+    if bswap(0x0102030405060708) == 0x0807060504030201 { ok = ok + 1 }
+    if lea3(10, 4) == 21 { ok = ok + 1 }
+    let cell = 5
+    if swap_mem(&cell, 9) == 5 && cell == 9 { ok = ok + 1 }
+    if add32(2000000000, 2000000000) == -294967296 { ok = ok + 1 } // wraps in 32 bits
+    exit(ok)  // 4 when everything worked
+}

@@ -265,6 +265,16 @@ Inst parse_assign(Line &l) {
     inst.args = {l.reg()};
     l.punct(",");
     inst.imm = l.index();
+  } else if (w == "asm") {
+    const Tok &t = l.next("an asm template");
+    if (t.kind != TokKind::Str) fail(l.no, "expected an asm template string");
+    inst.text = t.text;
+    l.punct(",");
+    const Tok &c = l.next("asm constraints");
+    if (c.kind != TokKind::Str) fail(l.no, "expected an asm constraint string");
+    inst.constraints = c.text;
+    inst.op = Op::Asm;
+    inst.args = l.reg_list();
   } else if (w == "array") {
     inst.op = Op::Array;
     inst.args = l.reg_list();

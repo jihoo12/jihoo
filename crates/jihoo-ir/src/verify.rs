@@ -254,6 +254,28 @@ impl Cx<'_> {
                             expect(dst, &Type::I64)
                         }
                     }
+                    Inst::Asm { dst, constraints, args, .. } => {
+                        freestanding("asm")?;
+                        // Inputs are the entries that are neither outputs nor clobbers.
+                        let inputs = constraints
+                            .split(',')
+                            .filter(|c| !c.is_empty() && !c.starts_with('=') && !c.starts_with('~'))
+                            .count();
+                        if inputs != args.len() {
+                            return Err(at(format!("asm constraints name {inputs} inputs, {} given", args.len())));
+                        }
+                        for a in args {
+                            if !matches!(ty(a)?, Type::Int(_) | Type::Ptr(_) | Type::Bool) {
+                                return Err(at(format!("asm operand {a} has type {}", ty(a)?.jir())));
+                            }
+                        }
+                        let has_out = constraints.split(',').any(|c| c.starts_with('='));
+                        match ty(dst)? {
+                            Type::Unit if !has_out => Ok(()),
+                            Type::Int(_) | Type::Ptr(_) if has_out => Ok(()),
+                            t => Err(format!("asm result {dst} has type {}", t.jir())),
+                        }
+                    }
                     Inst::Print { src } => {
                         if profile != Profile::Hosted {
                             Err("`print` needs std and is not available in freestanding mode".into())

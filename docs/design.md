@@ -56,7 +56,7 @@ fn area(w: i64, h: i64) -> i64 {   // signatures are written out
 - Types: `unit`, `bool`, `i8`…`i64`, `u8`…`u64`, structs, plus `str` (hosted
   only, garbage collected) and `*T` (freestanding only, raw pointer). A string
   literal is a `str` when hosted and a `*u8` to constant bytes when freestanding.
-- Integer literals take their type from context (`let c: u8 = 65`, `p[i] == 0`,
+- Integer literals (`1_000`, `0xff`, `0b1010`) take their type from context (`let c: u8 = 65`, `p[i] == 0`,
   arguments, fields), defaulting to `i64`, and must fit that type. Different
   integer types never mix implicitly; convert with `as`.
 - A function without `-> T` returns `unit`.
@@ -100,6 +100,33 @@ fn sum(list: *Node) -> i64 {
   valid until the function returns. `&*p` and `&p[i]` are just pointers.
 - Assignment targets are *places*: variables, fields, `*p` and `p[i]`
   (`crates/jihoo-sema/src/place.rs`).
+
+## Inline assembly
+
+```jihoo
+#![freestanding]
+fn write(fd: i64, buf: *u8, len: i64) -> i64 {
+    return asm("syscall",
+        out("rax") i64,
+        in("rax") 1, in("rdi") fd, in("rsi") buf, in("rdx") len,
+        clobber("rcx", "r11", "memory"))
+}
+fn bswap(x: u64) -> u64 {
+    return asm("mov {out}, {0}", "bswap {out}", out(reg) u64, in(reg) x)
+}
+```
+
+- `asm(...)` is an expression of the `out` type, or `unit` without one. Template
+  lines are joined with newlines; `{0}`, `{1}`, ... are the inputs and `{out}` the
+  output. On x86_64 the syntax is Intel.
+- Operands: `out("rax") T` / `in("rdi") x` use that register, `reg` lets the
+  compiler choose, and `in(out) x` starts the output register with `x` (for
+  instructions such as `xchg` or `inc` that update a register in place).
+  `clobber(...)` lists registers and `"memory"`; the flags are always clobbered.
+- Freestanding only. Like `syscall`, asm cannot run at compile time.
+
+The `syscall` builtin stays as a portable shortcut (x86_64 and aarch64) for the
+most common use of asm.
 
 ## Arrays
 
@@ -216,7 +243,7 @@ grows past twice the size that survived the last collection (1 MiB minimum).
 
 1. ~~Type checker (static types with inference) and typed JIR.~~
 2. ~~Differential tests across both backends.~~ Rust-side JIR parser.
-3. ~~Sized integers, pointers with loads/stores, structs, arrays, `size_of`.~~
-   Inline `asm` blocks.
+3. ~~Sized integers, pointers with loads/stores, structs, arrays, `size_of`,
+   inline asm.~~
 4. ~~`comptime` on the VM, generic functions.~~
 5. `alloc` layer; AST macros.

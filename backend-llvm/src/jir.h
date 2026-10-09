@@ -81,7 +81,7 @@ enum class Op {
   Add, Sub, Mul, Div, Rem, Eq, Ne, Lt, Le, Gt, Ge,
   Cast, Call, Struct, Field, SetField, Load, Store, Addr, FieldPtr,
   Array, Splat, Elem, SetElem, ElemPtr,
-  Syscall, Print,
+  Syscall, Print, Asm,
 };
 
 struct Inst {
@@ -89,7 +89,8 @@ struct Inst {
   uint32_t dst = 0;            // unused for Store and Print
   std::vector<uint32_t> args;  // operand registers
   int64_t imm = 0;             // Const value, or field index
-  std::string text;            // Str bytes, Call callee, or Struct name
+  std::string text;            // Str bytes, Call callee, Struct name, or Asm template
+  std::string constraints;     // Asm only: LLVM constraint string
 };
 
 enum class TermKind { Jump, Branch, Ret, Unreachable };

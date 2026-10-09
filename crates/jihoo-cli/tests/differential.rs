@@ -83,3 +83,21 @@ fn out_of_bounds_fails_on_both_backends() {
     }
     std::fs::remove_dir_all(&work).unwrap();
 }
+
+/// Inline asm only exists natively, so it is checked against known results
+/// instead of the VM.
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn inline_asm_example_runs_natively() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let bin = std::env::temp_dir().join(format!("jihoo-asm-{}", std::process::id()));
+    let src = repo_root().join("examples/asm.jh");
+    assert_eq!(exit_code(Command::new(JIHOO).arg("build").arg(&src).arg("-o").arg(&bin)), 0);
+    let out = Command::new(&bin).output().unwrap();
+    std::fs::remove_file(&bin).unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "inline asm says hi\n");
+    assert_eq!(out.status.code(), Some(4), "every check in examples/asm.jh should pass");
+}

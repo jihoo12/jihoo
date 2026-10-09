@@ -188,6 +188,14 @@ runtime error and native code traps.
 |---------------------------------|-----------------------|--------|---------|
 | `%d = syscall(%n, %a, ...)`     | int or `*T`, 1 to 7 operands | `i64` | freestanding only: raw Linux syscall `%n` |
 | `print %a`                      | int, `bool` or `str`  |        | hosted only: print the value and a newline |
+| `%d = asm "tmpl", "cons"(%a, ...)` | int, `bool` or `*T` | int, `*T` or `unit` | freestanding only: inline assembly |
+
+`asm` passes `tmpl` and `cons` to LLVM unchanged: the template uses LLVM operand
+references (`${0}` is the output if there is one, then the inputs, in order;
+`$$` is a literal `$`) and `cons` is an LLVM constraint string (`=r`, `{rdi}`,
+`0`, `~{memory}`, ...) with one input constraint per operand. On x86_64 the
+backend uses the Intel dialect and adds `~{dirflag},~{fpsr},~{flags}`, as clang
+does. Bool operands are passed as `i8`.
 
 ## Terminators
 
@@ -211,6 +219,5 @@ because freestanding programs have no libc.
 
 ## Planned
 
-- Inline `asm` blocks.
 - `gcref` types for GC-managed objects beyond `str` and structs.
 - A Rust-side JIR parser so `jihoo run file.jir` works.

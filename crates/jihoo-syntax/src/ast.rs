@@ -137,12 +137,36 @@ pub enum ExprKind {
     ArrayLit(Vec<Expr>),
     /// `[value; N]`, where `N` is evaluated at compile time.
     ArrayRepeat(Box<Expr>, Box<Expr>),
+    /// `asm("template", out(...) T, in(...) x, clobber(...))`
+    Asm(Box<AsmExpr>),
     /// `comptime expr`: evaluated while compiling, then used as a constant.
     Comptime(Box<Expr>),
     /// `size_of(T)`
     SizeOf(TypeExpr),
     /// `align_of(T)`
     AlignOf(TypeExpr),
+}
+
+/// Inline assembly. Freestanding only.
+#[derive(Debug, Clone)]
+pub struct AsmExpr {
+    /// The template lines, joined with newlines. `{0}`, `{1}`, ... are the inputs
+    /// and `{out}` is the output.
+    pub template: String,
+    pub output: Option<(AsmReg, TypeExpr)>,
+    pub inputs: Vec<(AsmReg, Expr)>,
+    pub clobbers: Vec<String>,
+}
+
+/// Where an asm operand lives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AsmReg {
+    /// `"rdi"`: that register.
+    Named(String),
+    /// `reg`: any general-purpose register.
+    Any,
+    /// `in(out) x`: the same register as the output, which starts out holding `x`.
+    Out,
 }
 
 #[derive(Debug, Clone)]

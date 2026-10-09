@@ -20,6 +20,7 @@ pub enum Tok {
     As,
     Const,
     Comptime,
+    Asm,
 
     LParen,
     RParen,
@@ -222,17 +223,30 @@ impl<'a> Lexer<'a> {
             }
             c if c.is_ascii_digit() => {
                 let start = self.i - 1;
-                while self.peek().is_ascii_digit() || self.peek() == b'_' {
+                // `0x` / `0b` prefixes; digits may be separated by `_`.
+                let radix = match (c, self.peek()) {
+                    (b'0', b'x' | b'X') => 16,
+                    (b'0', b'b' | b'B') => 2,
+                    _ => 10,
+                };
+                if radix != 10 {
                     self.bump();
                 }
-                let text: String = std::str::from_utf8(&self.src[start..self.i])
-                    .unwrap()
-                    .chars()
-                    .filter(|&c| c != '_')
-                    .collect();
-                let n = text
-                    .parse::<i64>()
-                    .map_err(|_| Error::new(pos, format!("integer literal `{text}` is too large")))?;
+                let digits_start = self.i;
+                while self.peek().is_ascii_alphanumeric() || self.peek() == b'_' {
+                    self.bump();
+                }
+                let raw = std::str::from_utf8(&self.src[start..self.i]).unwrap();
+                let from = if radix == 10 { start } else { digits_start };
+                let digits: String =
+                    std::str::from_utf8(&self.src[from..self.i]).unwrap().chars().filter(|&c| c != '_').collect();
+                let n = i64::from_str_radix(&digits, radix).map_err(|e| {
+                    let why = match e.kind() {
+                        std::num::IntErrorKind::PosOverflow => "is too large",
+                        _ => "is not a valid number",
+                    };
+                    Error::new(pos, format!("integer literal `{raw}` {why}"))
+                })?;
                 Tok::Int(n)
             }
             c if c.is_ascii_alphabetic() || c == b'_' => {
@@ -254,6 +268,7 @@ impl<'a> Lexer<'a> {
                     "as" => Tok::As,
                     "const" => Tok::Const,
                     "comptime" => Tok::Comptime,
+                    "asm" => Tok::Asm,
                     _ => Tok::Ident(word.to_string()),
                 }
             }

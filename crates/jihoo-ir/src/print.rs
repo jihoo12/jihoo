@@ -89,6 +89,9 @@ impl Display for Inst {
             Inst::ElemPtr { dst, ptr, index } => write!(f, "{dst} = elemptr {ptr}, {index}"),
             Inst::Syscall { dst, args } => write!(f, "{dst} = syscall({})", list(args)),
             Inst::Print { src } => write!(f, "print {src}"),
+            Inst::Asm { dst, template, constraints, args } => {
+                write!(f, "{dst} = asm {}, {}({})", quote(template), quote(constraints), list(args))
+            }
         }
     }
 }

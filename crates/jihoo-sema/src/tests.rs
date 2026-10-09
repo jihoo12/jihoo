@@ -440,3 +440,27 @@ fn generic_errors() {
     assert!(err("fn f(x: type) {}\nfn main() {}").contains("`type` can only be the type of a `comptime` parameter"));
     assert!(err("fn main(comptime T: type) {}").contains("comptime parameters"));
 }
+
+// ---- inline asm ----
+
+#[test]
+fn inline_asm_lowering() {
+    let m = check(&fs(
+        "fn bswap(x: u64) -> u64 { return asm(\"mov {out}, {0}\", \"bswap {out}\", out(reg) u64, in(reg) x) }\n\
+         fn exit(code: i64) { asm(\"syscall\", in(\"rax\") 60, in(\"rdi\") code, clobber(\"rcx\", \"r11\", \"cc\", \"memory\")) }",
+    ))
+    .unwrap();
+    let text = m.to_string();
+    assert!(text.contains(r#"asm "mov ${0}, ${1}\nbswap ${0}", "=r,r"(%0)"#), "{text}");
+    // `cc` is implied; the rest become LLVM clobbers.
+    assert!(text.contains(r#""{rax},{rdi},~{rcx},~{r11},~{memory}""#), "{text}");
+    assert!(err("fn main() { asm(\"nop\") }").contains("only available in freestanding"));
+    assert!(err(&fs("fn f() -> bool { return asm(\"nop\", out(reg) bool) }")).contains("output must be an integer or a pointer"));
+    assert!(err(&fs("fn f() { asm(\"mov {0}, {1}\", in(reg) 1) }")).contains("only 1 inputs"));
+    let m = check(&fs("fn inc(x: i64) -> i64 { return asm(\"inc {out}\", out(reg) i64, in(out) x) }")).unwrap();
+    assert!(m.to_string().contains(r#""=r,0"(%0)"#), "{m}");
+    assert!(err(&fs("fn f() { asm(\"nop\", in(out) 1) }")).contains("needs an `out(...)`"));
+    // Compile-time code runs on the VM, which has no asm.
+    let e = err(&fs("fn f() -> i64 { return asm(\"mov {out}, 1\", out(reg) i64) }\nconst X = f()"));
+    assert!(e.contains("inline asm is not available"), "{e}");
+}

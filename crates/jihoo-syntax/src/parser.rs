@@ -429,6 +429,10 @@ impl Parser {
                     ExprKind::Var(name)
                 }
             }
+            Tok::Asm => {
+                self.bump();
+                ExprKind::Asm(Box::new(self.asm_args()?))
+            }
             Tok::LParen => {
                 self.bump();
                 let e = self.with_struct_lit(true, |p| p.expr())?;
@@ -438,6 +442,66 @@ impl Parser {
             _ => return Err(self.unexpected("an expression")),
         };
         Ok(Expr { pos, kind })
+    }
+}
+
+impl Parser {
+    /// `("line", "line", out(reg) T, in("rdi") x, clobber("rcx", "memory"))`
+    fn asm_args(&mut self) -> PResult<AsmExpr> {
+        self.expect(&Tok::LParen, "`(`")?;
+        self.with_struct_lit(true, |p| {
+            let mut lines = Vec::new();
+            while let Tok::Str(s) = p.peek().clone() {
+                p.bump();
+                lines.push(s);
+                if !p.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            if lines.is_empty() {
+                return Err(p.unexpected("an asm template string"));
+            }
+            let mut asm = AsmExpr { template: lines.join("\n"), output: None, inputs: vec![], clobbers: vec![] };
+            while *p.peek() != Tok::RParen {
+                let (pos, kind) = p.ident("`in`, `out` or `clobber`")?;
+                p.expect(&Tok::LParen, "`(`")?;
+                match kind.as_str() {
+                    "in" | "out" => {
+                        let reg = match p.peek().clone() {
+                            Tok::Str(r) => AsmReg::Named(r),
+                            Tok::Ident(w) if w == "reg" => AsmReg::Any,
+                            Tok::Ident(w) if w == "out" && kind == "in" => AsmReg::Out,
+                            _ => return Err(p.unexpected("a register name string or `reg`")),
+                        };
+                        p.bump();
+                        p.expect(&Tok::RParen, "`)`")?;
+                        if kind == "in" {
+                            asm.inputs.push((reg, p.expr()?));
+                        } else if asm.output.is_some() {
+                            return Err(Error::new(pos, "an asm block can have at most one `out`"));
+                        } else {
+                            asm.output = Some((reg, p.type_expr()?));
+                        }
+                    }
+                    "clobber" => {
+                        while let Tok::Str(c) = p.peek().clone() {
+                            p.bump();
+                            asm.clobbers.push(c);
+                            if !p.eat(&Tok::Comma) {
+                                break;
+                            }
+                        }
+                        p.expect(&Tok::RParen, "`)`")?;
+                    }
+                    _ => return Err(Error::new(pos, format!("expected `in`, `out` or `clobber`, found `{kind}`"))),
+                }
+                if !p.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            p.expect(&Tok::RParen, "`)`")?;
+            Ok(asm)
+        })
     }
 }
 
@@ -485,6 +549,7 @@ fn punct(t: &Tok) -> &'static str {
         Tok::As => "as",
         Tok::Const => "const",
         Tok::Comptime => "comptime",
+        Tok::Asm => "asm",
         Tok::LParen => "(",
         Tok::RParen => ")",
         Tok::LBrace => "{",
@@ -608,6 +673,40 @@ mod tests {
         let params = &p.funcs[0].params;
         assert!(params[0].comptime && !params[1].comptime);
         assert!(matches!(&params[0].ty.kind, TypeExprKind::Named(n) if n == "type"));
+    }
+
+    #[test]
+    fn integer_literals() {
+        let lit = |src: &str| {
+            let s = body(&format!("let x = {src}"));
+            let Stmt::Let { value, .. } = &s[0] else { panic!() };
+            let ExprKind::Int(n) = value.kind else { panic!() };
+            n
+        };
+        assert_eq!(lit("1_000"), 1000);
+        assert_eq!(lit("0xff"), 255);
+        assert_eq!(lit("0x7fff_ffff_ffff_ffff"), i64::MAX);
+        assert_eq!(lit("0b1010"), 10);
+        assert!(parse("fn f() { let x = 0x1_0000_0000_0000_0000 }").unwrap_err().msg.contains("too large"));
+        assert!(parse("fn f() { let x = 0xg }").unwrap_err().msg.contains("not a valid number"));
+        assert!(parse("fn f() { let x = 12ab }").unwrap_err().msg.contains("not a valid number"));
+    }
+
+    #[test]
+    fn inline_asm() {
+        let s = body("let r = asm(\"mov {out}, {0}\", \"inc {out}\", out(reg) i64, in(\"rdi\") x + 1, clobber(\"cc\", \"memory\"))");
+        let Stmt::Let { value, .. } = &s[0] else { panic!() };
+        let ExprKind::Asm(a) = &value.kind else { panic!() };
+        assert_eq!(a.template, "mov {out}, {0}\ninc {out}");
+        assert!(matches!(&a.output, Some((AsmReg::Any, _))));
+        assert_eq!(a.inputs[0].0, AsmReg::Named("rdi".into()));
+        assert_eq!(a.clobbers, ["cc", "memory"]);
+        assert!(parse("fn f() { asm(\"nop\", out(reg) i64, out(reg) i64) }").is_err());
+        assert!(parse("fn f() { asm(in(reg) 1) }").is_err());
+        let s = body("let r = asm(\"inc {out}\", out(reg) i64, in(out) 41)");
+        let Stmt::Let { value, .. } = &s[0] else { panic!() };
+        let ExprKind::Asm(a) = &value.kind else { panic!() };
+        assert_eq!(a.inputs[0].0, AsmReg::Out);
     }
 
     #[test]

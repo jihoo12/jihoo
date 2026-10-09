@@ -187,6 +187,11 @@ pub enum Inst {
     Syscall { dst: Reg, args: Vec<Reg> },
     /// Hosted-only builtin.
     Print { src: Reg },
+    /// Freestanding only: inline assembly. `template` uses LLVM operand syntax
+    /// (`$0` is the output if there is one, then the inputs) and `constraints` is an
+    /// LLVM constraint string with one input entry per register in `args`. `dst`
+    /// is the output, or `unit`.
+    Asm { dst: Reg, template: String, constraints: String, args: Vec<Reg> },
 }
 
 #[derive(Debug, Clone)]

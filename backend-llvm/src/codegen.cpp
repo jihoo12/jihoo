@@ -27,6 +27,7 @@
 #include <llvm/IR/InlineAsm.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/Support/Error.h>
 #include <llvm/Support/raw_ostream.h>
 
 using namespace llvm;
@@ -487,6 +488,33 @@ class FnGen {
           args.push_back(v);
         }
         store(inst.dst, b_.CreateCall(syscall_asm(ctx_, triple_, args.size()), args));
+        return;
+      }
+      case Op::Asm: {
+        std::vector<Value *> args;
+        std::vector<Type *> arg_types;
+        for (size_t i = 0; i < inst.args.size(); i++) {
+          Value *v = arg(i);
+          // There are no 1-bit registers: pass bools as bytes.
+          if (type(arg_reg(i)).kind == jir::Type::Bool) v = b_.CreateZExt(v, b_.getInt8Ty());
+          args.push_back(v);
+          arg_types.push_back(v->getType());
+        }
+        bool has_out = type(inst.dst).kind != jir::Type::Unit;
+        Type *ret = has_out ? types_.lower(type(inst.dst)) : b_.getVoidTy();
+        std::string cons = inst.constraints;
+        bool x86 = triple_.getArch() == Triple::x86_64;
+        // Like clang, assume x86 asm may change the flags and direction state.
+        if (x86) cons += std::string(cons.empty() ? "" : ",") + "~{dirflag},~{fpsr},~{flags}";
+        auto *fty = FunctionType::get(ret, arg_types, false);
+        if (Error e = InlineAsm::verify(fty, cons)) {
+          std::string msg = toString(std::move(e));
+          fail(f_.name, "invalid asm constraints \"" + inst.constraints + "\": " + msg);
+        }
+        auto *ia = InlineAsm::get(fty, inst.text, cons, /*hasSideEffects=*/true, /*isAlignStack=*/false,
+                                  x86 ? InlineAsm::AD_Intel : InlineAsm::AD_ATT);
+        Value *result = b_.CreateCall(ia, args);
+        store(inst.dst, has_out ? result : unit());
         return;
       }
       case Op::Print: fail(f_.name, "`print` is not available in freestanding mode");

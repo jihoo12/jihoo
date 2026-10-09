@@ -74,11 +74,11 @@ nix build
 
 v0: static types with local inference; `bool`, `i8`…`u64`, structs and
 bounds-checked arrays (both profiles), `size_of`/`align_of`, `str` (hosted),
-pointers with load/store and `&` (freestanding);
+pointers with load/store, `&` and inline asm (freestanding);
 functions, `if`/`while`, `&&`/`||`, `as` casts, `print` (hosted) and `syscall`
 (freestanding, x86_64 and aarch64 Linux); compile-time evaluation with `const`
 and `comptime`, run on the VM; generic functions through `comptime` parameters.
-See [examples/pointers.jh](examples/pointers.jh),
+See [examples/pointers.jh](examples/pointers.jh), [examples/asm.jh](examples/asm.jh),
 [examples/comptime.jh](examples/comptime.jh),
 [examples/generics.jh](examples/generics.jh) and the roadmap in
 [docs/design.md](docs/design.md).

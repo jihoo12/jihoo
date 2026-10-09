@@ -12,6 +12,7 @@
 //! Errors are collected per item: one error stops the current function, but the
 //! remaining items are still checked.
 
+mod asm;
 mod comptime;
 mod env;
 mod generic;
@@ -463,6 +464,7 @@ impl<'a> FnCx<'a> {
                 self.emit_to(ty, |dst| Inst::Str { dst, value: s.clone() })
             }
             ExprKind::Var(name) => self.var(e.pos, name)?,
+            ExprKind::Asm(a) => self.inline_asm(e.pos, a)?,
             ExprKind::Comptime(inner) => {
                 let (ty, v) = self.env.comptime(inner, expected, &self.bindings)?;
                 self.hoist(|cx| cx.splice(&ty, &v))
