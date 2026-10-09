@@ -121,7 +121,7 @@ mod tests {
     use super::*;
 
     fn tr(t: &str, inputs: usize, out: bool) -> Result<String, String> {
-        translate(Pos { line: 1, col: 1 }, t, inputs, out).map_err(|e| e.msg)
+        translate(Pos::new(1, 1), t, inputs, out).map_err(|e| e.msg)
     }
 
     #[test]

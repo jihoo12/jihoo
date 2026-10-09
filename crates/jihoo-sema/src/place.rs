@@ -80,6 +80,14 @@ impl FnCx<'_> {
                 let root = self.lookup(e.pos, name)?;
                 Ok(Place::Reg { root, path: vec![], ty: self.ty(root).clone(), assignable: true })
             }
+            // `alias.CONST`: a constant of an imported module.
+            ExprKind::Field(base, item)
+                if matches!(&base.kind, ExprKind::Var(a) if self.local(a).is_none() && self.env.is_alias(self.bindings.module, a)) =>
+            {
+                let ExprKind::Var(alias) = &base.kind else { unreachable!() };
+                let root = self.var(e.pos, &format!("{alias}.{item}"))?;
+                Ok(Place::Reg { root, path: vec![], ty: self.ty(root).clone(), assignable: false })
+            }
             ExprKind::Field(base, name) => {
                 let base = self.place(base)?;
                 match base.ty().clone() {

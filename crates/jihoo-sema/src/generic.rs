@@ -25,13 +25,19 @@ pub(crate) enum Binding {
     Value(Type, ConstValue),
 }
 
-/// The comptime parameters of one instance, in declaration order.
+/// The scope that names are resolved in: the module the code is written in, and
+/// the comptime parameters of the instance being compiled, in declaration order.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Bindings {
+    pub module: usize,
     items: Vec<(String, Binding)>,
 }
 
 impl Bindings {
+    pub fn in_module(module: usize) -> Self {
+        Bindings { module, items: Vec::new() }
+    }
+
     pub fn get(&self, name: &str) -> Option<&Binding> {
         self.items.iter().rev().find(|(n, _)| n == name).map(|(_, b)| b)
     }
@@ -106,7 +112,8 @@ fn expr_to_type(e: &Expr) -> Result<TypeExpr, Error> {
 }
 
 impl FnCx<'_> {
-    pub(crate) fn call_generic(&mut self, pos: Pos, decl: &FnDecl, args: &[Expr]) -> Result<Reg, Error> {
+    /// Calls generic function `key` (its module-qualified name).
+    pub(crate) fn call_generic(&mut self, pos: Pos, key: &str, decl: &FnDecl, args: &[Expr]) -> Result<Reg, Error> {
         let name = &decl.name;
         if decl.params.len() != args.len() {
             return Err(Error::new(
@@ -117,8 +124,8 @@ impl FnCx<'_> {
 
         // Comptime arguments first: they determine the instance.
         let comptime = decl.params.iter().zip(args).filter(|(p, _)| p.comptime);
-        let b = self.env.bind(name, comptime, &self.bindings)?;
-        let (instance, sig) = self.env.instance(pos, decl, b)?;
+        let b = self.env.bind(name, self.env.fn_module(key), comptime, &self.bindings)?;
+        let (instance, sig) = self.env.instance(pos, key, decl, b)?;
 
         let mut regs = Vec::new();
         let runtime = decl.params.iter().zip(args).filter(|(p, _)| !p.comptime);
@@ -138,10 +145,12 @@ impl<'p> Env<'p> {
     pub fn bind<'a>(
         &self,
         owner: &str,
+        owner_module: usize,
         params_args: impl Iterator<Item = (&'a Param, &'a Expr)>,
         outer: &Rc<Bindings>,
     ) -> Result<Bindings, Error> {
-        let mut b = Bindings::default();
+        // Parameter types are written in the owner's module; arguments in `outer`.
+        let mut b = Bindings::in_module(owner_module);
         for (p, a) in params_args {
             if is_type_param(p) {
                 let t = self.resolve(&expr_to_type(a)?, outer)?;
@@ -162,8 +171,14 @@ impl<'p> Env<'p> {
 
     /// Signature-only part of instantiating `decl`: the body is compiled later, so
     /// an instance can call itself recursively.
-    pub fn instance(&self, pos: Pos, decl: &FnDecl, b: Bindings) -> Result<(String, Rc<crate::env::Sig>), Error> {
-        let key = format!("{}({})", decl.name, b.key());
+    pub fn instance(
+        &self,
+        pos: Pos,
+        fn_key: &str,
+        decl: &FnDecl,
+        b: Bindings,
+    ) -> Result<(String, Rc<crate::env::Sig>), Error> {
+        let key = format!("{fn_key}({})", b.key());
         if let Some((name, sig)) = self.find_instance(&key) {
             return sig.map(|s| (name, s));
         }
@@ -174,7 +189,7 @@ impl<'p> Env<'p> {
                 format!("too many instances of generic functions (over {MAX_INSTANCES}); does `{}` instantiate itself forever?", decl.name),
             ));
         }
-        let name = format!("{}.{n}", decl.name);
+        let name = format!("{fn_key}.{n}");
         let b = Rc::new(b);
         let sig = (|| {
             let params = decl
@@ -189,7 +204,7 @@ impl<'p> Env<'p> {
             };
             Ok(Rc::new(crate::env::Sig { params, ret }))
         })();
-        self.add_instance(key, name.clone(), decl.name.clone(), b, sig.clone());
+        self.add_instance(key, name.clone(), fn_key.to_string(), b, sig.clone());
         sig.map(|s| (name, s))
     }
 }

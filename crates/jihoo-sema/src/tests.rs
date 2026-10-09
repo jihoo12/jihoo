@@ -594,3 +594,82 @@ fn generic_struct_errors() {
     assert!(e.contains("array length must be between 0 and"), "{e}");
     assert!(e.contains("(in `S(-1)`)"), "{e}");
 }
+
+// ---- modules ----
+
+/// Checks a program made of in-memory files; `main.jh` is the root.
+fn check_files(files: &[(&str, &str)]) -> Result<ir::Module, String> {
+    use std::path::{Path, PathBuf};
+    let read = |p: &Path| files.iter().find(|(n, _)| Path::new(n) == p).map(|(_, s)| s.to_string());
+    let loaded = jihoo_syntax::loader::load_with(Path::new("main.jh"), &[PathBuf::from("lib")], &read)
+        .map_err(|(e, files)| format!("{}:{e}", files[e.pos.file as usize].display()))?;
+    let m = analyze_modules(&loaded.modules)
+        .map_err(|es| format!("{}:{}", loaded.files[es[0].pos.file as usize].display(), es[0]))?;
+    ir::verify(&m).expect("sema produced invalid IR");
+    Ok(m)
+}
+
+#[test]
+fn modules_have_their_own_namespaces() {
+    let m = check_files(&[
+        ("main.jh", "import shapes\nimport util as u\nfn area() -> i64 { return 1 }\n\
+                     fn main() {\n  let s = shapes.Square { side: u.SIDE }\n  print(shapes.area(s) + area() + u.area())\n}"),
+        ("shapes.jh", "struct Square { side: i64 }\nfn area(s: Square) -> i64 { return s.side * s.side }"),
+        // The same names in another module do not clash.
+        ("lib/util.jh", "const SIDE = 3\nfn area() -> i64 { return 100 }"),
+    ])
+    .unwrap();
+    let names: Vec<&str> = m.funcs.iter().map(|f| f.name.as_str()).collect();
+    assert!(names.contains(&"area") && names.contains(&"shapes.area") && names.contains(&"util.area"), "{names:?}");
+    assert_eq!(m.structs[0].name, "shapes.Square");
+    let mut out = Vec::new();
+    jihoo_vm::run(&m, &mut out).unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "110\n");
+}
+
+#[test]
+fn generics_and_macros_across_modules() {
+    let m = check_files(&[
+        ("main.jh", "import box\nstruct P { x: i64 }\n\
+                     fn main() {\n  let b = box.wrap(P, P { x: 7 })\n  let c = box.Box(i64) { item: box.twice!(21) }\n  print(b.item.x + c.item)\n}"),
+        // Inside `box`, its own names need no prefix; `T` may be a type of the caller.
+        ("box.jh", "struct Box(T: type) { item: T }\n\
+                    fn wrap(comptime T: type, x: T) -> Box(T) { return Box(T) { item: x } }\n\
+                    macro twice(e: expr) -> expr { return quote($e * 2) }"),
+    ])
+    .unwrap();
+    assert!(m.structs.iter().any(|s| s.name == "box.Box(P)"), "{m}");
+    let mut out = Vec::new();
+    jihoo_vm::run(&m, &mut out).unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "49\n");
+}
+
+#[test]
+fn modules_may_import_each_other() {
+    check_files(&[
+        ("main.jh", "import even\nfn main() { print(even.is_even(10)) }"),
+        ("even.jh", "import odd\nfn is_even(n: i64) -> bool {\n  if n == 0 { return true }\n  return odd.is_odd(n - 1)\n}"),
+        ("odd.jh", "import even\nfn is_odd(n: i64) -> bool {\n  if n == 0 { return false }\n  return even.is_even(n - 1)\n}"),
+    ])
+    .unwrap();
+}
+
+#[test]
+fn module_errors() {
+    // Other modules' items need the prefix, and only imported modules exist.
+    let e = check_files(&[("main.jh", "import util\nfn main() { print(twice(1)) }"), ("util.jh", "fn twice(x: i64) -> i64 { return x }")])
+        .unwrap_err();
+    assert!(e.contains("unknown function `twice`"), "{e}");
+    let e = check_files(&[("main.jh", "fn main() { print(nope.f(1)) }")]).unwrap_err();
+    assert!(e.contains("unknown module `nope`"), "{e}");
+    let e = check_files(&[("main.jh", "fn main() { let x: nope.T = 1 }")]).unwrap_err();
+    assert!(e.contains("unknown module `nope`"), "{e}");
+    // Errors carry the file they are in.
+    let e = check_files(&[("main.jh", "import util\nfn main() {}"), ("util.jh", "fn f() -> i64 { return true }")])
+        .unwrap_err();
+    assert!(e.starts_with("util.jh:1:"), "{e}");
+    // A freestanding library cannot be used by a hosted program.
+    let e = check_files(&[("main.jh", "import io\nfn main() {}"), ("lib/io.jh", "#![freestanding]\nfn f() {}")])
+        .unwrap_err();
+    assert!(e.contains("module `io` is freestanding-only"), "{e}");
+}

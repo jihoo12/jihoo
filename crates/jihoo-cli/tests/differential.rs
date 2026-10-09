@@ -102,20 +102,38 @@ fn inline_asm_example_runs_natively() {
     assert_eq!(out.status.code(), Some(4), "every check in examples/asm.jh should pass");
 }
 
-/// The allocator and `Vec(T)` example uses pointers and `mmap`, so it only runs
-/// natively; check its output.
+/// The arena example imports `lib/alloc.jh` and `lib/io.jh`, which use pointers
+/// and `mmap`, so it only runs natively; check its output.
 #[test]
 #[cfg(target_arch = "x86_64")]
-fn alloc_example_runs_natively() {
+fn arena_example_runs_natively() {
     if std::env::var_os("JIHOO_LLC").is_none() {
         eprintln!("JIHOO_LLC is not set: skipping");
         return;
     }
-    let bin = std::env::temp_dir().join(format!("jihoo-alloc-{}", std::process::id()));
-    let src = repo_root().join("examples/alloc.jh");
+    let bin = std::env::temp_dir().join(format!("jihoo-arena-{}", std::process::id()));
+    let src = repo_root().join("examples/arena.jh");
     assert_eq!(exit_code(Command::new(JIHOO).arg("build").arg(&src).arg("-o").arg(&bin)), 0);
     let out = Command::new(&bin).output().unwrap();
     std::fs::remove_file(&bin).unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "1000\n1024\n332833500\n60\n16416\n");
-    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1000\n1024\n332833500\n60\n16416\n-2\ndone\n");
+    assert_eq!(out.status.code(), Some(1));
+}
+
+/// Errors in an imported module name that module's file.
+#[test]
+fn errors_in_imported_modules_name_their_file() {
+    let dir = std::env::temp_dir().join(format!("jihoo-mods-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    std::fs::write(dir.join("main.jh"), "import lib.util\nfn main() { print(util.twice(2)) }\n").unwrap();
+    std::fs::write(dir.join("lib/util.jh"), "fn twice(x: i64) -> i64 {\n  return x * true\n}\n").unwrap();
+    let out = Command::new(JIHOO).arg("run").arg(dir.join("main.jh")).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let expected = format!("{}:2:12: cannot apply `*` to i64 and bool", dir.join("lib/util.jh").display());
+    assert!(stderr.contains(&expected), "{stderr}");
+
+    std::fs::write(dir.join("lib/util.jh"), "fn twice(x: i64) -> i64 { return x * 2 }\n").unwrap();
+    let out = Command::new(JIHOO).arg("run").arg(dir.join("main.jh")).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "4\n");
+    std::fs::remove_dir_all(&dir).unwrap();
 }

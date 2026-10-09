@@ -2,17 +2,26 @@
 
 pub mod ast;
 mod lexer;
+pub mod loader;
 mod parser;
 
 use std::fmt;
 
-pub use parser::{parse, parse_expr};
+pub use parser::{parse, parse_expr, parse_file};
 
-/// Source position (1-based).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Source position: 1-based line and column, in file number `file` (an index
+/// into the loader's list of files; 0 is the root file).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Pos {
     pub line: u32,
     pub col: u32,
+    pub file: u16,
+}
+
+impl Pos {
+    pub fn new(line: u32, col: u32) -> Self {
+        Pos { line, col, file: 0 }
+    }
 }
 
 impl fmt::Display for Pos {

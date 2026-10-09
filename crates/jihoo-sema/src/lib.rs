@@ -26,23 +26,45 @@ use jihoo_ir as ir;
 use jihoo_ir::types;
 use jihoo_ir::{BlockId, Inst, IntTy, Profile, Reg, Terminator, Type};
 use jihoo_syntax::ast::*;
+use jihoo_syntax::loader::Module;
 use jihoo_syntax::{Error, Pos};
 
 use env::{Env, Sig};
 use generic::{Binding, Bindings};
 
+/// Checks and lowers a single-file program.
 pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
+    let root = Module { name: String::new(), file: 0, program: prog.clone(), imports: HashMap::new() };
+    analyze_modules(std::slice::from_ref(&root))
+}
+
+/// Checks and lowers a program made of modules (see `jihoo_syntax::loader`);
+/// `mods[0]` is the root, whose attributes choose the profile.
+pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
     let mut errors = Vec::new();
 
     let mut profile = Profile::Hosted;
-    for (pos, attr) in &prog.attrs {
+    for (pos, attr) in &mods[0].program.attrs {
         match attr.as_str() {
             "freestanding" => profile = Profile::Freestanding,
             other => errors.push(Error::new(*pos, format!("unknown attribute `#![{other}]`"))),
         }
     }
+    // A library may say it needs freestanding mode; it cannot choose the mode.
+    for m in &mods[1..] {
+        for (pos, attr) in &m.program.attrs {
+            match attr.as_str() {
+                "freestanding" if profile == Profile::Freestanding => {}
+                "freestanding" => errors.push(Error::new(
+                    *pos,
+                    format!("module `{}` is freestanding-only, but the program is hosted", m.name),
+                )),
+                other => errors.push(Error::new(*pos, format!("unknown attribute `#![{other}]`"))),
+            }
+        }
+    }
 
-    let (env, name_errors) = Env::new(profile, prog);
+    let (env, name_errors) = Env::new(profile, mods);
     errors.extend(name_errors);
     if !errors.is_empty() {
         return Err(errors);
@@ -51,42 +73,55 @@ pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
     // Ask for every item; the lazy queries compute what each one needs.
     // Generic structs only exist as instances, collected at the end.
     let mut structs = Vec::new();
-    for s in prog.structs.iter().filter(|s| s.params.is_empty()) {
-        match env.struct_fields(s.pos, &s.name).and_then(|f| env.check_acyclic(&s.name).map(|_| f)) {
-            Ok(fields) => structs.push(ir::StructDef { name: s.name.clone(), fields: (*fields).clone() }),
-            Err(e) => errors.push(e),
+    for (m, module) in mods.iter().enumerate() {
+        for s in module.program.structs.iter().filter(|s| s.params.is_empty()) {
+            let key = env.key(m, &s.name).unwrap();
+            match env.struct_fields(s.pos, &key).and_then(|f| env.check_acyclic(&key).map(|_| f)) {
+                Ok(fields) => structs.push(ir::StructDef { name: key, fields: (*fields).clone() }),
+                Err(e) => errors.push(e),
+            }
         }
-    }
-    for c in &prog.consts {
-        if let Some(Err(e)) = env.constant(&c.name) {
-            errors.push(e);
+        for c in &module.program.consts {
+            if let Some(Err(e)) = env.constant(&env.key(m, &c.name).unwrap()) {
+                errors.push(e);
+            }
         }
     }
     // Generic functions are compiled per instance; macros only run while compiling.
-    let plain: Vec<&FnDecl> =
-        prog.funcs.iter().filter(|f| env.generic(&f.name).is_none() && !f.is_macro).collect();
-    for f in &plain {
-        if let Some(Err(e)) = env.signature(&f.name) {
+    let mut plain = Vec::new();
+    let mut macros = Vec::new();
+    for (m, module) in mods.iter().enumerate() {
+        for f in &module.program.funcs {
+            let key = env.key(m, &f.name).unwrap();
+            if f.is_macro {
+                macros.push(key);
+            } else if env.generic(&key).is_none() {
+                plain.push(key);
+            }
+        }
+    }
+    for key in &plain {
+        if let Some(Err(e)) = env.signature(key) {
             errors.push(e);
         }
     }
-    if let Err(e) = env.check_entry(prog) {
+    if let Err(e) = env.check_entry(&mods[0].program) {
         errors.push(e);
     }
     let mut funcs = Vec::new();
-    for f in &plain {
-        if let Some(Ok(_)) = env.signature(&f.name) {
-            match env.function(&f.name) {
+    for key in &plain {
+        if let Some(Ok(_)) = env.signature(key) {
+            match env.function(key) {
                 Ok(func) => funcs.push((*func).clone()),
                 Err(e) => errors.push(e),
             }
         }
     }
     // Macros are checked even when unused, but are not part of the program.
-    for f in prog.funcs.iter().filter(|f| f.is_macro) {
-        match env.signature(&f.name) {
+    for key in &macros {
+        match env.signature(key) {
             Some(Ok(_)) => {
-                if let Err(e) = env.function(&f.name) {
+                if let Err(e) = env.function(key) {
                     errors.push(e);
                 }
             }
@@ -103,7 +138,7 @@ pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
     }
 
     for name in env.struct_instance_names() {
-        let pos = Pos { line: 1, col: 1 };
+        let pos = Pos::new(1, 1);
         match env.struct_fields(pos, &name).and_then(|f| env.check_acyclic(&name).map(|_| f)) {
             Ok(fields) => structs.push(ir::StructDef { name, fields: (*fields).clone() }),
             Err(e) => errors.push(e),
@@ -115,7 +150,7 @@ pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
     } else {
         // One failing item can surface as the same error through several others.
         let mut seen = std::collections::HashSet::new();
-        errors.retain(|e| seen.insert((e.pos.line, e.pos.col, e.msg.clone())));
+        errors.retain(|e| seen.insert((e.pos, e.msg.clone())));
         Err(errors)
     }
 }
@@ -316,7 +351,7 @@ impl<'a> FnCx<'a> {
     }
 
     fn unknown_name(&self, pos: Pos, name: &str) -> Error {
-        if self.in_comptime && !self.env.has_function(name) {
+        if self.in_comptime && !self.env.has_function(self.bindings.module, name) {
             Error::new(
                 pos,
                 format!("`{name}` is not known at compile time; `comptime` code can only use constants and functions"),
@@ -346,7 +381,8 @@ impl<'a> FnCx<'a> {
             }
             None => {}
         }
-        match self.env.constant(name) {
+        let key = self.env.key_or_err(pos, &self.bindings, name)?;
+        match self.env.constant(&key) {
             Some(c) => {
                 let c = c?;
                 let r = self.hoist(|cx| cx.splice(&c.0, &c.1));
@@ -412,7 +448,7 @@ impl<'a> FnCx<'a> {
                         if self.bindings.get(name).is_some() {
                             return Err(Error::new(target.pos, format!("cannot assign to comptime parameter `{name}`")));
                         }
-                        if self.env.constant(name).is_some() {
+                        if self.env.key(self.bindings.module, name).and_then(|k| self.env.constant(&k)).is_some() {
                             return Err(Error::new(target.pos, format!("cannot assign to constant `{name}`")));
                         }
                     }
@@ -762,15 +798,16 @@ impl<'a> FnCx<'a> {
                 Ok(self.emit_to(Type::I64, |dst| Inst::Syscall { dst, args: regs }))
             }
             _ => {
-                if let Some(decl) = self.env.generic(name) {
-                    return self.call_generic(pos, decl, args);
+                let key = self.env.key_or_err(pos, &self.bindings, name)?;
+                if let Some(decl) = self.env.generic(&key) {
+                    return self.call_generic(pos, &key, decl, args);
                 }
-                if self.env.macro_decl(name).is_some() {
+                if self.env.macro_decl(&key).is_some() {
                     return Err(Error::new(pos, format!("`{name}` is a macro; call it as `{name}!(...)`")));
                 }
                 let sig = self
                     .env
-                    .signature(name)
+                    .signature(&key)
                     .ok_or_else(|| Error::new(pos, format!("unknown function `{name}`")))??;
                 if sig.params.len() != args.len() {
                     return Err(Error::new(
@@ -785,7 +822,7 @@ impl<'a> FnCx<'a> {
                     regs.push(r);
                 }
                 let ret = sig.ret.clone();
-                Ok(self.emit_to(ret, |dst| Inst::Call { dst, func: name.to_string(), args: regs }))
+                Ok(self.emit_to(ret, |dst| Inst::Call { dst, func: key, args: regs }))
             }
         }
     }

@@ -38,13 +38,14 @@ const MAX_DEPTH: u32 = 64;
 impl FnCx<'_> {
     /// Runs macro `name` on `args` and parses the code it returns.
     pub(crate) fn expand(&mut self, pos: Pos, name: &str, args: &[MacroArg]) -> Result<Expr, Error> {
-        let Some(decl) = self.env.macro_decl(name) else {
+        let key = self.env.key_or_err(pos, &self.bindings, name)?;
+        let Some(decl) = self.env.macro_decl(&key) else {
             return Err(Error::new(pos, format!("`{name}` is not a macro")));
         };
         if self.macro_depth >= MAX_DEPTH {
             return Err(Error::new(pos, format!("macro expansion is too deep (over {MAX_DEPTH}); does `{name}!` expand to itself?")));
         }
-        let sig = self.env.signature(name).unwrap()?;
+        let sig = self.env.signature(&key).unwrap()?;
         if sig.params.len() != args.len() {
             return Err(Error::new(
                 pos,
@@ -66,7 +67,7 @@ impl FnCx<'_> {
             }
         }
 
-        let ConstValue::Str(code) = self.env.run(pos, vec![], name, &values, &Type::Expr)? else {
+        let ConstValue::Str(code) = self.env.run(pos, vec![], &key, &values, &Type::Expr)? else {
             unreachable!("macros return `expr`")
         };
         let mut e = jihoo_syntax::parse_expr(&code).map_err(|err| {

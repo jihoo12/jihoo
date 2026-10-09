@@ -1,0 +1,56 @@
+#![freestanding]
+// Output for freestanding programs (x86_64 Linux), straight to file descriptors.
+//
+//   import io
+//   io.puts("hello\n")
+//   io.print_int(42)
+
+const STDOUT = 1
+const STDERR = 2
+
+fn write(fd: i64, buf: *u8, len: i64) -> i64 {
+    return syscall(1, fd, buf, len)
+}
+
+fn strlen(s: *u8) -> i64 {
+    let n = 0
+    while s[n] != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+// Writes a NUL-terminated string (such as a string literal) to stdout.
+fn puts(s: *u8) {
+    write(STDOUT, s, strlen(s))
+}
+
+// Writes `n` in decimal and a newline to stdout.
+fn print_int(n: i64) {
+    let buf = [0 as u8; 21]
+    let i = 20
+    buf[i] = 10 // '\n'
+    let neg = n < 0
+    if n == 0 {
+        i = i - 1
+        buf[i] = 48
+    }
+    while n != 0 {
+        let d = n % 10
+        if d < 0 {
+            d = 0 - d
+        }
+        i = i - 1
+        buf[i] = 48 + d as u8
+        n = n / 10
+    }
+    if neg {
+        i = i - 1
+        buf[i] = 45 // '-'
+    }
+    write(STDOUT, &buf[i], 21 - i)
+}
+
+fn exit(code: i64) {
+    syscall(60, code)
+}

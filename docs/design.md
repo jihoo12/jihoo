@@ -159,6 +159,42 @@ error instead of silent memory corruption. Types containing `str` have no layout
 As in Rust, a struct literal cannot appear directly in an `if`/`while` condition
 (`if p == Point { ... }` would be ambiguous); wrap it in parentheses.
 
+## Modules
+
+```jihoo
+#![freestanding]
+import alloc            // lib/alloc.jh
+import io as out        // lib/io.jh, used as `out`
+
+fn _start() -> i64 {
+    let arena = alloc.arena_new(1 << 20)
+    let v = alloc.vec_new(i64, &arena)
+    alloc.push(i64, &v, 42)
+    out.print_int(alloc.get(i64, &v, 0))
+    return 0
+}
+```
+
+- Every file is a module with its own namespace. Items of another module are
+  always written `alias.item`: functions, macros (`alias.m!(...)`), types
+  (`alias.T`, `alias.Vec(i64)`), struct literals and constants. Everything is
+  public for now.
+- `import a.b` loads `a/b.jh` and names it `b` (`import a.b as c` to rename). The
+  loader (`crates/jihoo-syntax/src/loader.rs`) looks next to the importing file,
+  then in the `-I` directories, `JIHOO_PATH`, and the standard library in `lib/`.
+  Each file is loaded once; imports may be cyclic, which lazy analysis handles.
+  A file that would import itself is an error.
+- In JIR, a module's items are prefixed with its name (`alloc.push`,
+  `alloc.Vec(i64)`); the root module's items keep their plain names. Inside a
+  generic, names resolve in the module that declares it, while type arguments can
+  come from the caller: `alloc.Vec(Point)` holds the caller's `Point`.
+- The root file chooses the profile. A library marked `#![freestanding]` can only
+  be imported by freestanding programs.
+- Source positions carry a file number, so errors name the file they are in.
+
+The standard library so far: `alloc` (an arena over `mmap` and `Vec(T)`) and `io`
+(`puts`, `print_int`, `write`, `exit`), both freestanding and x86_64 Linux only.
+
 ## Testing
 
 - Unit tests in each crate (`cargo test`).
@@ -259,8 +295,9 @@ push(i64, &v, 42)
   point to itself (`next: *Node(T)`), but not contain itself.
 - Like generic functions, a generic struct's fields are checked per instance.
 
-`examples/alloc.jh` puts this together for freestanding code: a bump allocator
-over `mmap`, and a growable `Vec(T)` built on it, all in jihoo.
+`lib/alloc.jh` puts this together for freestanding code: a bump allocator over
+`mmap`, and a growable `Vec(T)` built on it, all in jihoo (see
+`examples/arena.jh`).
 
 ## Macros
 
@@ -298,8 +335,7 @@ power!(y + 1, 2)    // expands to ((1) * (y + 1)) * (y + 1)
   type checked even when unused, and are never part of the compiled program.
 - Macros produce expressions only, not statements or items.
 
-Planned next: statement and item macros, and modules so that `alloc` can become
-a library instead of an example.
+Planned next: statement and item macros.
 
 ## GC
 
@@ -314,5 +350,5 @@ grows past twice the size that survived the last collection (1 MiB minimum).
 3. ~~Sized integers, pointers with loads/stores, structs, arrays, `size_of`,
    inline asm.~~
 4. ~~`comptime` on the VM, generic functions.~~
-5. ~~Expression macros, generic structs, bitwise operators.~~ Modules and an
-   `alloc` library; statement and item macros.
+5. ~~Expression macros, generic structs, bitwise operators, modules and an
+   `alloc` library.~~ Statement and item macros; visibility (`pub`).

@@ -68,6 +68,7 @@ nix build
 | `crates/jihoo-vm`      | Rust     | register VM and GC heap |
 | `crates/jihoo-cli`     | Rust     | the `jihoo` command |
 | `backend-llvm`         | C++      | `jihoo-llc`: JIR text → LLVM → object file |
+| `lib`                  | jihoo    | the standard library (`import alloc`, `import io`) |
 | `tests/diff`           | jihoo    | programs that must behave the same on the VM and natively |
 
 ## Status
@@ -81,8 +82,10 @@ functions, `if`/`while`, `&&`/`||`, `as` casts, `print` (hosted) and `syscall`
 and `comptime`, run on the VM; generic functions and structs through
 compile-time parameters;
 macros that run at compile time and return code.
-See [examples/pointers.jh](examples/pointers.jh), [examples/asm.jh](examples/asm.jh),
-[examples/alloc.jh](examples/alloc.jh) (an allocator and `Vec(T)`),
+modules with `import`, and a small standard library in [lib/](lib)
+(`alloc`: an arena allocator and `Vec(T)`; `io`). See
+[examples/pointers.jh](examples/pointers.jh), [examples/asm.jh](examples/asm.jh),
+[examples/arena.jh](examples/arena.jh),
 [examples/comptime.jh](examples/comptime.jh),
 [examples/generics.jh](examples/generics.jh),
 [examples/macros.jh](examples/macros.jh) and the roadmap in

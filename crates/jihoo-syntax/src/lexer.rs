@@ -23,6 +23,7 @@ pub enum Tok {
     Asm,
     Macro,
     Quote,
+    Import,
 
     LParen,
     RParen,
@@ -76,6 +77,7 @@ struct Lexer<'a> {
     i: usize,
     line: u32,
     col: u32,
+    file: u16,
 }
 
 impl<'a> Lexer<'a> {
@@ -100,7 +102,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn pos(&self) -> Pos {
-        Pos { line: self.line, col: self.col }
+        Pos { line: self.line, col: self.col, file: self.file }
     }
 
     /// Skips whitespace and comments; returns whether a newline was crossed.
@@ -292,6 +294,7 @@ impl<'a> Lexer<'a> {
                     "asm" => Tok::Asm,
                     "macro" => Tok::Macro,
                     "quote" => Tok::Quote,
+                    "import" => Tok::Import,
                     _ => Tok::Ident(word.to_string()),
                 }
             }
@@ -306,8 +309,8 @@ impl<'a> Lexer<'a> {
     }
 }
 
-pub fn lex(src: &str) -> Result<Vec<Token>, Error> {
-    let mut lx = Lexer { src: src.as_bytes(), i: 0, line: 1, col: 1 };
+pub fn lex(src: &str, file: u16) -> Result<Vec<Token>, Error> {
+    let mut lx = Lexer { src: src.as_bytes(), i: 0, line: 1, col: 1, file };
     let mut out = Vec::new();
     loop {
         let t = lx.next()?;

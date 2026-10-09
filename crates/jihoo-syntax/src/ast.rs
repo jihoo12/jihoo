@@ -4,9 +4,18 @@ use crate::Pos;
 pub struct Program {
     /// File-level attributes such as `#![freestanding]`.
     pub attrs: Vec<(Pos, String)>,
+    pub imports: Vec<Import>,
     pub structs: Vec<StructDecl>,
     pub consts: Vec<ConstDecl>,
     pub funcs: Vec<FnDecl>,
+}
+
+/// `import a.b` (the file `a/b.jh`, used as `b.item`) or `import a.b as c`.
+#[derive(Debug, Clone)]
+pub struct Import {
+    pub pos: Pos,
+    pub path: Vec<String>,
+    pub alias: String,
 }
 
 /// `const NAME: T = value`, evaluated at compile time.

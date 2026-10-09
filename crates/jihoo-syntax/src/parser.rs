@@ -13,12 +13,17 @@ use crate::lexer::{lex, Tok, Token};
 use crate::{Error, Pos};
 
 pub fn parse(src: &str) -> Result<Program, Error> {
-    Parser::new(src)?.program()
+    parse_file(src, 0)
+}
+
+/// Parses a source file; positions in it carry file number `file`.
+pub fn parse_file(src: &str, file: u16) -> Result<Program, Error> {
+    Parser::new(src, file)?.program()
 }
 
 /// Parses a single expression, such as the code a macro produced.
 pub fn parse_expr(src: &str) -> Result<Expr, Error> {
-    let mut p = Parser::new(src)?;
+    let mut p = Parser::new(src, 0)?;
     let e = p.expr()?;
     if *p.peek() != Tok::Eof {
         return Err(p.unexpected("end of expression"));
@@ -40,8 +45,8 @@ struct Parser {
 type PResult<T> = Result<T, Error>;
 
 impl Parser {
-    fn new(src: &str) -> Result<Self, Error> {
-        let toks = lex(src)?;
+    fn new(src: &str, file: u16) -> Result<Self, Error> {
+        let toks = lex(src, file)?;
         Ok(Parser { src: src.to_string(), toks, i: 0, no_struct_lit: false, holes: None })
     }
 
@@ -137,21 +142,47 @@ impl Parser {
             let pos = self.bump().pos;
             attrs.push((pos, name));
         }
+        let mut imports = Vec::new();
         let mut structs = Vec::new();
         let mut consts = Vec::new();
         let mut funcs = Vec::new();
         while *self.peek() != Tok::Eof {
             match self.peek() {
+                Tok::Import => imports.push(self.import()?),
                 Tok::Fn | Tok::Macro => funcs.push(self.fn_decl()?),
                 Tok::Struct => structs.push(self.struct_decl()?),
                 Tok::Const => consts.push(self.const_decl()?),
                 Tok::InnerAttr(_) => {
                     return Err(Error::new(self.pos(), "`#![...]` must come before any item"))
                 }
-                _ => return Err(self.unexpected("`fn`, `macro`, `struct` or `const`")),
+                _ => return Err(self.unexpected("`fn`, `macro`, `struct`, `const` or `import`")),
             }
         }
-        Ok(Program { attrs, structs, consts, funcs })
+        Ok(Program { attrs, imports, structs, consts, funcs })
+    }
+
+    fn import(&mut self) -> PResult<Import> {
+        let pos = self.expect(&Tok::Import, "`import`")?.pos;
+        let mut path = vec![self.ident("a module name")?.1];
+        while self.eat(&Tok::Dot) {
+            path.push(self.ident("a module name")?.1);
+        }
+        let alias = if self.eat(&Tok::As) { self.ident("a module alias")?.1 } else { path.last().unwrap().clone() };
+        Ok(Import { pos, path, alias })
+    }
+
+    /// After a name: is this `module.item` used as a call, macro call or struct
+    /// literal? Plain `a.b` stays a field access; the checker resolves module
+    /// constants from it.
+    fn qualified_follows(&self) -> bool {
+        let t = |k: usize| self.toks.get(self.i + k);
+        let same_line = |k: usize, tok: &Tok| t(k).is_some_and(|x| x.tok == *tok && !x.newline_before);
+        if !same_line(0, &Tok::Dot) || !matches!(t(1).map(|x| &x.tok), Some(Tok::Ident(_))) {
+            return false;
+        }
+        same_line(2, &Tok::LParen)
+            || (same_line(2, &Tok::Bang) && same_line(3, &Tok::LParen))
+            || (same_line(2, &Tok::LBrace) && !self.no_struct_lit)
     }
 
     fn const_decl(&mut self) -> PResult<ConstDecl> {
@@ -225,7 +256,12 @@ impl Parser {
             self.expect(&Tok::RBracket, "`]`")?;
             return Ok(TypeExpr { pos, kind: TypeExprKind::Array(Box::new(elem), Box::new(len)) });
         }
-        let (pos, name) = self.ident("a type")?;
+        let (pos, mut name) = self.ident("a type")?;
+        // `module.Type`
+        if self.same_line(&Tok::Dot) && matches!(self.toks[self.i + 1].tok, Tok::Ident(_)) {
+            self.bump();
+            name = format!("{name}.{}", self.ident("a type name")?.1);
+        }
         if self.same_line(&Tok::LParen) {
             let args = self.call_args()?;
             return Ok(TypeExpr { pos, kind: TypeExprKind::Generic(name, args) });
@@ -437,14 +473,6 @@ impl Parser {
                 self.bump();
                 ExprKind::Str(s)
             }
-            Tok::Ident(name) if self.toks[self.i + 1].tok == Tok::Bang
-                && !self.toks[self.i + 1].newline_before
-                && self.toks[self.i + 2].tok == Tok::LParen =>
-            {
-                self.bump();
-                self.bump();
-                ExprKind::MacroCall(name, self.macro_args()?)
-            }
             Tok::Ident(name) if matches!(name.as_str(), "size_of" | "align_of") && self.toks[self.i + 1].tok == Tok::LParen => {
                 self.bump();
                 self.bump();
@@ -479,8 +507,17 @@ impl Parser {
                     Ok(ExprKind::ArrayLit(items))
                 })?
             }
-            Tok::Ident(name) => {
+            Tok::Ident(first) => {
                 self.bump();
+                let mut name = first;
+                if self.qualified_follows() {
+                    self.bump();
+                    name = format!("{name}.{}", self.ident("a name")?.1);
+                }
+                if self.same_line(&Tok::Bang) && self.toks[self.i + 1].tok == Tok::LParen {
+                    self.bump();
+                    return Ok(Expr { pos, kind: ExprKind::MacroCall(name, self.macro_args()?) });
+                }
                 if self.same_line(&Tok::LParen) {
                     let args = self.call_args()?;
                     // `Pair(i64) { ... }`: a literal of a generic struct. A call is
@@ -706,6 +743,7 @@ fn punct(t: &Tok) -> &'static str {
         Tok::Asm => "asm",
         Tok::Macro => "macro",
         Tok::Quote => "quote",
+        Tok::Import => "import",
         Tok::Dollar => "$",
         Tok::LParen => "(",
         Tok::RParen => ")",
@@ -777,7 +815,7 @@ mod tests {
     #[test]
     fn reports_position() {
         let err = parse("fn main() {\n  let = 3\n}").unwrap_err();
-        assert_eq!(err.pos, Pos { line: 2, col: 7 });
+        assert_eq!(err.pos, Pos::new(2, 7));
     }
 
     #[test]
@@ -855,6 +893,37 @@ mod tests {
     }
 
     #[test]
+    fn imports_and_paths() {
+        let p = parse(
+            "import alloc\nimport std.io as out\nfn f(v: *alloc.Vec(i64)) -> alloc.Arena {\n  out.print(alloc.MAX)\n  let a = alloc.Arena { base: p, used: 0 }\n  let b = alloc.Pair(u8) { a: 1, b: 2 }\n  let s = p.x\n  return alloc.make!(1)\n}",
+        )
+        .unwrap();
+        assert_eq!(p.imports[0].path, ["alloc"]);
+        assert_eq!((p.imports[1].path.join("."), p.imports[1].alias.as_str()), ("std.io".into(), "out"));
+        let TypeExprKind::Ptr(inner) = &p.funcs[0].params[0].ty.kind else { panic!() };
+        assert!(matches!(&inner.kind, TypeExprKind::Generic(n, _) if n == "alloc.Vec"));
+        assert!(matches!(&p.funcs[0].ret.as_ref().unwrap().kind, TypeExprKind::Named(n) if n == "alloc.Arena"));
+        let stmts = &p.funcs[0].body.stmts;
+        let Stmt::Expr(call) = &stmts[0] else { panic!() };
+        let ExprKind::Call(name, args) = &call.kind else { panic!() };
+        assert_eq!(name, "out.print");
+        // `alloc.MAX` alone stays a field access.
+        assert!(matches!(&args[0].kind, ExprKind::Field(b, f) if matches!(&b.kind, ExprKind::Var(m) if m == "alloc") && f == "MAX"));
+        let Stmt::Let { value, .. } = &stmts[1] else { panic!() };
+        assert!(matches!(&value.kind, ExprKind::StructLit(t, _) if matches!(&t.kind, TypeExprKind::Named(n) if n == "alloc.Arena")));
+        let Stmt::Let { value, .. } = &stmts[2] else { panic!() };
+        assert!(matches!(&value.kind, ExprKind::StructLit(t, _) if matches!(&t.kind, TypeExprKind::Generic(n, _) if n == "alloc.Pair")));
+        let Stmt::Let { value, .. } = &stmts[3] else { panic!() };
+        assert!(matches!(value.kind, ExprKind::Field(..)));
+        let Stmt::Return { value: Some(v), .. } = &stmts[4] else { panic!() };
+        assert!(matches!(&v.kind, ExprKind::MacroCall(n, _) if n == "alloc.make"));
+        // In conditions, `a.b { ... }` is a field followed by the body.
+        let s = body("if p.ok { g() }");
+        assert!(matches!(&s[0], Stmt::If { cond, .. } if matches!(cond.kind, ExprKind::Field(..))));
+        assert_eq!(parse_file("fn f() {", 3).unwrap_err().pos.file, 3);
+    }
+
+    #[test]
     fn bitwise_precedence() {
         // a | b ^ c & d << 1 + 2  ==  a | (b ^ (c & (d << (1 + 2))))
         let s = body("let x = a | b ^ c & d << 1 + 2\nlet y = p & q == r\nlet z = &p & q");
@@ -905,7 +974,7 @@ mod tests {
         assert!(parse("fn f() { let x = $y }").unwrap_err().msg.contains("only be used inside `quote"));
         assert!(parse("macro m() -> expr { return quote(quote(1)) }").unwrap_err().msg.contains("cannot be nested"));
         assert!(parse("macro m() -> expr { return quote(1 +) }").is_err());
-        assert_eq!(parse_expr("(1) * (2)").unwrap().pos, Pos { line: 1, col: 5 });
+        assert_eq!(parse_expr("(1) * (2)").unwrap().pos, Pos::new(1, 5));
     }
 
     #[test]

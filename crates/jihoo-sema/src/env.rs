@@ -12,6 +12,7 @@ use std::rc::Rc;
 use jihoo_ir as ir;
 use jihoo_ir::{layout, Profile, Type};
 use jihoo_syntax::ast::*;
+use jihoo_syntax::loader::Module;
 use jihoo_syntax::{Error, Pos};
 
 use crate::comptime::ConstValue;
@@ -68,19 +69,29 @@ impl<T: Clone> Memo<T> {
     }
 }
 
+/// What the checker needs to know about a module.
+struct ModInfo {
+    /// Prefix of the module's items; empty for the root module.
+    name: String,
+    imports: HashMap<String, usize>,
+    /// The scope of code at the top level of the module.
+    root: Rc<Bindings>,
+}
+
 pub(crate) struct Env<'p> {
     pub profile: Profile,
-    struct_decls: HashMap<&'p str, &'p StructDecl>,
-    fn_decls: HashMap<&'p str, &'p FnDecl>,
-    const_decls: HashMap<&'p str, &'p ConstDecl>,
+    modules: Vec<ModInfo>,
+    /// Declarations by key: the module-qualified name, such as `alloc.push`
+    /// (root-module items keep their plain names). Values are (module, decl).
+    struct_decls: HashMap<String, (usize, &'p StructDecl)>,
+    fn_decls: HashMap<String, (usize, &'p FnDecl)>,
+    const_decls: HashMap<String, (usize, &'p ConstDecl)>,
     structs: Memo<Fields>,
     sigs: Memo<Rc<Sig>>,
     consts: Memo<Rc<(Type, ConstValue)>>,
     funcs: Memo<Rc<ir::Function>>,
     /// Numbers the helper functions made for `comptime` expressions.
     pub comptime_ids: Cell<u32>,
-    /// Bindings outside of generic functions.
-    pub empty: Rc<Bindings>,
     /// Generic instances by key, their keys by name, and the ones not compiled yet.
     instances: RefCell<HashMap<String, Instance>>,
     /// Instances of generic structs: names by key, and (name, declaration name,
@@ -93,11 +104,21 @@ pub(crate) struct Env<'p> {
 }
 
 impl<'p> Env<'p> {
-    /// Indexes the program's items, reporting duplicate and reserved names.
-    pub fn new(profile: Profile, prog: &'p Program) -> (Self, Vec<Error>) {
+    /// Indexes every module's items, reporting duplicate and reserved names.
+    pub fn new(profile: Profile, mods: &'p [Module]) -> (Self, Vec<Error>) {
         let mut errors = Vec::new();
+        let modules = mods
+            .iter()
+            .enumerate()
+            .map(|(i, m)| ModInfo {
+                name: m.name.clone(),
+                imports: m.imports.clone(),
+                root: Rc::new(Bindings::in_module(i)),
+            })
+            .collect();
         let mut env = Env {
             profile,
+            modules,
             struct_decls: HashMap::new(),
             fn_decls: HashMap::new(),
             const_decls: HashMap::new(),
@@ -106,33 +127,83 @@ impl<'p> Env<'p> {
             consts: Memo::new(),
             funcs: Memo::new(),
             comptime_ids: Cell::new(0),
-            empty: Rc::new(Bindings::default()),
             instances: RefCell::new(HashMap::new()),
             struct_keys: RefCell::new(HashMap::new()),
             struct_instances: RefCell::new(Vec::new()),
             instance_keys: RefCell::new(HashMap::new()),
             pending: RefCell::new(VecDeque::new()),
         };
-        for s in &prog.structs {
-            if Type::from_name(&s.name).is_some() {
-                errors.push(Error::new(s.pos, format!("`{}` is a builtin type name", s.name)));
-            } else if env.struct_decls.insert(&s.name, s).is_some() {
-                errors.push(Error::new(s.pos, format!("struct `{}` is defined twice", s.name)));
+        for (m, module) in mods.iter().enumerate() {
+            let prog = &module.program;
+            for s in &prog.structs {
+                if Type::from_name(&s.name).is_some() {
+                    errors.push(Error::new(s.pos, format!("`{}` is a builtin type name", s.name)));
+                } else if env.struct_decls.insert(env.item_key(m, &s.name), (m, s)).is_some() {
+                    errors.push(Error::new(s.pos, format!("struct `{}` is defined twice", s.name)));
+                }
             }
-        }
-        for f in &prog.funcs {
-            if is_builtin(&f.name) {
-                errors.push(Error::new(f.pos, format!("`{}` is a builtin and cannot be redefined", f.name)));
-            } else if env.fn_decls.insert(&f.name, f).is_some() {
-                errors.push(Error::new(f.pos, format!("function `{}` is defined twice", f.name)));
+            for f in &prog.funcs {
+                if is_builtin(&f.name) {
+                    errors.push(Error::new(f.pos, format!("`{}` is a builtin and cannot be redefined", f.name)));
+                } else if env.fn_decls.insert(env.item_key(m, &f.name), (m, f)).is_some() {
+                    errors.push(Error::new(f.pos, format!("function `{}` is defined twice", f.name)));
+                }
             }
-        }
-        for c in &prog.consts {
-            if env.const_decls.insert(&c.name, c).is_some() {
-                errors.push(Error::new(c.pos, format!("constant `{}` is defined twice", c.name)));
+            for c in &prog.consts {
+                if env.const_decls.insert(env.item_key(m, &c.name), (m, c)).is_some() {
+                    errors.push(Error::new(c.pos, format!("constant `{}` is defined twice", c.name)));
+                }
             }
         }
         (env, errors)
+    }
+
+    // ---- modules ----
+
+    fn item_key(&self, module: usize, item: &str) -> String {
+        let prefix = &self.modules[module].name;
+        if prefix.is_empty() {
+            item.to_string()
+        } else {
+            format!("{prefix}.{item}")
+        }
+    }
+
+    /// The key of `name` as written in `module`: `item` is that module's own
+    /// item, `alias.item` an item of a module it imports. `None` for an unknown
+    /// alias.
+    pub fn key(&self, module: usize, name: &str) -> Option<String> {
+        match name.split_once('.') {
+            Some((alias, item)) => {
+                let target = *self.modules[module].imports.get(alias)?;
+                Some(self.item_key(target, item))
+            }
+            None => Some(self.item_key(module, name)),
+        }
+    }
+
+    /// True if `module` imports a module under the name `alias`.
+    pub fn is_alias(&self, module: usize, alias: &str) -> bool {
+        self.modules[module].imports.contains_key(alias)
+    }
+
+    /// The scope at the top level of `module`.
+    pub fn root(&self, module: usize) -> &Rc<Bindings> {
+        &self.modules[module].root
+    }
+
+    /// The module that function `key` is declared in.
+    pub fn fn_module(&self, key: &str) -> usize {
+        self.fn_decls[key].0
+    }
+
+    /// `name` as written in scope `b`, resolved to a key, or an error that says
+    /// which module alias is unknown.
+    pub fn key_or_err(&self, pos: Pos, b: &Bindings, name: &str) -> Result<String, Error> {
+        self.key(b.module, name).ok_or_else(|| {
+            let alias = name.split('.').next().unwrap_or(name);
+            Error::new(pos, format!("unknown module `{alias}` (is it imported?)"))
+        })
     }
 
     // ---- types ----
@@ -156,7 +227,8 @@ impl<'p> Env<'p> {
                 Ok(Type::array(self.resolve_in(elem, b, in_macro)?, self.array_len(n, b)?))
             }
             TypeExprKind::Generic(name, args) => {
-                let Some(decl) = self.struct_decls.get(name.as_str()).copied() else {
+                let key = self.key_or_err(t.pos, b, name)?;
+                let Some((dm, decl)) = self.struct_decls.get(&key).copied() else {
                     return Err(Error::new(t.pos, format!("unknown type `{name}`")));
                 };
                 if decl.params.is_empty() {
@@ -166,8 +238,8 @@ impl<'p> Env<'p> {
                     let msg = format!("struct `{name}` takes {} arguments, {} given", decl.params.len(), args.len());
                     return Err(Error::new(t.pos, msg));
                 }
-                let bindings = self.bind(name, decl.params.iter().zip(args), b)?;
-                Ok(Type::Struct(self.struct_instance(decl, bindings)))
+                let bindings = self.bind(name, dm, decl.params.iter().zip(args), b)?;
+                Ok(Type::Struct(self.struct_instance(&key, bindings)))
             }
             TypeExprKind::Named(name) => {
                 match b.get(name) {
@@ -195,11 +267,13 @@ impl<'p> Env<'p> {
                         ));
                     }
                     Ok(ty)
-                } else if let Some(decl) = self.struct_decls.get(name.as_str()) {
+                } else if let Some(&(_, decl)) = self.key(b.module, name).and_then(|k| self.struct_decls.get(&k)) {
                     if !decl.params.is_empty() {
                         return Err(Error::new(t.pos, format!("struct `{name}` is generic; write `{name}(...)`")));
                     }
-                    Ok(Type::Struct(name.clone()))
+                    Ok(Type::Struct(self.key(b.module, name).unwrap()))
+                } else if name.contains('.') && self.key(b.module, name).is_none() {
+                    Err(self.key_or_err(t.pos, b, name).unwrap_err())
                 } else if name == "ptr" {
                     Err(Error::new(t.pos, "unknown type `ptr`; byte pointers are written `*u8`"))
                 } else {
@@ -228,29 +302,29 @@ impl<'p> Env<'p> {
     /// A struct's declaration and the bindings of its parameters (empty unless
     /// `name` is an instance of a generic struct).
     fn struct_decl(&self, pos: Pos, name: &str) -> Result<(&'p StructDecl, Rc<Bindings>), Error> {
-        if let Some(d) = self.struct_decls.get(name) {
-            return Ok((*d, self.empty.clone()));
+        if let Some(&(m, d)) = self.struct_decls.get(name) {
+            return Ok((d, self.root(m).clone()));
         }
         let instances = self.struct_instances.borrow();
         let found = instances.iter().find(|(n, _, _)| n == name);
         found
-            .map(|(_, d, b)| (self.struct_decls[d.as_str()], b.clone()))
+            .map(|(_, d, b)| (self.struct_decls[d.as_str()].1, b.clone()))
             .ok_or_else(|| Error::new(pos, format!("unknown struct `{name}`")))
     }
 
-    /// The name of the instance of generic struct `decl` for `bindings`, which is
-    /// how it reads in messages: `Pair(i64)`.
-    fn struct_instance(&self, decl: &'p StructDecl, bindings: Bindings) -> String {
-        let key = format!("{}({})", decl.name, bindings.key());
+    /// The name of the instance of generic struct `decl_key` for `bindings`,
+    /// which is how it reads in messages: `Pair(i64)`.
+    fn struct_instance(&self, decl_key: &str, bindings: Bindings) -> String {
+        let key = format!("{decl_key}({})", bindings.key());
         if let Some(name) = self.struct_keys.borrow().get(&key) {
             return name.clone();
         }
-        let mut name = format!("{}({})", decl.name, bindings.args());
+        let mut name = format!("{decl_key}({})", bindings.args());
         if self.struct_instances.borrow().iter().any(|(n, _, _)| *n == name) {
             name = format!("{name}#{}", self.struct_instances.borrow().len());
         }
         self.struct_keys.borrow_mut().insert(key, name.clone());
-        self.struct_instances.borrow_mut().push((name.clone(), decl.name.clone(), Rc::new(bindings)));
+        self.struct_instances.borrow_mut().push((name.clone(), decl_key.to_string(), Rc::new(bindings)));
         name
     }
 
@@ -292,7 +366,7 @@ impl<'p> Env<'p> {
     }
 
     fn acyclic(&self, root: &str, name: &str, stack: &mut Vec<String>) -> Result<(), Error> {
-        let pos = self.struct_decl(Pos { line: 1, col: 1 }, root)?.0.pos;
+        let pos = self.struct_decl(Pos::new(1, 1), root)?.0.pos;
         if stack.iter().any(|s| s == name) {
             let path = stack.join(" -> ");
             return Err(Error::new(pos, format!("struct `{root}` contains itself ({path} -> {name}); use a pointer")));
@@ -323,7 +397,7 @@ impl<'p> Env<'p> {
     /// Type of field `index` of `t`, which was already resolved.
     pub fn field_type(&self, t: &Type, index: u32) -> Type {
         let Type::Struct(s) = t else { unreachable!("not a struct: {t}") };
-        let fields = self.struct_fields(Pos { line: 0, col: 0 }, s).expect("struct was resolved before");
+        let fields = self.struct_fields(Pos::default(), s).expect("struct was resolved before");
         fields[index as usize].1.clone()
     }
 
@@ -341,24 +415,25 @@ impl<'p> Env<'p> {
 
     // ---- functions and constants ----
 
-    pub fn has_function(&self, name: &str) -> bool {
-        self.fn_decls.contains_key(name)
+    pub fn has_function(&self, module: usize, name: &str) -> bool {
+        self.key(module, name).is_some_and(|k| self.fn_decls.contains_key(&k))
     }
 
-    /// The declaration of `name` if it is a generic function.
-    pub fn generic(&self, name: &str) -> Option<&'p FnDecl> {
-        self.fn_decls.get(name).copied().filter(|d| !d.is_macro && d.params.iter().any(|p| p.comptime))
+    /// The declaration of function `key` if it is generic.
+    pub fn generic(&self, key: &str) -> Option<&'p FnDecl> {
+        self.fn_decls.get(key).map(|&(_, d)| d).filter(|d| !d.is_macro && d.params.iter().any(|p| p.comptime))
     }
 
-    /// The declaration of `name` if it is a macro.
-    pub fn macro_decl(&self, name: &str) -> Option<&'p FnDecl> {
-        self.fn_decls.get(name).copied().filter(|d| d.is_macro)
+    /// The declaration of `key` if it is a macro.
+    pub fn macro_decl(&self, key: &str) -> Option<&'p FnDecl> {
+        self.fn_decls.get(key).map(|&(_, d)| d).filter(|d| d.is_macro)
     }
 
     /// The signature of function `name`, or `None` if there is no such function.
     /// Generic functions have no signature of their own, only their instances.
     pub fn signature(&self, name: &str) -> Option<Result<Rc<Sig>, Error>> {
-        let decl = *self.fn_decls.get(name)?;
+        let (m, decl) = *self.fn_decls.get(name)?;
+        let scope = self.root(m);
         if self.generic(name).is_some() {
             return Some(Err(Error::new(decl.pos, format!("`{name}` has comptime parameters, so it cannot be used here"))));
         }
@@ -371,14 +446,17 @@ impl<'p> Env<'p> {
                         return Err(Error::new(p.ty.pos, "`type` can only be the type of a `comptime` parameter"));
                     }
                 }
-                let m = decl.is_macro;
-                let params: Vec<Type> =
-                    decl.params.iter().map(|p| self.resolve_in(&p.ty, &self.empty, m)).collect::<Result<_, _>>()?;
+                let is_macro = decl.is_macro;
+                let params: Vec<Type> = decl
+                    .params
+                    .iter()
+                    .map(|p| self.resolve_in(&p.ty, scope, is_macro))
+                    .collect::<Result<_, _>>()?;
                 let ret = match &decl.ret {
-                    Some(t) => self.resolve_in(t, &self.empty, m)?,
+                    Some(t) => self.resolve_in(t, scope, is_macro)?,
                     None => Type::Unit,
                 };
-                if m {
+                if is_macro {
                     if ret != Type::Expr {
                         return Err(Error::new(decl.pos, format!("macro `{name}` must return `expr`, not {ret}")));
                     }
@@ -439,8 +517,11 @@ impl<'p> Env<'p> {
             (inst.fn_name.clone(), inst.bindings.clone(), inst.sig.clone())
         });
         let (decl, bindings, sig) = match instance {
-            Some((fn_name, b, sig)) => (self.fn_decls[fn_name.as_str()], b, Some(sig)),
-            None => (self.fn_decls[name], self.empty.clone(), None),
+            Some((fn_name, b, sig)) => (self.fn_decls[fn_name.as_str()].1, b, Some(sig)),
+            None => {
+                let (m, decl) = self.fn_decls[name];
+                (decl, self.root(m).clone(), None)
+            }
         };
         self.funcs.get(
             name,
@@ -463,13 +544,14 @@ impl<'p> Env<'p> {
 
     /// The type and value of constant `name`, or `None` if there is no such constant.
     pub fn constant(&self, name: &str) -> Option<Result<Rc<(Type, ConstValue)>, Error>> {
-        let decl = *self.const_decls.get(name)?;
+        let (cm, decl) = *self.const_decls.get(name)?;
+        let scope = self.root(cm);
         Some(self.consts.get(
             name,
             || Error::new(decl.pos, format!("constant `{name}` depends on itself")),
             || {
-                let want = decl.ty.as_ref().map(|t| self.resolve(t, &self.empty)).transpose()?;
-                let (ty, v) = self.comptime(&decl.value, want.as_ref(), &self.empty)?;
+                let want = decl.ty.as_ref().map(|t| self.resolve(t, scope)).transpose()?;
+                let (ty, v) = self.comptime(&decl.value, want.as_ref(), scope)?;
                 if let Some(want) = want {
                     if want != ty {
                         let msg = format!("the value of `{name}` must be {want}, found {ty}");
@@ -487,7 +569,7 @@ impl<'p> Env<'p> {
     pub fn check_entry(&self, prog: &Program) -> Result<(), Error> {
         let entry = self.profile.entry();
         let Some(decl) = prog.funcs.iter().find(|f| f.name == entry) else {
-            let pos = Pos { line: 1, col: 1 };
+            let pos = Pos::new(1, 1);
             return Err(Error::new(pos, format!("{} program needs `fn {entry}()`", self.profile.as_str())));
         };
         let sig = self.signature(entry).unwrap()?;

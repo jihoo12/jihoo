@@ -21,6 +21,13 @@
             version = "0.1.0";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            # Ship the standard library and point `import` at it.
+            postInstall = ''
+              mkdir -p $out/share/jihoo
+              cp -r lib $out/share/jihoo/lib
+              wrapProgram $out/bin/jihoo --suffix JIHOO_PATH : $out/share/jihoo/lib
+            '';
           };
 
           # C++ LLVM backend (`jihoo-llc` binary)

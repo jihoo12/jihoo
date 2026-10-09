@@ -1,0 +1,45 @@
+#![freestanding]
+// The `alloc` and `io` libraries (lib/alloc.jh, lib/io.jh): an arena allocator,
+// a growable Vec(T), and output, with no libc and no GC (x86_64 Linux).
+//   jihoo build examples/arena.jh -o out/arena && ./out/arena; echo $?
+
+import alloc
+import io
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+fn _start() -> i64 {
+    let arena = alloc.arena_new(1 << 20) // 1 MiB
+
+    // 1000 integers: the Vec grows 4 -> 8 -> ... -> 1024.
+    let squares = alloc.vec_new(i64, &arena)
+    let i = 0
+    while i < 1000 {
+        alloc.push(i64, &squares, i * i)
+        i = i + 1
+    }
+    let sum = 0
+    i = 0
+    while i < squares.len {
+        sum = sum + alloc.get(i64, &squares, i)
+        i = i + 1
+    }
+    io.print_int(squares.len)          // 1000
+    io.print_int(squares.cap)          // 1024
+    io.print_int(sum)                  // 332833500
+
+    // The same library code, instantiated for a struct of this program.
+    let points = alloc.vec_new(Point, &arena)
+    alloc.push(Point, &points, Point { x: 3, y: 4 })
+    alloc.push(Point, &points, Point { x: 5, y: 12 })
+    let p = alloc.pop(Point, &points)
+    io.print_int(p.x * p.y)            // 60
+    io.print_int(arena.used)           // bytes handed out by the arena
+    io.print_int(0 - alloc.PROT_WRITE) // -2: constants of other modules work too
+    io.puts("done\n")
+
+    return points.len                  // 1 after the pop
+}
