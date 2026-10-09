@@ -1,0 +1,12 @@
+[package]
+name = "jihoo-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+jihoo-ir.workspace = true
+
+[dev-dependencies]
+jihoo-syntax.workspace = true
+jihoo-lower.workspace = true

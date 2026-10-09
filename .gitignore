@@ -1,0 +1,6 @@
+/target
+/backend-llvm/build
+/result*
+/.direnv
+/out
+/backend-llvm/compile_commands.json

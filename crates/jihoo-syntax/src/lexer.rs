@@ -1,0 +1,266 @@
+use crate::{Error, Pos};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Tok {
+    Ident(String),
+    Int(i64),
+    Str(String),
+    /// `#![name]`
+    InnerAttr(String),
+
+    Fn,
+    Let,
+    Return,
+    If,
+    Else,
+    While,
+    True,
+    False,
+
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    Comma,
+    Colon,
+    Semi,
+    Arrow,
+    Assign,
+    EqEq,
+    NotEq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    Bang,
+    AndAnd,
+    OrOr,
+
+    Eof,
+}
+
+#[derive(Debug, Clone)]
+pub struct Token {
+    pub tok: Tok,
+    pub pos: Pos,
+    /// Whether a newline preceded this token. Used to end statements without `;`.
+    pub newline_before: bool,
+}
+
+struct Lexer<'a> {
+    src: &'a [u8],
+    i: usize,
+    line: u32,
+    col: u32,
+}
+
+impl<'a> Lexer<'a> {
+    fn peek(&self) -> u8 {
+        self.src.get(self.i).copied().unwrap_or(0)
+    }
+
+    fn peek2(&self) -> u8 {
+        self.src.get(self.i + 1).copied().unwrap_or(0)
+    }
+
+    fn bump(&mut self) -> u8 {
+        let c = self.peek();
+        self.i += 1;
+        if c == b'\n' {
+            self.line += 1;
+            self.col = 1;
+        } else {
+            self.col += 1;
+        }
+        c
+    }
+
+    fn pos(&self) -> Pos {
+        Pos { line: self.line, col: self.col }
+    }
+
+    /// Skips whitespace and comments; returns whether a newline was crossed.
+    fn skip_trivia(&mut self) -> bool {
+        let mut newline = false;
+        loop {
+            match self.peek() {
+                b'\n' => {
+                    newline = true;
+                    self.bump();
+                }
+                b' ' | b'\t' | b'\r' => {
+                    self.bump();
+                }
+                b'/' if self.peek2() == b'/' => {
+                    while self.peek() != b'\n' && self.i < self.src.len() {
+                        self.bump();
+                    }
+                }
+                _ => return newline,
+            }
+        }
+    }
+
+    fn string(&mut self, start: Pos) -> Result<String, Error> {
+        let mut bytes = Vec::new();
+        loop {
+            if self.i >= self.src.len() {
+                return Err(Error::new(start, "unterminated string literal"));
+            }
+            match self.bump() {
+                b'"' => break,
+                b'\\' => {
+                    let esc_pos = self.pos();
+                    let b = match self.bump() {
+                        b'n' => b'\n',
+                        b't' => b'\t',
+                        b'r' => b'\r',
+                        b'0' => 0,
+                        b'\\' => b'\\',
+                        b'"' => b'"',
+                        c => {
+                            return Err(Error::new(
+                                esc_pos,
+                                format!("unknown escape `\\{}`", c as char),
+                            ))
+                        }
+                    };
+                    bytes.push(b);
+                }
+                c => bytes.push(c),
+            }
+        }
+        String::from_utf8(bytes).map_err(|_| Error::new(start, "string literal is not valid UTF-8"))
+    }
+
+    fn next(&mut self) -> Result<Token, Error> {
+        let newline_before = self.skip_trivia();
+        let pos = self.pos();
+        let mk = |tok| Ok(Token { tok, pos, newline_before });
+
+        if self.i >= self.src.len() {
+            return mk(Tok::Eof);
+        }
+
+        let c = self.bump();
+        let tok = match c {
+            b'(' => Tok::LParen,
+            b')' => Tok::RParen,
+            b'{' => Tok::LBrace,
+            b'}' => Tok::RBrace,
+            b',' => Tok::Comma,
+            b':' => Tok::Colon,
+            b';' => Tok::Semi,
+            b'+' => Tok::Plus,
+            b'*' => Tok::Star,
+            b'/' => Tok::Slash,
+            b'%' => Tok::Percent,
+            b'-' if self.peek() == b'>' => {
+                self.bump();
+                Tok::Arrow
+            }
+            b'-' => Tok::Minus,
+            b'=' if self.peek() == b'=' => {
+                self.bump();
+                Tok::EqEq
+            }
+            b'=' => Tok::Assign,
+            b'!' if self.peek() == b'=' => {
+                self.bump();
+                Tok::NotEq
+            }
+            b'!' => Tok::Bang,
+            b'<' if self.peek() == b'=' => {
+                self.bump();
+                Tok::Le
+            }
+            b'<' => Tok::Lt,
+            b'>' if self.peek() == b'=' => {
+                self.bump();
+                Tok::Ge
+            }
+            b'>' => Tok::Gt,
+            b'&' if self.peek() == b'&' => {
+                self.bump();
+                Tok::AndAnd
+            }
+            b'|' if self.peek() == b'|' => {
+                self.bump();
+                Tok::OrOr
+            }
+            b'"' => Tok::Str(self.string(pos)?),
+            b'#' if self.peek() == b'!' && self.peek2() == b'[' => {
+                self.bump();
+                self.bump();
+                let start = self.i;
+                while self.peek() != b']' {
+                    if self.i >= self.src.len() || self.peek() == b'\n' {
+                        return Err(Error::new(pos, "unterminated `#![...]` attribute"));
+                    }
+                    self.bump();
+                }
+                let name = String::from_utf8_lossy(&self.src[start..self.i]).trim().to_string();
+                self.bump();
+                Tok::InnerAttr(name)
+            }
+            c if c.is_ascii_digit() => {
+                let start = self.i - 1;
+                while self.peek().is_ascii_digit() || self.peek() == b'_' {
+                    self.bump();
+                }
+                let text: String = std::str::from_utf8(&self.src[start..self.i])
+                    .unwrap()
+                    .chars()
+                    .filter(|&c| c != '_')
+                    .collect();
+                let n = text
+                    .parse::<i64>()
+                    .map_err(|_| Error::new(pos, format!("integer literal `{text}` is too large")))?;
+                Tok::Int(n)
+            }
+            c if c.is_ascii_alphabetic() || c == b'_' => {
+                let start = self.i - 1;
+                while self.peek().is_ascii_alphanumeric() || self.peek() == b'_' {
+                    self.bump();
+                }
+                let word = std::str::from_utf8(&self.src[start..self.i]).unwrap();
+                match word {
+                    "fn" => Tok::Fn,
+                    "let" => Tok::Let,
+                    "return" => Tok::Return,
+                    "if" => Tok::If,
+                    "else" => Tok::Else,
+                    "while" => Tok::While,
+                    "true" => Tok::True,
+                    "false" => Tok::False,
+                    _ => Tok::Ident(word.to_string()),
+                }
+            }
+            c => {
+                return Err(Error::new(
+                    pos,
+                    format!("unexpected character `{}`", c as char),
+                ))
+            }
+        };
+        mk(tok)
+    }
+}
+
+pub fn lex(src: &str) -> Result<Vec<Token>, Error> {
+    let mut lx = Lexer { src: src.as_bytes(), i: 0, line: 1, col: 1 };
+    let mut out = Vec::new();
+    loop {
+        let t = lx.next()?;
+        let eof = t.tok == Tok::Eof;
+        out.push(t);
+        if eof {
+            return Ok(out);
+        }
+    }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "jihoo-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "jihoo"
+path = "src/main.rs"
+
+[dependencies]
+jihoo-syntax.workspace = true
+jihoo-ir.workspace = true
+jihoo-lower.workspace = true
+jihoo-vm.workspace = true

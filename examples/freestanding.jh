@@ -1,0 +1,21 @@
+#![freestanding]
+// Freestanding program: no GC, no std, compiled with LLVM to a tiny static binary.
+//   jihoo build examples/freestanding.jh -o out/hello && ./out/hello; echo $?
+//
+// Returning from `_start` exits the process with that value.
+
+fn write(fd: i64, buf: ptr, len: i64) -> i64 {
+    return syscall(1, fd, buf, len) // SYS_write on x86_64 Linux
+}
+
+fn fib(n: i64) -> i64 {
+    if n < 2 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn _start() -> i64 {
+    write(1, "Hello from freestanding jihoo!\n", 31)
+    return fib(10)
+}

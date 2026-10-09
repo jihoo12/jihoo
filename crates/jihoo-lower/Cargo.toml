@@ -1,0 +1,9 @@
+[package]
+name = "jihoo-lower"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+jihoo-syntax.workspace = true
+jihoo-ir.workspace = true

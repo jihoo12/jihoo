@@ -1,0 +1,16 @@
+// Hosted program: runs on the VM with the GC.
+//   jihoo run examples/hello.jh
+
+fn greet(name: str) -> str {
+    return "Hello, " + name + "!"
+}
+
+fn main() {
+    print(greet("jihoo"))
+
+    let i = 1
+    while i <= 5 {
+        print(i * i)
+        i = i + 1
+    }
+}
