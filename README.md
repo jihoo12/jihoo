@@ -63,17 +63,24 @@ nix build
 | path                   | language | what |
 |------------------------|----------|------|
 | `crates/jihoo-syntax`  | Rust     | lexer, parser, AST |
-| `crates/jihoo-lower`   | Rust     | AST → JIR |
+| `crates/jihoo-sema`    | Rust     | type checking + lowering AST → JIR |
 | `crates/jihoo-ir`      | Rust     | JIR data types, text printer, verifier |
 | `crates/jihoo-vm`      | Rust     | register VM and GC heap |
 | `crates/jihoo-cli`     | Rust     | the `jihoo` command |
 | `backend-llvm`         | C++      | `jihoo-llc`: JIR text → LLVM → object file |
+| `tests/diff`           | jihoo    | programs that must behave the same on the VM and natively |
 
 ## Status
 
-v0 skeleton: integers, bools, strings, functions, `if`/`while`, `&&`/`||`, `print`
-(hosted) and `syscall` (freestanding, x86_64 and aarch64 Linux). There is no type
-checker yet. See the roadmap in [docs/design.md](docs/design.md).
+v0: static types with local inference (`unit`, `i64`, `bool`, `str` hosted,
+`ptr` freestanding), functions, `if`/`while`, `&&`/`||`, `print` (hosted) and
+`syscall` (freestanding, x86_64 and aarch64 Linux). See the roadmap in
+[docs/design.md](docs/design.md).
+
+```sh
+# differential tests: VM vs native
+JIHOO_LLC=$PWD/backend-llvm/build/jihoo-llc cargo test --test differential
+```
 
 ## License
 

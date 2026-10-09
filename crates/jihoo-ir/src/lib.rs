@@ -3,16 +3,15 @@
 //! The contract between the VM and the LLVM backend. The text format is defined in
 //! `docs/jir.md`, and the C++ backend (`backend-llvm`) reads that text.
 //!
-//! To keep v0 simple:
-//! - Every value is 64 bits wide (ints; bools are 0/1; strings are GC strings when hosted
-//!   and plain addresses when freestanding).
-//! - It is not strict SSA: a register may be assigned many times (a `let` variable is a
-//!   register).
-//!   The LLVM backend gives each register an alloca and lets mem2reg clean up.
+//! Every register has a type, declared once per function. Registers are not strict
+//! SSA: a register may be assigned many times (a `let` variable is a register).
+//! The LLVM backend gives each register an alloca and lets mem2reg clean up.
 
 mod print;
+pub mod types;
 mod verify;
 
+pub use types::Type;
 pub use verify::verify;
 
 /// Language profile, selected with `#![freestanding]` at the top of a source file.
@@ -29,6 +28,14 @@ impl Profile {
         match self {
             Profile::Hosted => "hosted",
             Profile::Freestanding => "freestanding",
+        }
+    }
+
+    /// Name of the entry function.
+    pub fn entry(self) -> &'static str {
+        match self {
+            Profile::Hosted => "main",
+            Profile::Freestanding => "_start",
         }
     }
 }
@@ -54,11 +61,19 @@ impl Module {
 #[derive(Debug, Clone)]
 pub struct Function {
     pub name: String,
-    /// Arguments arrive in registers `%0 .. %(params-1)`.
-    pub params: u32,
-    pub num_regs: u32,
+    pub params: Vec<Type>,
+    pub ret: Type,
+    /// Type of every register. Arguments arrive in `%0 .. %(params-1)`, so this
+    /// starts with `params`.
+    pub regs: Vec<Type>,
     /// `blocks[0]` is the entry block.
     pub blocks: Vec<Block>,
+}
+
+impl Function {
+    pub fn reg_type(&self, r: Reg) -> Type {
+        self.regs[r.0 as usize]
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -117,7 +132,11 @@ impl UnOp {
 
 #[derive(Debug, Clone)]
 pub enum Inst {
+    /// An `i64` or `bool` (0/1) constant, depending on the type of `dst`.
     Const { dst: Reg, value: i64 },
+    /// The unit value.
+    Unit { dst: Reg },
+    /// String literal: `str` when hosted, `ptr` to constant bytes when freestanding.
     Str { dst: Reg, value: String },
     Copy { dst: Reg, src: Reg },
     Unary { dst: Reg, op: UnOp, src: Reg },
@@ -132,9 +151,11 @@ pub enum Inst {
 #[derive(Debug, Clone)]
 pub enum Terminator {
     Jump(BlockId),
-    /// Goes to `then` when `cond != 0`.
+    /// Goes to `then` when the `bool` `cond` is true.
     Branch { cond: Reg, then: BlockId, els: BlockId },
     Ret(Reg),
+    /// Control never gets here.
+    Unreachable,
 }
 
 impl Terminator {
@@ -142,7 +163,15 @@ impl Terminator {
         match self {
             Terminator::Jump(b) => vec![*b],
             Terminator::Branch { then, els, .. } => vec![*then, *els],
-            Terminator::Ret(_) => vec![],
+            Terminator::Ret(_) | Terminator::Unreachable => vec![],
+        }
+    }
+
+    pub fn successors_mut(&mut self) -> Vec<&mut BlockId> {
+        match self {
+            Terminator::Jump(b) => vec![b],
+            Terminator::Branch { then, els, .. } => vec![then, els],
+            Terminator::Ret(_) | Terminator::Unreachable => vec![],
         }
     }
 }

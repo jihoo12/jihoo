@@ -2,6 +2,7 @@
 
 #include "jir_parser.h"
 
+#include <algorithm>
 #include <cctype>
 #include <sstream>
 #include <unordered_map>
@@ -86,6 +87,9 @@ std::vector<Tok> tokenize(int line, const std::string &src) {
       } else {
         out.push_back({TokKind::Global, name});
       }
+    } else if (c == '-' && i + 1 < src.size() && src[i + 1] == '>') {
+      out.push_back({TokKind::Punct, "->"});
+      i += 2;
     } else if (std::isdigit((unsigned char)c) || c == '-') {
       size_t j = i++;
       while (i < src.size() && std::isdigit((unsigned char)src[i])) i++;
@@ -141,6 +145,17 @@ struct Line {
     if (t.kind != TokKind::Word || t.text.rfind("bb", 0) != 0) fail(no, "expected a block like bb0");
     return uint32_t(number(no, t.text.substr(2)));
   }
+  Type type() {
+    const Tok &t = next("a type");
+    if (t.kind == TokKind::Word) {
+      if (t.text == "unit") return Type::Unit;
+      if (t.text == "i64") return Type::I64;
+      if (t.text == "bool") return Type::Bool;
+      if (t.text == "str") return Type::Str;
+      if (t.text == "ptr") return Type::Ptr;
+    }
+    fail(no, "expected a type (unit, i64, bool, str, ptr)");
+  }
   bool peek_punct(const char *p) const {
     return !done() && toks[i].kind == TokKind::Punct && toks[i].text == p;
   }
@@ -178,6 +193,8 @@ Inst parse_assign(Line &l) {
   if (w == "const") {
     inst.op = Op::Const;
     inst.imm = l.integer();
+  } else if (w == "unit") {
+    inst.op = Op::Unit;
   } else if (w == "str") {
     const Tok &s = l.next("a string");
     if (s.kind != TokKind::Str) fail(l.no, "expected a string literal");
@@ -213,6 +230,7 @@ Module parse(const std::string &text) {
   Module m;
   Function *fn = nullptr;
   Block *block = nullptr;  // current block, null after a terminator
+  bool need_regs = false;  // the `regs` line must follow the function header
   bool saw_version = false, saw_profile = false;
 
   std::istringstream in(text);
@@ -243,11 +261,19 @@ Module parse(const std::string &text) {
         m.funcs.push_back({});
         fn = &m.funcs.back();
         fn->name = name.text;
-        l.word("params");
-        fn->params = uint32_t(l.integer());
-        l.word("regs");
-        fn->regs = uint32_t(l.integer());
+        l.punct("(");
+        if (!l.peek_punct(")")) {
+          fn->params.push_back(l.type());
+          while (l.peek_punct(",")) {
+            l.i++;
+            fn->params.push_back(l.type());
+          }
+        }
+        l.punct(")");
+        l.punct("->");
+        fn->ret = l.type();
         l.punct("{");
+        need_regs = true;
       } else {
         fail(no, "expected `jir`, `profile`, or `fn`");
       }
@@ -256,7 +282,14 @@ Module parse(const std::string &text) {
     }
 
     // Inside a function body.
-    if (first.kind == TokKind::Punct && first.text == "}") {
+    if (need_regs) {
+      l.word("regs");
+      while (!l.done()) fn->regs.push_back(l.type());
+      if (fn->regs.size() < fn->params.size() ||
+          !std::equal(fn->params.begin(), fn->params.end(), fn->regs.begin()))
+        fail(no, "register types must start with the parameter types");
+      need_regs = false;
+    } else if (first.kind == TokKind::Punct && first.text == "}") {
       if (block) fail(no, "block bb" + std::to_string(fn->blocks.size() - 1) + " has no terminator");
       if (fn->blocks.empty()) fail(no, "function has no blocks");
       fn = nullptr;
@@ -297,6 +330,8 @@ Module parse(const std::string &text) {
       } else if (w == "ret") {
         t.kind = TermKind::Ret;
         t.reg = l.reg();
+      } else if (w == "unreachable") {
+        t.kind = TermKind::Unreachable;
       } else {
         fail(no, "unknown instruction `" + w + "`");
       }

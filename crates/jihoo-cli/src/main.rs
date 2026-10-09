@@ -56,6 +56,12 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         "run" => {
             let opts = parse_opts(rest)?;
             let m = compile(&opts.input)?;
+            if m.profile == Profile::Freestanding {
+                return Err(format!(
+                    "{}: freestanding programs do not run on the VM; compile them with `jihoo build`",
+                    opts.input.display()
+                ));
+            }
             let code = jihoo_vm::run(&m, &mut std::io::stdout()).map_err(|e| e.to_string())?;
             Ok(ExitCode::from(code as u8))
         }
@@ -84,9 +90,10 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
 fn compile(path: &Path) -> Result<Module, String> {
     let src = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let at = |e: jihoo_syntax::Error| format!("{}:{e}", path.display());
-    let ast = jihoo_syntax::parse(&src).map_err(at)?;
-    let m = jihoo_lower::lower(&ast).map_err(at)?;
+    let at = |e: &jihoo_syntax::Error| format!("{}:{e}", path.display());
+    let ast = jihoo_syntax::parse(&src).map_err(|e| at(&e))?;
+    let m = jihoo_sema::analyze(&ast)
+        .map_err(|errs| errs.iter().map(at).collect::<Vec<_>>().join("\nerror: "))?;
     jihoo_ir::verify(&m).map_err(|e| format!("{}: invalid IR: {e}", path.display()))?;
     Ok(m)
 }

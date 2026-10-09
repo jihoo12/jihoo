@@ -10,9 +10,11 @@ namespace jir {
 
 enum class Profile { Hosted, Freestanding };
 
+enum class Type { Unit, I64, Bool, Str, Ptr };
+
 enum class Op {
   // instructions
-  Const, Str, Copy, Neg, Not,
+  Const, Unit, Str, Copy, Neg, Not,
   Add, Sub, Mul, Div, Rem, Eq, Ne, Lt, Le, Gt, Ge,
   Call, Syscall, Print,
 };
@@ -25,7 +27,7 @@ struct Inst {
   std::string text;            // Str bytes, or Call callee name
 };
 
-enum class TermKind { Jump, Branch, Ret };
+enum class TermKind { Jump, Branch, Ret, Unreachable };
 
 struct Terminator {
   TermKind kind;
@@ -40,8 +42,9 @@ struct Block {
 
 struct Function {
   std::string name;
-  uint32_t params = 0;
-  uint32_t regs = 0;
+  std::vector<Type> params;
+  Type ret = Type::Unit;
+  std::vector<Type> regs;  // starts with the parameter types
   std::vector<Block> blocks;
 };
 

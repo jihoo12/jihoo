@@ -7,13 +7,15 @@ use std::fmt;
 use std::io::Write;
 
 use gc::{GcRef, Heap};
-use jihoo_ir::{BinOp, Inst, Module, Profile, Reg, Terminator, UnOp};
+use jihoo_ir::{BinOp, Function, Inst, Module, Profile, Reg, Terminator, Type, UnOp};
 
 const MAX_CALL_DEPTH: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Value {
+    Unit,
     Int(i64),
+    Bool(bool),
     Str(GcRef),
 }
 
@@ -70,7 +72,8 @@ impl<'m> Vm<'m> {
         let main = *self.fn_index.get("main").ok_or_else(|| err("no `main` function"))?;
         match self.call(main, &[], out)? {
             Value::Int(n) => Ok(n),
-            Value::Str(_) => Err(err("`main` must return an integer")),
+            Value::Unit => Ok(0),
+            _ => Err(err("`main` must return unit or an integer")),
         }
     }
 
@@ -87,7 +90,7 @@ impl<'m> Vm<'m> {
             if frame.ip < block.insts.len() {
                 let inst = &block.insts[frame.ip];
                 frame.ip += 1;
-                self.exec(inst, out)?;
+                self.exec(f, inst, out)?;
                 continue;
             }
 
@@ -97,11 +100,12 @@ impl<'m> Vm<'m> {
                     frame.ip = 0;
                 }
                 Terminator::Branch { cond, then, els } => {
-                    let c = self.int(*cond)?;
+                    let c = self.bool(*cond)?;
                     let frame = self.stack.last_mut().unwrap();
-                    frame.block = if c != 0 { then.0 } else { els.0 } as usize;
+                    frame.block = if c { then.0 } else { els.0 } as usize;
                     frame.ip = 0;
                 }
+                Terminator::Unreachable => return Err(self.error("reached `unreachable`")),
                 Terminator::Ret(r) => {
                     let v = frame.regs[r.0 as usize];
                     let done = self.stack.pop().unwrap();
@@ -120,15 +124,22 @@ impl<'m> Vm<'m> {
             return Err(self.error("stack overflow"));
         }
         let f = &self.module.funcs[func];
-        let mut regs = vec![Value::Int(0); f.num_regs as usize];
+        let mut regs = vec![Value::Unit; f.regs.len()];
         regs[..args.len()].copy_from_slice(args);
         self.stack.push(Frame { func, block: 0, ip: 0, regs, ret_dst });
         Ok(())
     }
 
-    fn exec(&mut self, inst: &'m Inst, out: &mut dyn Write) -> Result<(), VmError> {
+    fn exec(&mut self, f: &'m Function, inst: &'m Inst, out: &mut dyn Write) -> Result<(), VmError> {
         match inst {
-            Inst::Const { dst, value } => self.set(*dst, Value::Int(*value)),
+            Inst::Const { dst, value } => {
+                let v = match f.reg_type(*dst) {
+                    Type::Bool => Value::Bool(*value != 0),
+                    _ => Value::Int(*value),
+                };
+                self.set(*dst, v);
+            }
+            Inst::Unit { dst } => self.set(*dst, Value::Unit),
             Inst::Str { dst, value } => {
                 let r = self.alloc_str(value);
                 self.set(*dst, Value::Str(r));
@@ -138,12 +149,11 @@ impl<'m> Vm<'m> {
                 self.set(*dst, v);
             }
             Inst::Unary { dst, op, src } => {
-                let x = self.int(*src)?;
                 let v = match op {
-                    UnOp::Neg => x.wrapping_neg(),
-                    UnOp::Not => (x == 0) as i64,
+                    UnOp::Neg => Value::Int(self.int(*src)?.wrapping_neg()),
+                    UnOp::Not => Value::Bool(!self.bool(*src)?),
                 };
-                self.set(*dst, Value::Int(v));
+                self.set(*dst, v);
             }
             Inst::Binary { dst, op, lhs, rhs } => {
                 let v = self.binary(*op, self.get(*lhs), self.get(*rhs))?;
@@ -157,7 +167,9 @@ impl<'m> Vm<'m> {
             Inst::Print { src } => {
                 let line = match self.get(*src) {
                     Value::Int(n) => n.to_string(),
+                    Value::Bool(b) => b.to_string(),
                     Value::Str(r) => self.heap.str(r).to_string(),
+                    Value::Unit => return Err(self.error("cannot print unit")),
                 };
                 writeln!(out, "{line}").map_err(|e| self.error(&format!("print failed: {e}")))?;
             }
@@ -168,25 +180,27 @@ impl<'m> Vm<'m> {
 
     fn binary(&mut self, op: BinOp, a: Value, b: Value) -> Result<Value, VmError> {
         use Value::*;
-        let v = match (op, a, b) {
-            (BinOp::Add, Int(x), Int(y)) => x.wrapping_add(y),
-            (BinOp::Sub, Int(x), Int(y)) => x.wrapping_sub(y),
-            (BinOp::Mul, Int(x), Int(y)) => x.wrapping_mul(y),
+        Ok(match (op, a, b) {
+            (BinOp::Add, Int(x), Int(y)) => Int(x.wrapping_add(y)),
+            (BinOp::Sub, Int(x), Int(y)) => Int(x.wrapping_sub(y)),
+            (BinOp::Mul, Int(x), Int(y)) => Int(x.wrapping_mul(y)),
             (BinOp::Div | BinOp::Rem, Int(_), Int(0)) => return Err(self.error("division by zero")),
-            (BinOp::Div, Int(x), Int(y)) => x.wrapping_div(y),
-            (BinOp::Rem, Int(x), Int(y)) => x.wrapping_rem(y),
-            (BinOp::Eq, Int(x), Int(y)) => (x == y) as i64,
-            (BinOp::Ne, Int(x), Int(y)) => (x != y) as i64,
-            (BinOp::Lt, Int(x), Int(y)) => (x < y) as i64,
-            (BinOp::Le, Int(x), Int(y)) => (x <= y) as i64,
-            (BinOp::Gt, Int(x), Int(y)) => (x > y) as i64,
-            (BinOp::Ge, Int(x), Int(y)) => (x >= y) as i64,
+            (BinOp::Div, Int(x), Int(y)) => Int(x.wrapping_div(y)),
+            (BinOp::Rem, Int(x), Int(y)) => Int(x.wrapping_rem(y)),
+            (BinOp::Lt, Int(x), Int(y)) => Bool(x < y),
+            (BinOp::Le, Int(x), Int(y)) => Bool(x <= y),
+            (BinOp::Gt, Int(x), Int(y)) => Bool(x > y),
+            (BinOp::Ge, Int(x), Int(y)) => Bool(x >= y),
             (BinOp::Add, Str(x), Str(y)) => {
                 let s = format!("{}{}", self.heap.str(x), self.heap.str(y));
-                return Ok(Str(self.alloc_str(&s)));
+                Str(self.alloc_str(&s))
             }
-            (BinOp::Eq, Str(x), Str(y)) => (self.heap.str(x) == self.heap.str(y)) as i64,
-            (BinOp::Ne, Str(x), Str(y)) => (self.heap.str(x) != self.heap.str(y)) as i64,
+            (BinOp::Eq | BinOp::Ne, Str(x), Str(y)) => {
+                Bool((self.heap.str(x) == self.heap.str(y)) == (op == BinOp::Eq))
+            }
+            (BinOp::Eq | BinOp::Ne, Int(_), Int(_)) | (BinOp::Eq | BinOp::Ne, Bool(_), Bool(_)) => {
+                Bool((a == b) == (op == BinOp::Eq))
+            }
             _ => {
                 return Err(self.error(&format!(
                     "`{}` is not supported for {} and {}",
@@ -195,8 +209,7 @@ impl<'m> Vm<'m> {
                     type_name(b)
                 )))
             }
-        };
-        Ok(Int(v))
+        })
     }
 
     /// Allocates on the GC heap, collecting first if the heap is over its threshold.
@@ -219,7 +232,14 @@ impl<'m> Vm<'m> {
     fn int(&self, r: Reg) -> Result<i64, VmError> {
         match self.get(r) {
             Value::Int(n) => Ok(n),
-            v => Err(self.error(&format!("expected an integer, found {}", type_name(v)))),
+            v => Err(self.error(&format!("expected i64, found {}", type_name(v)))),
+        }
+    }
+
+    fn bool(&self, r: Reg) -> Result<bool, VmError> {
+        match self.get(r) {
+            Value::Bool(b) => Ok(b),
+            v => Err(self.error(&format!("expected bool, found {}", type_name(v)))),
         }
     }
 
@@ -234,7 +254,9 @@ impl<'m> Vm<'m> {
 
 fn type_name(v: Value) -> &'static str {
     match v {
-        Value::Int(_) => "int",
+        Value::Unit => "unit",
+        Value::Int(_) => "i64",
+        Value::Bool(_) => "bool",
         Value::Str(_) => "str",
     }
 }
@@ -244,7 +266,7 @@ mod tests {
     use super::*;
 
     fn compile(src: &str) -> Module {
-        let m = jihoo_lower::lower(&jihoo_syntax::parse(src).unwrap()).unwrap();
+        let m = jihoo_sema::analyze(&jihoo_syntax::parse(src).unwrap()).unwrap();
         jihoo_ir::verify(&m).unwrap();
         m
     }
@@ -287,6 +309,12 @@ fn main() {
     fn strings() {
         let (_, out) = run_src("fn main() { print(\"hello, \" + \"jihoo\") }");
         assert_eq!(out, "hello, jihoo\n");
+    }
+
+    #[test]
+    fn bools() {
+        let (_, out) = run_src("fn main() { print(1 < 2 && !(3 == 4))\n print(\"a\" != \"a\") }");
+        assert_eq!(out, "true\nfalse\n");
     }
 
     #[test]

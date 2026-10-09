@@ -11,5 +11,5 @@ path = "src/main.rs"
 [dependencies]
 jihoo-syntax.workspace = true
 jihoo-ir.workspace = true
-jihoo-lower.workspace = true
+jihoo-sema.workspace = true
 jihoo-vm.workspace = true

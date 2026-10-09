@@ -6,10 +6,10 @@ a VM or compiled by LLVM.
 
 ```
                ┌─────────────── Rust ───────────────┐      ┌──── C++ ─────┐
- source.jh ──► │ jihoo-syntax ─► jihoo-lower ─► JIR │ ──►  │  jihoo-llc   │ ──► .o ──► ld.lld ──► ELF
-               │                                 │  │ .jir │ (LLVM 21)    │
-               │                                 ▼  │      └──────────────┘
-               │                            jihoo-vm│
+ source.jh ──► │ jihoo-syntax ─► jihoo-sema ──► JIR │ ──►  │  jihoo-llc   │ ──► .o ──► ld.lld ──► ELF
+               │   (parse)      (typecheck    │    │ .jir │ (LLVM 21)    │
+               │                 + lower)     ▼    │      └──────────────┘
+               │                           jihoo-vm│
                └────────────────────────────────────┘
 ```
 
@@ -41,6 +41,39 @@ core   everywhere: integers, pointers, slices, Option
 Freestanding code should not have to start from raw `mmap` every time; `alloc`
 will let it bring its own allocator (written in jihoo on top of `syscall`).
 
+## Types
+
+Static types, with inference for local variables:
+
+```jihoo
+fn area(w: i64, h: i64) -> i64 {   // signatures are written out
+    let a = w * h                  // `a: i64` is inferred
+    return a
+}
+```
+
+- Types: `unit`, `i64`, `bool`, plus `str` (hosted only, garbage collected) and
+  `ptr` (freestanding only, raw byte pointer). A string literal is a `str` when
+  hosted and a `ptr` to constant bytes when freestanding.
+- A function without `-> T` returns `unit`.
+- `if`/`while` conditions and the operands of `&&`, `||`, `!` must be `bool`;
+  there is no implicit integer-to-bool conversion.
+- A function that returns a value must `return` on every path that reaches the
+  end of its body.
+
+Type checking and lowering happen in one pass in `crates/jihoo-sema` (the same
+shape as Zig's Sema): each expression is checked and turned into typed JIR at the
+same time. The operator rules live in `crates/jihoo-ir/src/types.rs` and are shared
+with the IR verifier, so the checker and the verifier cannot disagree. Errors are
+reported per function, so one run shows the first error in every function.
+
+## Testing
+
+- Unit tests in each crate (`cargo test`).
+- Differential tests (`tests/diff/`): each program runs on the VM and as a native
+  binary, and both must exit with the same status. This keeps the two backends
+  honest about the semantics of JIR.
+
 ## Why the IR is a text file
 
 The frontend (Rust) and the LLVM backend (C++) only talk through `.jir` files
@@ -63,9 +96,8 @@ grows past twice the size that survived the last collection (1 MiB minimum).
 
 ## Roadmap
 
-1. Type checker (static types with inference) and typed JIR.
-2. Rust-side JIR parser; differential tests that run core-only programs on both
-   backends and compare results.
-3. Pointers, loads/stores, structs, inline `asm` blocks.
+1. ~~Type checker (static types with inference) and typed JIR.~~
+2. ~~Differential tests across both backends.~~ Rust-side JIR parser.
+3. Sized integers, pointers with loads/stores, structs, inline `asm` blocks.
 4. `comptime` on the VM.
 5. `alloc` layer; AST macros.

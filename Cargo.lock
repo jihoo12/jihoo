@@ -7,7 +7,7 @@ name = "jihoo-cli"
 version = "0.1.0"
 dependencies = [
  "jihoo-ir",
- "jihoo-lower",
+ "jihoo-sema",
  "jihoo-syntax",
  "jihoo-vm",
 ]
@@ -17,7 +17,7 @@ name = "jihoo-ir"
 version = "0.1.0"
 
 [[package]]
-name = "jihoo-lower"
+name = "jihoo-sema"
 version = "0.1.0"
 dependencies = [
  "jihoo-ir",
@@ -33,6 +33,6 @@ name = "jihoo-vm"
 version = "0.1.0"
 dependencies = [
  "jihoo-ir",
- "jihoo-lower",
+ "jihoo-sema",
  "jihoo-syntax",
 ]

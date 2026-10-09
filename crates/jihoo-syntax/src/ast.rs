@@ -32,6 +32,8 @@ pub struct TypeExpr {
 #[derive(Debug, Clone)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
+    /// Position of the closing `}`.
+    pub end: Pos,
 }
 
 #[derive(Debug, Clone)]

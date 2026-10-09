@@ -31,7 +31,13 @@ impl Display for Module {
 
 impl Display for Function {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        writeln!(f, "fn @{} params {} regs {} {{", self.name, self.params, self.num_regs)?;
+        let params = self.params.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ");
+        writeln!(f, "fn @{}({params}) -> {} {{", self.name, self.ret)?;
+        write!(f, "  regs")?;
+        for t in &self.regs {
+            write!(f, " {t}")?;
+        }
+        writeln!(f)?;
         for (i, b) in self.blocks.iter().enumerate() {
             writeln!(f, "{}:", BlockId(i as u32))?;
             for inst in &b.insts {
@@ -47,6 +53,7 @@ impl Display for Inst {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Inst::Const { dst, value } => write!(f, "{dst} = const {value}"),
+            Inst::Unit { dst } => write!(f, "{dst} = unit"),
             Inst::Str { dst, value } => write!(f, "{dst} = str {}", quote(value)),
             Inst::Copy { dst, src } => write!(f, "{dst} = copy {src}"),
             Inst::Unary { dst, op, src } => write!(f, "{dst} = {} {src}", op.mnemonic()),
@@ -66,6 +73,7 @@ impl Display for Terminator {
             Terminator::Jump(b) => write!(f, "jmp {b}"),
             Terminator::Branch { cond, then, els } => write!(f, "br {cond}, {then}, {els}"),
             Terminator::Ret(r) => write!(f, "ret {r}"),
+            Terminator::Unreachable => write!(f, "unreachable"),
         }
     }
 }

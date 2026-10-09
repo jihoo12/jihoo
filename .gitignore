@@ -4,3 +4,4 @@
 /.direnv
 /out
 /backend-llvm/compile_commands.json
+.cache/

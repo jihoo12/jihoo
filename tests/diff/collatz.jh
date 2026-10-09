@@ -1,0 +1,25 @@
+fn steps(n: i64) -> i64 {
+    let count = 0
+    while n != 1 {
+        if n % 2 == 0 {
+            n = n / 2
+        } else {
+            n = 3 * n + 1
+        }
+        count = count + 1
+    }
+    return count
+}
+
+fn entry() -> i64 {
+    let best = 0
+    let i = 1
+    while i < 1000 {
+        let s = steps(i)
+        if s > best {
+            best = s
+        }
+        i = i + 1
+    }
+    return best // 178
+}

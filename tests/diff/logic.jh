@@ -1,0 +1,25 @@
+fn is_prime(n: i64) -> bool {
+    if n < 2 {
+        return false
+    }
+    let d = 2
+    while d * d <= n {
+        if n % d == 0 {
+            return false
+        }
+        d = d + 1
+    }
+    return true
+}
+
+fn entry() -> i64 {
+    let count = 0
+    let n = 0
+    while n < 500 {
+        if is_prime(n) && (n % 10 == 3 || n % 10 == 7) && !(n == 3) {
+            count = count + 1
+        }
+        n = n + 1
+    }
+    return -(-count)
+}

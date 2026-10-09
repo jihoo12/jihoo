@@ -9,4 +9,4 @@ jihoo-ir.workspace = true
 
 [dev-dependencies]
 jihoo-syntax.workspace = true
-jihoo-lower.workspace = true
+jihoo-sema.workspace = true

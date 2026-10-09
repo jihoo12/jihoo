@@ -101,7 +101,7 @@ impl Heap {
             .into_iter()
             .filter_map(|v| match v {
                 Value::Str(r) => Some(*r),
-                Value::Int(_) => None,
+                Value::Unit | Value::Int(_) | Value::Bool(_) => None,
             })
             .collect();
         while let Some(r) = work.pop() {

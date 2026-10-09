@@ -124,8 +124,9 @@ impl Parser {
         let mut stmts = Vec::new();
         loop {
             while self.eat(&Tok::Semi) {}
-            if self.eat(&Tok::RBrace) {
-                return Ok(Block { stmts });
+            if *self.peek() == Tok::RBrace {
+                let end = self.bump().pos;
+                return Ok(Block { stmts, end });
             }
             if *self.peek() == Tok::Eof {
                 return Err(self.unexpected("`}`"));
@@ -184,7 +185,9 @@ impl Parser {
         let then = self.block()?;
         let els = if self.eat(&Tok::Else) {
             if *self.peek() == Tok::If {
-                Some(Block { stmts: vec![self.if_stmt()?] })
+                let inner = self.if_stmt()?;
+                let end = self.toks[self.i - 1].pos;
+                Some(Block { stmts: vec![inner], end })
             } else {
                 Some(self.block()?)
             }
