@@ -142,9 +142,11 @@ The result type is what the destination register must be declared as.
 | `%d = str "..."`                |                       | `str` (hosted) / `*u8` (freestanding) | string literal; freestanding strings are NUL-terminated constant bytes |
 | `%d = copy %a`                  | `T`                   | `T`    | copy |
 | `%d = neg %a`                   | signed int            | same   | wrapping negation |
-| `%d = not %a`                   | `bool`                | `bool` | logical not |
+| `%d = not %a`                   | `bool` or int         | same   | logical not, or bitwise not of an integer |
 | `%d = add\|sub\|mul %a, %b`     | `T, T` (int)          | `T`    | wrapping arithmetic |
 | `%d = div\|rem %a, %b`          | `T, T` (int)          | `T`    | signed or unsigned by type; truncating (VM traps on zero; native: undefined for now) |
+| `%d = and\|or\|xor %a, %b`      | `T, T` (int or `bool`) | `T`   | bitwise (for `bool`: logical, both sides evaluated) |
+| `%d = shl\|shr %a, %b`          | `T, T` (int)          | `T`    | shift by `%b` modulo the bit width; `shr` is arithmetic for signed types, logical for unsigned |
 | `%d = add %a, %b`               | `str, str`            | `str`  | concatenation |
 | `%d = add\|sub %a, %b`          | `*T, i64`             | `*T`   | pointer offset in elements of `T` |
 | `%d = eq\|ne %a, %b`            | `T, T`: `bool`, int, `str`, `*U` | `bool` | equality (`str` compares contents) |

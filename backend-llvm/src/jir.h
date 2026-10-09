@@ -78,7 +78,7 @@ struct StructDef {
 
 enum class Op {
   Const, Unit, Str, Copy, Neg, Not,
-  Add, Sub, Mul, Div, Rem, Eq, Ne, Lt, Le, Gt, Ge,
+  Add, Sub, Mul, Div, Rem, Eq, Ne, Lt, Le, Gt, Ge, And, Or, Xor, Shl, Shr,
   Cast, Call, Struct, Field, SetField, Load, Store, Addr, FieldPtr,
   Array, Splat, Elem, SetElem, ElemPtr,
   Syscall, Print, Asm,

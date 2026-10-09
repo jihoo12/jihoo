@@ -47,6 +47,10 @@ pub enum Tok {
     Star,
     Slash,
     Percent,
+    Pipe,
+    Caret,
+    Shl,
+    Shr,
     Bang,
     Amp,
     Dollar,
@@ -179,6 +183,7 @@ impl<'a> Lexer<'a> {
             b'*' => Tok::Star,
             b'/' => Tok::Slash,
             b'%' => Tok::Percent,
+            b'^' => Tok::Caret,
             b'-' if self.peek() == b'>' => {
                 self.bump();
                 Tok::Arrow
@@ -194,6 +199,14 @@ impl<'a> Lexer<'a> {
                 Tok::NotEq
             }
             b'!' => Tok::Bang,
+            b'<' if self.peek() == b'<' => {
+                self.bump();
+                Tok::Shl
+            }
+            b'>' if self.peek() == b'>' => {
+                self.bump();
+                Tok::Shr
+            }
             b'<' if self.peek() == b'=' => {
                 self.bump();
                 Tok::Le
@@ -213,6 +226,7 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 Tok::OrOr
             }
+            b'|' => Tok::Pipe,
             b'"' => Tok::Str(self.string(pos)?),
             b'#' if self.peek() == b'!' && self.peek2() == b'[' => {
                 self.bump();

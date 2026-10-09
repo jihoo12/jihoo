@@ -220,6 +220,11 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
 }
 
 /// Sets the position of `e` and everything inside it to `pos`. Code produced by a

@@ -383,6 +383,21 @@ class FnGen {
       case Op::Rem:
         store(inst.dst, is_signed(arg_reg(0)) ? b_.CreateSRem(arg(0), arg(1)) : b_.CreateURem(arg(0), arg(1)));
         return;
+      case Op::And: store(inst.dst, b_.CreateAnd(arg(0), arg(1))); return;
+      case Op::Or: store(inst.dst, b_.CreateOr(arg(0), arg(1))); return;
+      case Op::Xor: store(inst.dst, b_.CreateXor(arg(0), arg(1))); return;
+      case Op::Shl: case Op::Shr: {
+        // Shifting by the bit width or more is poison in LLVM; JIR takes the
+        // amount modulo the width instead, like the VM.
+        Value *v = arg(0);
+        unsigned bits = v->getType()->getIntegerBitWidth();
+        Value *amount = b_.CreateAnd(arg(1), ConstantInt::get(v->getType(), bits - 1));
+        Value *r = inst.op == Op::Shl ? b_.CreateShl(v, amount)
+                   : is_signed(arg_reg(0)) ? b_.CreateAShr(v, amount)
+                                           : b_.CreateLShr(v, amount);
+        store(inst.dst, r);
+        return;
+      }
       case Op::Eq: case Op::Ne: case Op::Lt: case Op::Le: case Op::Gt: case Op::Ge:
         store(inst.dst, compare(inst.op, arg(0), arg(1), is_signed(arg_reg(0))));
         return;

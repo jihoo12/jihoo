@@ -195,6 +195,7 @@ impl<'m> Vm<'m> {
             Inst::Unary { dst, op, src } => {
                 let v = match (op, f.reg_type(*dst)) {
                     (UnOp::Neg, Type::Int(t)) => Value::Int(t.wrap(self.int(*src)?.wrapping_neg())),
+                    (UnOp::Not, Type::Int(t)) => Value::Int(t.wrap(!self.int(*src)?)),
                     (UnOp::Not, _) => Value::Bool(!self.bool(*src)?),
                     (UnOp::Neg, t) => return Err(self.error(&format!("cannot negate {t}"))),
                 };
@@ -328,6 +329,16 @@ impl<'m> Vm<'m> {
                 BinOp::Le => Bool(if signed { x <= y } else { ux <= uy }),
                 BinOp::Gt => Bool(if signed { x > y } else { ux > uy }),
                 BinOp::Ge => Bool(if signed { x >= y } else { ux >= uy }),
+                // Canonical values of one type have the same high bits, so these
+                // stay canonical.
+                BinOp::And => Int(x & y),
+                BinOp::Or => Int(x | y),
+                BinOp::Xor => Int(x ^ y),
+                BinOp::Shl => Int(t.wrap(x.wrapping_shl(y as u32 & (t.bits() - 1)))),
+                // Canonical form already sign- or zero-extends, so a 64-bit shift of
+                // the right kind gives the right result for every width.
+                BinOp::Shr if signed => Int(x >> (y as u32 & (t.bits() - 1))),
+                BinOp::Shr => Int((ux >> (y as u32 & (t.bits() - 1))) as i64),
             });
         }
         Ok(match (op, a, b) {
@@ -339,6 +350,9 @@ impl<'m> Vm<'m> {
                 Bool((self.heap.str(x) == self.heap.str(y)) == (op == BinOp::Eq))
             }
             (BinOp::Eq | BinOp::Ne, Bool(x), Bool(y)) => Bool((x == y) == (op == BinOp::Eq)),
+            (BinOp::And, Bool(x), Bool(y)) => Bool(x & y),
+            (BinOp::Or, Bool(x), Bool(y)) => Bool(x | y),
+            (BinOp::Xor, Bool(x), Bool(y)) => Bool(x ^ y),
             _ => {
                 return Err(self.error(&format!(
                     "`{}` is not supported for {} and {}",

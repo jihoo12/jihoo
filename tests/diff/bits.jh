@@ -1,0 +1,32 @@
+// Bitwise operators across widths and signedness. Shift amounts wrap modulo the
+// bit width on both backends (LLVM alone would make large shifts undefined).
+
+fn popcount(x: u64) -> i64 {
+    let n = 0
+    while x != 0 {
+        n = n + (x & 1) as i64
+        x = x >> 1
+    }
+    return n
+}
+
+fn rotl8(x: u8, n: u8) -> u8 {
+    return x << n | x >> (8 - n)
+}
+
+fn entry() -> i64 {
+    let score = 0
+    let a: u8 = 0b1100_1010
+    if a & 0x0f == 0b1010 && a | 1 == 0xcb && a ^ 0xff == 0x35 { score = score + 1 }
+    if !a == 0x35 && !(0 as i32) == -1 { score = score + 2 }
+    let s: i8 = -128
+    if s >> 7 == -1 && (s as u8) >> 7 == 1 { score = score + 4 }     // arithmetic vs logical
+    let w: i64 = 1
+    if w << 63 < 0 && w << 64 == 1 && w << 65 == 2 { score = score + 8 }  // amount mod 64
+    let b: u16 = 1
+    if b << 16 == 1 && b << 15 == 0x8000 { score = score + 16 }        // amount mod 16
+    if popcount(0xffff_0000_ffff) == 32 { score = score + 32 }
+    if rotl8(0b1000_0001, 1) == 0b0000_0011 { score = score + 64 }
+    if (true ^ false) & (false | true) { score = score + 128 }
+    return score % 256 // 255
+}

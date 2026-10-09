@@ -224,7 +224,8 @@ struct Line {
 const std::unordered_map<std::string, Op> kBinOps = {
     {"add", Op::Add}, {"sub", Op::Sub}, {"mul", Op::Mul}, {"div", Op::Div},
     {"rem", Op::Rem}, {"eq", Op::Eq},   {"ne", Op::Ne},   {"lt", Op::Lt},
-    {"le", Op::Le},   {"gt", Op::Gt},   {"ge", Op::Ge},
+    {"le", Op::Le},   {"gt", Op::Gt},   {"ge", Op::Ge},   {"and", Op::And},
+    {"or", Op::Or},   {"xor", Op::Xor}, {"shl", Op::Shl}, {"shr", Op::Shr},
 };
 
 // `%d = <op> ...`

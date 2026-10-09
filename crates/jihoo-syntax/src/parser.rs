@@ -653,6 +653,7 @@ impl Parser {
     }
 }
 
+/// Binary operators and their precedence (higher binds tighter), as in Rust.
 fn binop(t: &Tok) -> Option<(BinOp, u8)> {
     Some(match t {
         Tok::OrOr => (BinOp::Or, 1),
@@ -663,11 +664,16 @@ fn binop(t: &Tok) -> Option<(BinOp, u8)> {
         Tok::Le => (BinOp::Le, 4),
         Tok::Gt => (BinOp::Gt, 4),
         Tok::Ge => (BinOp::Ge, 4),
-        Tok::Plus => (BinOp::Add, 5),
-        Tok::Minus => (BinOp::Sub, 5),
-        Tok::Star => (BinOp::Mul, 6),
-        Tok::Slash => (BinOp::Div, 6),
-        Tok::Percent => (BinOp::Rem, 6),
+        Tok::Pipe => (BinOp::BitOr, 5),
+        Tok::Caret => (BinOp::BitXor, 6),
+        Tok::Amp => (BinOp::BitAnd, 7),
+        Tok::Shl => (BinOp::Shl, 8),
+        Tok::Shr => (BinOp::Shr, 8),
+        Tok::Plus => (BinOp::Add, 9),
+        Tok::Minus => (BinOp::Sub, 9),
+        Tok::Star => (BinOp::Mul, 10),
+        Tok::Slash => (BinOp::Div, 10),
+        Tok::Percent => (BinOp::Rem, 10),
         _ => return None,
     })
 }
@@ -728,6 +734,10 @@ fn punct(t: &Tok) -> &'static str {
         Tok::Amp => "&",
         Tok::AndAnd => "&&",
         Tok::OrOr => "||",
+        Tok::Pipe => "|",
+        Tok::Caret => "^",
+        Tok::Shl => "<<",
+        Tok::Shr => ">>",
         Tok::Ident(_) | Tok::Int(_) | Tok::Str(_) | Tok::InnerAttr(_) | Tok::Eof => "?",
     }
 }
@@ -842,6 +852,24 @@ mod tests {
         assert!(parse("fn f() { let x = 0x1_0000_0000_0000_0000 }").unwrap_err().msg.contains("too large"));
         assert!(parse("fn f() { let x = 0xg }").unwrap_err().msg.contains("not a valid number"));
         assert!(parse("fn f() { let x = 12ab }").unwrap_err().msg.contains("not a valid number"));
+    }
+
+    #[test]
+    fn bitwise_precedence() {
+        // a | b ^ c & d << 1 + 2  ==  a | (b ^ (c & (d << (1 + 2))))
+        let s = body("let x = a | b ^ c & d << 1 + 2\nlet y = p & q == r\nlet z = &p & q");
+        let Stmt::Let { value, .. } = &s[0] else { panic!() };
+        let ExprKind::Binary(BinOp::BitOr, _, r) = &value.kind else { panic!("{value:?}") };
+        let ExprKind::Binary(BinOp::BitXor, _, r) = &r.kind else { panic!() };
+        let ExprKind::Binary(BinOp::BitAnd, _, r) = &r.kind else { panic!() };
+        let ExprKind::Binary(BinOp::Shl, _, r) = &r.kind else { panic!() };
+        assert!(matches!(r.kind, ExprKind::Binary(BinOp::Add, _, _)));
+        // Comparisons bind looser than `&`, unlike C.
+        let Stmt::Let { value, .. } = &s[1] else { panic!() };
+        assert!(matches!(value.kind, ExprKind::Binary(BinOp::Eq, _, _)));
+        // A leading `&` is still address-of.
+        let Stmt::Let { value, .. } = &s[2] else { panic!() };
+        assert!(matches!(&value.kind, ExprKind::Binary(BinOp::BitAnd, l, _) if matches!(l.kind, ExprKind::AddrOf(_))));
     }
 
     #[test]

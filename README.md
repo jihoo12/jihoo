@@ -72,7 +72,8 @@ nix build
 
 ## Status
 
-v0: static types with local inference; `bool`, `i8`…`u64`, structs and
+v0: static types with local inference; `bool`, `i8`…`u64` with arithmetic and
+bitwise operators, structs and
 bounds-checked arrays (both profiles), `size_of`/`align_of`, `str` (hosted),
 pointers with load/store, `&` and inline asm (freestanding);
 functions, `if`/`while`, `&&`/`||`, `as` casts, `print` (hosted) and `syscall`

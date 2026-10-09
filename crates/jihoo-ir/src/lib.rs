@@ -108,6 +108,13 @@ pub enum BinOp {
     Le,
     Gt,
     Ge,
+    And,
+    Or,
+    Xor,
+    /// Shift amounts are taken modulo the bit width, so every shift is defined.
+    Shl,
+    /// Arithmetic for signed types, logical for unsigned ones.
+    Shr,
 }
 
 impl BinOp {
@@ -124,6 +131,11 @@ impl BinOp {
             BinOp::Le => "le",
             BinOp::Gt => "gt",
             BinOp::Ge => "ge",
+            BinOp::And => "and",
+            BinOp::Or => "or",
+            BinOp::Xor => "xor",
+            BinOp::Shl => "shl",
+            BinOp::Shr => "shr",
         }
     }
 }

@@ -13,13 +13,15 @@ struct Arena {
 
 fn arena_new(cap: i64) -> Arena {
     // mmap(NULL, cap, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
-    let p = syscall(9, 0, cap, 0x3, 0x22, 0 - 1, 0)
+    let prot_rw = 0x1 | 0x2
+    let map_private_anon = 0x02 | 0x20
+    let p = syscall(9, 0, cap, prot_rw, map_private_anon, 0 - 1, 0)
     return Arena { base: p as *u8, used: 0, cap: cap }
 }
 
 // `size` bytes aligned to `align`, or null when the arena is full.
 fn alloc(a: *Arena, size: i64, align: i64) -> *u8 {
-    let start = (a.used + align - 1) / align * align
+    let start = (a.used + align - 1) & !(align - 1) // `align` is a power of two
     if start + size > a.cap {
         return 0 as *u8
     }
@@ -91,7 +93,7 @@ struct Point {
 }
 
 fn _start() -> i64 {
-    let arena = arena_new(0x100000) // 1 MiB
+    let arena = arena_new(1 << 20) // 1 MiB
 
     // 1000 integers: the Vec grows 4 -> 8 -> ... -> 1024.
     let squares = vec_new(i64, &arena)

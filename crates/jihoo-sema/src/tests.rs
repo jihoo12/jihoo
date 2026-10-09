@@ -38,7 +38,9 @@ fn infers_let_types() {
 #[test]
 fn operator_errors() {
     assert_eq!(err("fn main() { print(1 + true) }"), "1:21: cannot apply `+` to i64 and bool");
-    assert!(err("fn main() { print(!1) }").contains("must be bool") || err("fn main() { print(!1) }").contains("`!`"));
+    // `!` is bitwise on integers, logical on bools, and nothing else.
+    check("fn main() { print(!1) }").unwrap();
+    assert!(err("fn main() { print(!\"s\") }").contains("cannot apply `!` to str"));
     assert!(err("fn main() { print(1 && true) }").contains("left side of `&&` must be bool"));
 }
 

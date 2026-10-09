@@ -511,7 +511,8 @@ impl<'a> FnCx<'a> {
             ExprKind::Unary(op, inner) => {
                 let (op, sym, hint) = match op {
                     UnOp::Neg => (ir::UnOp::Neg, "-", expected),
-                    UnOp::Not => (ir::UnOp::Not, "!", Some(&Type::Bool)),
+                    // `!` is logical on bools and bitwise on integers.
+                    UnOp::Not => (ir::UnOp::Not, "!", expected),
                 };
                 let src = self.expr(inner, hint)?;
                 let ty = types::unary(op, self.ty(src)).ok_or_else(|| {
@@ -595,6 +596,11 @@ impl<'a> FnCx<'a> {
             BinOp::Le => (ir::BinOp::Le, "<="),
             BinOp::Gt => (ir::BinOp::Gt, ">"),
             BinOp::Ge => (ir::BinOp::Ge, ">="),
+            BinOp::BitAnd => (ir::BinOp::And, "&"),
+            BinOp::BitOr => (ir::BinOp::Or, "|"),
+            BinOp::BitXor => (ir::BinOp::Xor, "^"),
+            BinOp::Shl => (ir::BinOp::Shl, "<<"),
+            BinOp::Shr => (ir::BinOp::Shr, ">>"),
             BinOp::And | BinOp::Or => unreachable!(),
         };
         let is_cmp = matches!(

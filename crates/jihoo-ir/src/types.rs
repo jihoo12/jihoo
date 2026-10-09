@@ -206,6 +206,8 @@ pub fn unary(op: UnOp, t: &Type) -> Option<Type> {
     match (op, t) {
         (UnOp::Neg, Type::Int(i)) if i.signed() => Some(t.clone()),
         (UnOp::Not, Type::Bool) => Some(Type::Bool),
+        // On integers, `!` flips every bit.
+        (UnOp::Not, Type::Int(_)) => Some(t.clone()),
         _ => None,
     }
 }
@@ -214,7 +216,9 @@ pub fn binary(op: BinOp, l: &Type, r: &Type) -> Option<Type> {
     use BinOp::*;
     use Type::*;
     Some(match (op, l, r) {
-        (Add | Sub | Mul | Div | Rem, Int(a), Int(b)) if a == b => l.clone(),
+        (Add | Sub | Mul | Div | Rem | And | Or | Xor | Shl | Shr, Int(a), Int(b)) if a == b => l.clone(),
+        // `&`, `|` and `^` on bools evaluate both sides, unlike `&&` and `||`.
+        (And | Or | Xor, Bool, Bool) => Bool,
         (Add, Str, Str) => Str,
         // Pointer arithmetic counts in elements, like C.
         (Add | Sub, Ptr(_), Int(IntTy::I64)) => l.clone(),

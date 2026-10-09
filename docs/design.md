@@ -56,6 +56,11 @@ fn area(w: i64, h: i64) -> i64 {   // signatures are written out
 - Types: `unit`, `bool`, `i8`…`i64`, `u8`…`u64`, structs, plus `str` (hosted
   only, garbage collected) and `*T` (freestanding only, raw pointer). A string
   literal is a `str` when hosted and a `*u8` to constant bytes when freestanding.
+- Bitwise operators `&`, `|`, `^`, `<<`, `>>` work on integers, and `!` flips
+  every bit of an integer. `>>` is arithmetic for signed types and logical for
+  unsigned ones; shift amounts are taken modulo the bit width, so `x << 64` on an
+  `i64` is `x`, the same on the VM and natively. `&`, `|`, `^` on bools evaluate
+  both sides. Precedence follows Rust: comparisons bind looser than `&`.
 - Integer literals (`1_000`, `0xff`, `0b1010`) take their type from context (`let c: u8 = 65`, `p[i] == 0`,
   arguments, fields), defaulting to `i64`, and must fit that type. Different
   integer types never mix implicitly; convert with `as`.
@@ -293,8 +298,8 @@ power!(y + 1, 2)    // expands to ((1) * (y + 1)) * (y + 1)
   type checked even when unused, and are never part of the compiled program.
 - Macros produce expressions only, not statements or items.
 
-Planned next: statement and item macros, bitwise operators, and modules so that
-`alloc` can become a library instead of an example.
+Planned next: statement and item macros, and modules so that `alloc` can become
+a library instead of an example.
 
 ## GC
 
@@ -309,5 +314,5 @@ grows past twice the size that survived the last collection (1 MiB minimum).
 3. ~~Sized integers, pointers with loads/stores, structs, arrays, `size_of`,
    inline asm.~~
 4. ~~`comptime` on the VM, generic functions.~~
-5. ~~Expression macros, generic structs.~~ Bitwise operators; modules and an
+5. ~~Expression macros, generic structs, bitwise operators.~~ Modules and an
    `alloc` library; statement and item macros.
