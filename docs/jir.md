@@ -193,6 +193,8 @@ runtime error and native code traps.
 |---------------------------------|-----------------------|--------|---------|
 | `%d = syscall(%n, %a, ...)`     | int or `*T`, 1 to 7 operands | `i64` | freestanding only: raw Linux syscall `%n` |
 | `print %a`                      | int, `bool` or `str`  |        | hosted only: print the value and a newline |
+| `%d = to_str %a`                | int or `bool`         | `str`  | hosted (and macros): the value as text |
+| `%d = unique %p`                | `str`                 | `str`  | compile time only: `p` plus a number unique in this compilation |
 | `%d = asm "tmpl", "cons"(%a, ...)` | int, `bool` or `*T` | int, `*T` or `unit` | freestanding only: inline assembly |
 | `%d = quote ["p0", "p1", ...](kind %h, ...)` | see below | `expr`, `stmts` or `items` | compile time only: code from template pieces and holes |
 

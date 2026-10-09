@@ -62,6 +62,8 @@ pub struct Vm<'m> {
     stack: Vec<Frame>,
     /// Instructions left before execution is stopped, if limited.
     fuel: Option<u64>,
+    /// The next number `unique` hands out.
+    uniques: u64,
 }
 
 /// Runs `main` of a hosted module and returns its result.
@@ -72,7 +74,18 @@ pub fn run(module: &Module, out: &mut dyn Write) -> Result<i64, VmError> {
 impl<'m> Vm<'m> {
     pub fn new(module: &'m Module) -> Self {
         let fn_index = module.funcs.iter().enumerate().map(|(i, f)| (f.name.as_str(), i)).collect();
-        Vm { module, fn_index, heap: Heap::default(), stack: Vec::new(), fuel: None }
+        Vm { module, fn_index, heap: Heap::default(), stack: Vec::new(), fuel: None, uniques: 0 }
+    }
+
+    /// Starts `unique` at `next`, so that several runs never repeat a name.
+    pub fn with_uniques(mut self, next: u64) -> Self {
+        self.uniques = next;
+        self
+    }
+
+    /// The next number `unique` would hand out.
+    pub fn uniques(&self) -> u64 {
+        self.uniques
     }
 
     /// Stops execution with an error after `steps` instructions. Used for
@@ -269,6 +282,25 @@ impl<'m> Vm<'m> {
                 let callee = self.fn_index[func.as_str()];
                 let args: Vec<Value> = args.iter().map(|r| self.get(*r)).collect();
                 self.push_frame(callee, &args, Some(*dst))?;
+            }
+            Inst::ToStr { dst, src } => {
+                let text = match (f.reg_type(*src), self.get(*src)) {
+                    (Type::Int(jihoo_ir::IntTy::U64), Value::Int(n)) => (n as u64).to_string(),
+                    (_, Value::Int(n)) => n.to_string(),
+                    (_, Value::Bool(b)) => b.to_string(),
+                    (_, v) => return Err(self.error(&format!("`to_str` cannot take {}", type_name(v)))),
+                };
+                let r = self.alloc_str(&text);
+                self.set(*dst, Value::Str(r));
+            }
+            Inst::Unique { dst, prefix } => {
+                let Value::Str(p) = self.get(*prefix) else {
+                    return Err(self.error("`unique` needs a str"));
+                };
+                let name = format!("{}__{}", self.heap.str(p), self.uniques);
+                self.uniques += 1;
+                let r = self.alloc_str(&name);
+                self.set(*dst, Value::Str(r));
             }
             Inst::Print { src } => {
                 let line = match self.get(*src) {

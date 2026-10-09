@@ -103,7 +103,7 @@ impl Env<'_> {
         }
 
         let module = jihoo_ir::Module { profile: self.profile, structs: vec![], funcs };
-        let mut vm = Vm::new(&module).with_fuel(FUEL);
+        let mut vm = Vm::new(&module).with_fuel(FUEL).with_uniques(self.uniques.get());
         let mut values = Vec::new();
         for a in args {
             values.push(match a {
@@ -116,6 +116,7 @@ impl Env<'_> {
         }
         let mut out = Vec::new();
         let result = vm.call_named(entry, &values, &mut out);
+        self.uniques.set(vm.uniques());
         if !out.is_empty() {
             eprint!("{}", String::from_utf8_lossy(&out));
         }

@@ -341,10 +341,12 @@ power!(y + 1, 2)    // expands to ((1) * (y + 1)) * (y + 1)
 
 ```jihoo
 macro swap(a: expr, b: expr) -> stmts {
+    let t = unique("tmp")          // `tmp__0`, `tmp__1`, ...: never the caller's name
+    let tv = ident(t)              // the name as code, for expression positions
     return quote {
-        let tmp = $a
+        let $t = $a
         $a = $b
-        $b = tmp
+        $b = $tv
     }
 }
 
@@ -354,7 +356,7 @@ macro adders(n: i64) -> items {
     while i <= n {
         out = quote items {
             $out
-            fn $("add" + stringify(quote($i)))(x: i64) -> i64 { return x + $i }
+            fn $("add" + to_str(i))(x: i64) -> i64 { return x + $i }
         }
         i = i + 1
     }
@@ -375,6 +377,11 @@ fn main() {
   or a literal value; in a name position (`fn $name`, `let $v`, a struct name),
   a `str` that must be an identifier; as a statement of its own, `stmts` or
   `expr`; as an item of its own, `items`.
+- Macros are not hygienic by themselves; `unique(prefix)` gives a name that is
+  new in the whole compilation, and `ident(name)` turns a name into code. Use
+  them for temporaries a macro introduces.
+- `to_str(x)` turns an integer or bool into a `str` (in hosted programs and
+  macros), handy for building names.
 - Item macros are expanded before the program is analyzed, in rounds: each round
   analyzes lazily what the macros need, runs them, and adds the produced items to
   the module that called the macro. Produced code may call item macros, so this
@@ -395,5 +402,5 @@ grows past twice the size that survived the last collection (1 MiB minimum).
    inline asm.~~
 4. ~~`comptime` on the VM, generic functions.~~
 5. ~~Expression macros, generic structs, bitwise operators, modules and an
-   `alloc` library, `pub`, statement and item macros.~~ Hygiene for macros;
-   field visibility.
+   `alloc` library, `pub`, statement and item macros, `unique`/`ident`.~~
+   Automatic hygiene; field visibility.

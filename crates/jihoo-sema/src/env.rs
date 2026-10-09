@@ -92,6 +92,8 @@ pub(crate) struct Env<'p> {
     funcs: Memo<Rc<ir::Function>>,
     /// Numbers the helper functions made for `comptime` expressions.
     pub comptime_ids: Cell<u32>,
+    /// The next number `unique` hands out, across every compile-time run.
+    pub uniques: Cell<u64>,
     /// Generic instances by key, their keys by name, and the ones not compiled yet.
     instances: RefCell<HashMap<String, Instance>>,
     /// Instances of generic structs: names by key, and (name, declaration name,
@@ -127,6 +129,7 @@ impl<'p> Env<'p> {
             consts: Memo::new(),
             funcs: Memo::new(),
             comptime_ids: Cell::new(0),
+            uniques: Cell::new(0),
             instances: RefCell::new(HashMap::new()),
             struct_keys: RefCell::new(HashMap::new()),
             struct_instances: RefCell::new(Vec::new()),

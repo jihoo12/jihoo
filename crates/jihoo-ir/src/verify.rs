@@ -278,6 +278,14 @@ impl Cx<'_> {
                     }
                     // Macros run on the VM while compiling and never end up in a module.
                     Inst::Quote { .. } => Err("`quote` only exists at compile time".into()),
+                    Inst::ToStr { dst, src } => {
+                        if !matches!(ty(src)?, Type::Int(_) | Type::Bool) {
+                            Err(format!("`to_str` cannot take {}", ty(src)?.jir()))
+                        } else {
+                            expect(dst, &Type::Str)
+                        }
+                    }
+                    Inst::Unique { .. } => Err("`unique` only exists at compile time".into()),
                     Inst::Print { src } => {
                         if profile != Profile::Hosted {
                             Err("`print` needs std and is not available in freestanding mode".into())

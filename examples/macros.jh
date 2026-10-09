@@ -23,12 +23,16 @@ macro point(x: expr) -> expr {
     return quote(Point { x: $x, y: power!($x, 2) })
 }
 
-// `stmts` macros add statements to the block they are used in.
+// `stmts` macros add statements to the block they are used in. `unique` makes a
+// name no other code uses, so `swap!(tmp, x)` works too; `$t` puts it in a name
+// position and `ident(t)` turns it into code for expression positions.
 macro swap(a: expr, b: expr) -> stmts {
+    let t = unique("tmp")
+    let tv = ident(t)
     return quote {
-        let tmp = $a
+        let $t = $a
         $a = $b
-        $b = tmp
+        $b = $tv
     }
 }
 
@@ -38,7 +42,7 @@ macro getters(name: str, fields: i64) -> items {
     let out = quote items {}
     let i = 0
     while i < fields {
-        let getter = name + "_" + stringify(quote($i))
+        let getter = name + "_" + to_str(i)
         out = quote items {
             $out
             fn $getter(p: Point) -> i64 { return p.x * $i + p.y }

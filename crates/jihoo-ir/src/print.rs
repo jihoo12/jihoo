@@ -91,6 +91,8 @@ impl Display for Inst {
             Inst::ElemPtr { dst, ptr, index } => write!(f, "{dst} = elemptr {ptr}, {index}"),
             Inst::Syscall { dst, args } => write!(f, "{dst} = syscall({})", list(args)),
             Inst::Print { src } => write!(f, "print {src}"),
+            Inst::ToStr { dst, src } => write!(f, "{dst} = to_str {src}"),
+            Inst::Unique { dst, prefix } => write!(f, "{dst} = unique {prefix}"),
             Inst::Quote { dst, pieces, holes, kinds } => {
                 let pieces: Vec<String> = pieces.iter().map(|p| quote(p)).collect();
                 let holes: Vec<String> = holes.iter().zip(kinds).map(|(h, k)| format!("{k:?} {h}").to_lowercase()).collect();

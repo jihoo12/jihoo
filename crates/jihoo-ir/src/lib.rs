@@ -199,6 +199,11 @@ pub enum Inst {
     Syscall { dst: Reg, args: Vec<Reg> },
     /// Hosted-only builtin.
     Print { src: Reg },
+    /// Hosted (and macros): an integer or bool as text.
+    ToStr { dst: Reg, src: Reg },
+    /// Compile time only (macros): `prefix` plus a number never handed out before
+    /// in this compilation, for names that cannot clash.
+    Unique { dst: Reg, prefix: Reg },
     /// Freestanding only: inline assembly. `template` uses LLVM operand syntax
     /// (`$0` is the output if there is one, then the inputs) and `constraints` is an
     /// LLVM constraint string with one input entry per register in `args`. `dst`

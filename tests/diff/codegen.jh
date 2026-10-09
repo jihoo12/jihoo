@@ -26,7 +26,7 @@ macro scale_fns(count: i64) -> items {
     while i <= count {
         out = quote items {
             $out
-            fn $("scale" + stringify(quote($i)))(x: i64) -> i64 { return x * $i }
+            fn $("scale" + to_str(i))(x: i64) -> i64 { return x * $i }
         }
         i = i + 1
     }

@@ -749,3 +749,25 @@ fn statement_and_item_macro_errors() {
     assert!(e.starts_with("2:1:"), "{e}");
     assert!(err("fn f(x: stmts) {}\nfn main() {}").contains("only available in macros"));
 }
+
+#[test]
+fn unique_names_and_to_str() {
+    // `unique` gives each expansion its own temporary, so nested and repeated
+    // swaps cannot capture each other's names (or the caller's `tmp`).
+    // In a name position `$t` is the name; in an expression, `ident(t)` is.
+    let src = "macro swap(a: expr, b: expr) -> stmts {\n  let t = unique(\"tmp\")\n  let tv = ident(t)\n  return quote {\n    let $t = $a\n    $a = $b\n    $b = $tv\n  }\n}\n\
+               fn main() {\n  let tmp = 1\n  let other = 2\n  swap!(tmp, other)\n  swap!(other, tmp)\n  swap!(tmp, other)\n  print(tmp * 10 + other)\n  print(to_str(-42) + to_str(true))\n}";
+    assert_eq!(run(src), "21\n-42true\n");
+    let m = check(src).unwrap();
+    let text = main_ir(&m);
+    assert!(!text.contains("call"), "{text}");
+    // Numbers keep counting across macro runs.
+    let src = "macro name() -> items { let n = unique(\"f\")\n return quote items { fn $n() {} } }\nname!()\nname!()\nfn main() {}";
+    let m = check(src).unwrap();
+    let names: Vec<&str> = m.funcs.iter().map(|f| f.name.as_str()).collect();
+    assert!(names.contains(&"f__0") && names.contains(&"f__1"), "{names:?}");
+    assert!(err("fn main() { let x = unique(\"a\") }").contains("only be used inside a macro"));
+    assert!(err("macro m() -> expr { return ident(\"1x\") }\nfn main() { print(m!()) }").contains("`1x` is not a valid name"));
+    assert!(err(&fs("fn f() { let s = to_str(1) }")).contains("only available in hosted programs and macros"));
+    assert!(err("fn main() { print(to_str(\"s\")) }").contains("takes an integer or a bool"));
+}

@@ -224,7 +224,10 @@ fn expand_item_macros(profile: Profile, mods: &[Module]) -> Result<Vec<Module>, 
 }
 
 fn is_builtin(name: &str) -> bool {
-    matches!(name, "print" | "syscall" | "len" | "size_of" | "align_of" | "stringify")
+    matches!(
+        name,
+        "print" | "syscall" | "len" | "size_of" | "align_of" | "stringify" | "to_str" | "unique" | "ident"
+    )
 }
 
 struct BlockBuf {
@@ -836,6 +839,48 @@ impl<'a> FnCx<'a> {
                 Ok(self.unit())
             }
             "stringify" => self.stringify(pos, args),
+            "to_str" => {
+                if self.profile() != Profile::Hosted && !self.in_macro {
+                    return Err(Error::new(pos, "`to_str` makes a `str`, so it is only available in hosted programs and macros"));
+                }
+                let [arg] = args else {
+                    return Err(Error::new(pos, "`to_str` takes exactly 1 argument"));
+                };
+                let r = self.expr(arg, None)?;
+                if !matches!(self.ty(r), Type::Int(_) | Type::Bool) {
+                    return Err(Error::new(arg.pos, format!("`to_str` takes an integer or a bool, not {}", self.ty(r))));
+                }
+                Ok(self.emit_to(Type::Str, |dst| Inst::ToStr { dst, src: r }))
+            }
+            // `ident(name)`: a name as code, to use a generated name in an expression.
+            "ident" => {
+                if !self.in_macro {
+                    return Err(Error::new(pos, "`ident` can only be used inside a macro"));
+                }
+                let [arg] = args else {
+                    return Err(Error::new(pos, "`ident` takes exactly 1 argument"));
+                };
+                let r = self.expr(arg, Some(&Type::Str))?;
+                self.expect(arg.pos, r, &Type::Str, "the argument of `ident`")?;
+                // A one-hole quote in a name position checks it is an identifier.
+                Ok(self.emit_to(Type::Expr, |dst| Inst::Quote {
+                    dst,
+                    pieces: vec![String::new(), String::new()],
+                    holes: vec![r],
+                    kinds: vec![ir::HoleKind::Ident],
+                }))
+            }
+            "unique" => {
+                if !self.in_macro {
+                    return Err(Error::new(pos, "`unique` can only be used inside a macro"));
+                }
+                let [arg] = args else {
+                    return Err(Error::new(pos, "`unique` takes exactly 1 argument"));
+                };
+                let r = self.expr(arg, Some(&Type::Str))?;
+                self.expect(arg.pos, r, &Type::Str, "the argument of `unique`")?;
+                Ok(self.emit_to(Type::Str, |dst| Inst::Unique { dst, prefix: r }))
+            }
             "len" => {
                 let [arg] = args else {
                     return Err(Error::new(pos, "`len` takes exactly 1 argument"));
