@@ -62,6 +62,7 @@ impl Cx<'_> {
                 Err(format!("unknown struct `${name}`"))
             }
             Type::Ptr(inner) | Type::Array(inner, _) => self.check_type(inner),
+            Type::Fn(params, ret) => params.iter().chain([&**ret]).try_for_each(|t| self.check_type(t)),
             _ => Ok(()),
         }
     }
@@ -170,6 +171,24 @@ impl Cx<'_> {
                         } else {
                             args.iter().zip(&callee.params).try_for_each(|(a, t)| expect(a, t))?;
                             expect(dst, &callee.ret)
+                        }
+                    }
+                    Inst::FuncRef { dst, func } => {
+                        let callee = self
+                            .funcs
+                            .get(func.as_str())
+                            .ok_or_else(|| format!("funcref to unknown function @{func}"))?;
+                        expect(dst, &Type::Fn(callee.params.clone(), Box::new(callee.ret.clone())))
+                    }
+                    Inst::CallIndirect { dst, callee, args } => {
+                        let Type::Fn(params, ret) = ty(callee)? else {
+                            return Err(at(format!("{callee} is not a function")));
+                        };
+                        if params.len() != args.len() {
+                            Err(format!("{callee} takes {} arguments, {} given", params.len(), args.len()))
+                        } else {
+                            args.iter().zip(params).try_for_each(|(a, t)| expect(a, t))?;
+                            expect(dst, ret)
                         }
                     }
                     Inst::Struct { dst, name, fields } => {

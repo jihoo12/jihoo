@@ -13,12 +13,13 @@ namespace jir {
 enum class Profile { Hosted, Freestanding };
 
 struct Type {
-  enum Kind { Unit, Bool, Int, Str, Ptr, Struct, Array } kind = Unit;
+  enum Kind { Unit, Bool, Int, Str, Ptr, Struct, Array, Fn } kind = Unit;
   unsigned bits = 0;               // Int
   bool is_signed = false;          // Int
-  std::shared_ptr<Type> pointee;   // Ptr: the pointee; Array: the element type
+  std::shared_ptr<Type> pointee;   // Ptr: the pointee; Array: the element type; Fn: the result
   uint64_t count = 0;              // Array
   std::string name;                // Struct
+  std::vector<Type> params;        // Fn
 
   static Type unit() { return {}; }
   static Type integer(unsigned bits, bool is_signed) {
@@ -32,6 +33,13 @@ struct Type {
     Type t;
     t.kind = Ptr;
     t.pointee = std::make_shared<Type>(std::move(to));
+    return t;
+  }
+  static Type function(std::vector<Type> params, Type ret) {
+    Type t;
+    t.kind = Fn;
+    t.params = std::move(params);
+    t.pointee = std::make_shared<Type>(std::move(ret));
     return t;
   }
   static Type array(Type elem, uint64_t count) {
@@ -49,6 +57,7 @@ struct Type {
       case Ptr: return *pointee == *o.pointee;
       case Array: return count == o.count && *pointee == *o.pointee;
       case Struct: return name == o.name;
+      case Fn: return params == o.params && *pointee == *o.pointee;
       default: return true;
     }
   }
@@ -63,6 +72,11 @@ struct Type {
       case Ptr: return "*" + pointee->str();
       case Struct: return "$" + name;
       case Array: return "[" + std::to_string(count) + " x " + pointee->str() + "]";
+      case Fn: {
+        std::string s = "fn(";
+        for (size_t i = 0; i < params.size(); i++) s += (i ? ", " : "") + params[i].str();
+        return s + ") -> " + pointee->str();
+      }
     }
     return "?";
   }
@@ -79,7 +93,7 @@ struct StructDef {
 enum class Op {
   Const, Unit, Str, Copy, Neg, Not,
   Add, Sub, Mul, Div, Rem, Eq, Ne, Lt, Le, Gt, Ge, And, Or, Xor, Shl, Shr,
-  Cast, Call, Struct, Field, SetField, Load, Store, Addr, FieldPtr,
+  Cast, Call, FuncRef, CallIndirect, Struct, Field, SetField, Load, Store, Addr, FieldPtr,
   Array, Splat, Elem, SetElem, ElemPtr,
   Syscall, Print, Asm,
 };
@@ -89,7 +103,7 @@ struct Inst {
   uint32_t dst = 0;            // unused for Store and Print
   std::vector<uint32_t> args;  // operand registers
   int64_t imm = 0;             // Const value, or field index
-  std::string text;            // Str bytes, Call callee, Struct name, or Asm template
+  std::string text;            // Str bytes, Call/FuncRef function, Struct name, or Asm template
   std::string constraints;     // Asm only: LLVM constraint string
 };
 

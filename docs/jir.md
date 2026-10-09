@@ -81,6 +81,7 @@ It takes no parameters and returns `unit` or `i64`.
 | `$Name`           | struct, by value                         | named struct  |
 | `expr`, `stmts`, `items` | code, inside macros; compile time only | —        |
 | `[N x T]`         | array of `N` `T`s, by value              | `[N x T]`     |
+| `fn(T, ...) -> R` | function value                           | `ptr`         |
 
 `str` and `*T` are deliberately separate: GC references and raw pointers must never
 mix. That separation is what will later allow GC-enabled native builds.
@@ -153,6 +154,8 @@ The result type is what the destination register must be declared as.
 | `%d = lt\|le\|gt\|ge %a, %b`    | `T, T`: int or `*U`   | `bool` | ordered comparison, signed or unsigned by type; pointers unsigned |
 | `%d = cast %a`                  | see below             | dst type | conversion |
 | `%d = call @f(%a, ...)`         | parameter types of `@f` | return type of `@f` | call |
+| `%d = funcref @f`               |                       | `fn(P...) -> R` of `@f` | function `@f` as a value |
+| `%d = call %f(%a, ...)`         | `%f: fn(P...) -> R`, then `P...` | `R` | call a function value |
 
 `cast` allows: int → int (truncate, or sign-/zero-extend by the *source* type),
 `bool` → int (0/1), `*T` → `*U`, `*T` ↔ `i64`/`u64`, and any type to itself.
@@ -221,6 +224,13 @@ does. Bool operands are passed as `i8`.
 
 Returning from `@_start` exits the process: with the returned value if `@_start`
 returns `i64`, with 0 if it returns `unit`.
+
+## Function values
+
+A function value is an index into the module's functions on the VM and a code
+pointer natively (8 bytes, aligned to 8). There is no null function value, and
+function values have no equality. A call through a function value uses the same
+calling convention as a direct call, including the aggregate rules below.
 
 ## Native ABI
 

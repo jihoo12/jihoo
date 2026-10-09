@@ -29,6 +29,7 @@ use jihoo_syntax::ast::*;
 use jihoo_syntax::loader::Module;
 use jihoo_syntax::{Error, Pos};
 
+use comptime::ConstValue;
 use env::{Env, Sig};
 use generic::{Binding, Bindings};
 
@@ -432,8 +433,8 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    /// A variable: a local, a comptime parameter, or a top-level constant. The
-    /// last two are spliced in as constants.
+    /// A variable: a local, a comptime parameter, a top-level constant, or a
+    /// function used as a value. All but locals are spliced in as constants.
     fn var(&mut self, pos: Pos, name: &str) -> Result<Reg, Error> {
         if let Some(r) = self.local(name) {
             return Ok(r);
@@ -461,8 +462,80 @@ impl<'a> FnCx<'a> {
                 self.const_regs.insert(name.to_string(), r);
                 Ok(r)
             }
-            None => Err(self.unknown_name(pos, name)),
+            None => self.func_value(pos, name, &key),
         }
+    }
+
+    /// Function `key`, written `name`, as a value of type `fn(...) -> R`.
+    fn func_value(&mut self, pos: Pos, name: &str, key: &str) -> Result<Reg, Error> {
+        if is_builtin(name) {
+            return Err(Error::new(pos, format!("`{name}` is a builtin, not a function, so it cannot be used as a value")));
+        }
+        if self.env.macro_decl(key).is_some() {
+            return Err(Error::new(pos, format!("`{name}` is a macro; macros cannot be used as values")));
+        }
+        if self.env.generic(key).is_some() {
+            return Err(Error::new(
+                pos,
+                format!("`{name}` has comptime parameters, so it cannot be used as a value; wrap a call to it in a function"),
+            ));
+        }
+        let Some(sig) = self.env.signature(key) else {
+            return Err(self.unknown_name(pos, name));
+        };
+        self.env.check_visible(pos, self.bindings.module, key)?;
+        let sig = sig?;
+        let ty = Type::Fn(sig.params.clone(), Box::new(sig.ret.clone()));
+        let r = self.hoist(|cx| cx.emit_to(ty, |dst| Inst::FuncRef { dst, func: key.to_string() }));
+        self.const_regs.insert(name.to_string(), r);
+        Ok(r)
+    }
+
+    /// The function that `name` names at compile time, if it is a comptime
+    /// parameter or a constant holding a function: `(JIR name, params, ret)`.
+    /// Calls to it are direct calls.
+    fn known_func(&self, pos: Pos, name: &str) -> Result<Option<(String, Vec<Type>, Type)>, Error> {
+        let found = match self.bindings.get(name) {
+            Some(Binding::Value(ty, v)) => Some((ty.clone(), v.clone())),
+            Some(Binding::Type(_)) => None,
+            None => {
+                let key = self.env.key_or_err(pos, &self.bindings, name)?;
+                match self.env.constant(&key) {
+                    Some(c) => {
+                        self.env.check_visible(pos, self.bindings.module, &key)?;
+                        Some(c?.as_ref().clone())
+                    }
+                    None => None,
+                }
+            }
+        };
+        Ok(match found {
+            Some((Type::Fn(params, ret), ConstValue::Func(f))) => Some((f, params, *ret)),
+            _ => None,
+        })
+    }
+
+    /// Evaluates the arguments of a call to `what` and checks them against `params`.
+    fn call_args(&mut self, pos: Pos, what: &str, params: &[Type], args: &[Expr]) -> Result<Vec<Reg>, Error> {
+        if params.len() != args.len() {
+            return Err(Error::new(pos, format!("{what} takes {} arguments, {} given", params.len(), args.len())));
+        }
+        let mut regs = Vec::with_capacity(args.len());
+        for (i, (a, want)) in args.iter().zip(params).enumerate() {
+            let r = self.expr(a, Some(want))?;
+            self.expect(a.pos, r, want, &format!("argument {} of {what}", i + 1))?;
+            regs.push(r);
+        }
+        Ok(regs)
+    }
+
+    /// Calls the function value in `callee`; `what` names it in errors.
+    fn call_value(&mut self, pos: Pos, callee: Reg, what: &str, args: &[Expr]) -> Result<Reg, Error> {
+        let Type::Fn(params, ret) = self.ty(callee).clone() else {
+            return Err(Error::new(pos, format!("{what} is not a function; it has type {}", self.ty(callee))));
+        };
+        let regs = self.call_args(pos, what, &params, args)?;
+        Ok(self.emit_to(*ret, |dst| Inst::CallIndirect { dst, callee, args: regs }))
     }
 
     /// Emits `build` at the start of the entry block instead of here, so a
@@ -638,6 +711,13 @@ impl<'a> FnCx<'a> {
             ExprKind::Binary(BinOp::Or, l, r) => self.short_circuit(false, l, r)?,
             ExprKind::Binary(op, l, r) => self.binary(e.pos, *op, l, r, expected)?,
             ExprKind::Call(name, args) => self.call(e.pos, name, args)?,
+            ExprKind::CallExpr(f, args) => {
+                let callee = self.expr(f, None)?;
+                self.call_value(e.pos, callee, "this function", args)?
+            }
+            ExprKind::FnType(t) => {
+                return Err(Error::new(t.pos, "`fn(...)` is a type, not a value"));
+            }
             ExprKind::StructLit(t, inits) => {
                 let Type::Struct(name) = self.resolve(t)? else {
                     return Err(Error::new(e.pos, "only structs can be built with `{ ... }`"));
@@ -918,6 +998,27 @@ impl<'a> FnCx<'a> {
                 Ok(self.emit_to(Type::I64, |dst| Inst::Syscall { dst, args: regs }))
             }
             _ => {
+                // A local holding a function value. Locals of other types do not
+                // hide functions: `let len = len(a)` keeps working.
+                if let Some(r) = self.local(name).filter(|&r| matches!(self.ty(r), Type::Fn(..))) {
+                    return self.call_value(pos, r, &format!("`{name}`"), args);
+                }
+                // `s.f(x)`: a function stored in a field of a local.
+                if let Some((base, field)) = name.split_once('.') {
+                    if self.local(base).is_some() {
+                        let base = Expr { pos, kind: ExprKind::Var(base.to_string()) };
+                        let callee = Expr { pos, kind: ExprKind::Field(Box::new(base), field.to_string()) };
+                        let r = self.expr(&callee, None)?;
+                        return self.call_value(pos, r, &format!("`{name}`"), args);
+                    }
+                }
+                // A comptime parameter or constant naming a function: a direct call.
+                if self.local(name).is_none() {
+                    if let Some((func, params, ret)) = self.known_func(pos, name)? {
+                        let regs = self.call_args(pos, &format!("`{name}`"), &params, args)?;
+                        return Ok(self.emit_to(ret, |dst| Inst::Call { dst, func, args: regs }));
+                    }
+                }
                 let key = self.env.key_or_err(pos, &self.bindings, name)?;
                 self.env.check_visible(pos, self.bindings.module, &key)?;
                 if let Some(decl) = self.env.generic(&key) {
@@ -926,22 +1027,11 @@ impl<'a> FnCx<'a> {
                 if self.env.macro_decl(&key).is_some() {
                     return Err(Error::new(pos, format!("`{name}` is a macro; call it as `{name}!(...)`")));
                 }
-                let sig = self
-                    .env
-                    .signature(&key)
-                    .ok_or_else(|| Error::new(pos, format!("unknown function `{name}`")))??;
-                if sig.params.len() != args.len() {
-                    return Err(Error::new(
-                        pos,
-                        format!("`{name}` takes {} arguments, {} given", sig.params.len(), args.len()),
-                    ));
-                }
-                let mut regs = Vec::with_capacity(args.len());
-                for (i, (a, want)) in args.iter().zip(&sig.params).enumerate() {
-                    let r = self.expr(a, Some(want))?;
-                    self.expect(a.pos, r, want, &format!("argument {} of `{name}`", i + 1))?;
-                    regs.push(r);
-                }
+                let sig = self.env.signature(&key).ok_or_else(|| match self.local(name) {
+                    Some(r) => Error::new(pos, format!("`{name}` is not a function; it has type {}", self.ty(r))),
+                    None => Error::new(pos, format!("unknown function `{name}`")),
+                })??;
+                let regs = self.call_args(pos, &format!("`{name}`"), &sig.params, args)?;
                 let ret = sig.ret.clone();
                 Ok(self.emit_to(ret, |dst| Inst::Call { dst, func: key, args: regs }))
             }

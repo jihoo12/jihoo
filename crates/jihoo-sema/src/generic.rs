@@ -59,6 +59,7 @@ impl Bindings {
                 Binding::Type(t) => t.to_string(),
                 Binding::Value(_, ConstValue::Int(v)) => v.to_string(),
                 Binding::Value(_, ConstValue::Bool(v)) => v.to_string(),
+                Binding::Value(_, ConstValue::Func(f)) => f.clone(),
                 Binding::Value(_, v) => format!("{v:?}"),
             })
             .collect();
@@ -86,6 +87,7 @@ impl Bindings {
             .map(|(n, b)| match b {
                 Binding::Type(t) => format!("{n} = {t}"),
                 Binding::Value(_, ConstValue::Int(v)) => format!("{n} = {v}"),
+                Binding::Value(_, ConstValue::Func(f)) => format!("{n} = {f}"),
                 Binding::Value(_, v) => format!("{n} = {v:?}"),
             })
             .collect();
@@ -106,6 +108,7 @@ fn expr_to_type(e: &Expr) -> Result<TypeExpr, Error> {
         ExprKind::ArrayRepeat(elem, n) => TypeExprKind::Array(Box::new(expr_to_type(elem)?), n.clone()),
         // `Pair(u8)` parses as a call.
         ExprKind::Call(name, args) => TypeExprKind::Generic(name.clone(), args.clone()),
+        ExprKind::FnType(t) => return Ok(t.clone()),
         _ => return Err(Error::new(e.pos, "expected a type")),
     };
     Ok(TypeExpr { pos: e.pos, kind })

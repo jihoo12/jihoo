@@ -1,0 +1,53 @@
+// Functions are values: pass them, return them, keep them in structs and arrays.
+// A `comptime` function parameter is called directly, with no indirection.
+//   jihoo run examples/functions.jh
+
+struct Command {
+    name: str
+    run: fn(i64) -> i64
+}
+
+fn double(x: i64) -> i64 { return x * 2 }
+fn square(x: i64) -> i64 { return x * x }
+fn negate(x: i64) -> i64 { return -x }
+
+fn map(xs: [i64; 4], f: fn(i64) -> i64) -> [i64; 4] {
+    let i = 0
+    while i < len(xs) {
+        xs[i] = f(xs[i])
+        i = i + 1
+    }
+    return xs
+}
+
+fn sum(xs: [i64; 4]) -> i64 {
+    let total = 0
+    let i = 0
+    while i < len(xs) {
+        total = total + xs[i]
+        i = i + 1
+    }
+    return total
+}
+
+fn twice(comptime f: fn(i64) -> i64, x: i64) -> i64 {
+    return f(f(x))
+}
+
+fn main() {
+    let xs = [1, 2, 3, 4]
+    print(sum(map(xs, square)))           // 30
+    print(twice(double, 5))               // 20
+
+    let commands = [
+        Command { name: "double", run: double },
+        Command { name: "square", run: square },
+        Command { name: "negate", run: negate },
+    ]
+    let i = 0
+    while i < len(commands) {
+        let c = commands[i]
+        print(c.name + "(7) = " + to_str(c.run(7)))
+        i = i + 1
+    }
+}

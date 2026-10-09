@@ -170,6 +170,10 @@ pub enum Inst {
     /// Converts between integer types, bool to integer, and pointers.
     Cast { dst: Reg, src: Reg },
     Call { dst: Reg, func: String, args: Vec<Reg> },
+    /// Function `func` as a value, of type `fn(params) -> ret`.
+    FuncRef { dst: Reg, func: String },
+    /// Calls the function value in `callee`.
+    CallIndirect { dst: Reg, callee: Reg, args: Vec<Reg> },
     /// Builds a struct value from all of its fields, in declaration order.
     Struct { dst: Reg, name: String, fields: Vec<Reg> },
     /// Reads field `index` of a struct value.

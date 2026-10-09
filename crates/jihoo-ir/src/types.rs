@@ -90,6 +90,8 @@ pub enum Type {
     Struct(String),
     /// `[T; N]`, a fixed-size array. Also a value type.
     Array(Box<Type>, u64),
+    /// `fn(A, B) -> R`: a function value. Natively a code pointer.
+    Fn(Vec<Type>, Box<Type>),
     /// Pieces of code inside macros: an expression, statements, or items. They
     /// only exist while compiling; the VM represents them as source text.
     Expr,
@@ -139,6 +141,7 @@ impl Type {
             Type::Str => profile == Profile::Hosted,
             Type::Ptr(inner) => profile == Profile::Freestanding && inner.available_in(profile),
             Type::Array(elem, _) => elem.available_in(profile),
+            Type::Fn(params, ret) => params.iter().chain([&**ret]).all(|t| t.available_in(profile)),
             Type::Expr | Type::Stmts | Type::Items => false,
             Type::Unit | Type::Bool | Type::Int(_) | Type::Struct(_) => true,
         }
@@ -163,6 +166,10 @@ impl Type {
             Type::Ptr(t) => format!("*{}", t.jir()),
             Type::Struct(name) => format!("${}", struct_name_jir(name)),
             Type::Array(elem, n) => format!("[{n} x {}]", elem.jir()),
+            Type::Fn(params, ret) => {
+                let params: Vec<String> = params.iter().map(Type::jir).collect();
+                format!("fn({}) -> {}", params.join(", "), ret.jir())
+            }
             other => other.to_string(),
         }
     }
@@ -179,6 +186,14 @@ impl fmt::Display for Type {
             Type::Ptr(t) => write!(f, "*{t}"),
             Type::Struct(name) => f.write_str(name),
             Type::Array(elem, n) => write!(f, "[{elem}; {n}]"),
+            Type::Fn(params, ret) => {
+                let params: Vec<String> = params.iter().map(Type::to_string).collect();
+                write!(f, "fn({})", params.join(", "))?;
+                if **ret != Type::Unit {
+                    write!(f, " -> {ret}")?;
+                }
+                Ok(())
+            }
             Type::Expr => f.write_str("expr"),
             Type::Stmts => f.write_str("stmts"),
             Type::Items => f.write_str("items"),

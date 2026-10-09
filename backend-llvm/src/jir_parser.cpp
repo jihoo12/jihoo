@@ -158,9 +158,24 @@ struct Line {
     if (t.kind != TokKind::Word || t.text.rfind("bb", 0) != 0) fail(no, "expected a block like bb0");
     return uint32_t(number(no, t.text.substr(2)));
   }
-  // unit | bool | str | i8..i64 | u8..u64 | *T | $Name | [N x T]
+  // unit | bool | str | i8..i64 | u8..u64 | *T | $Name | [N x T] | fn(T, ...) -> R
   Type type() {
     const Tok &t = next("a type");
+    if (t.kind == TokKind::Word && t.text == "fn") {
+      std::vector<Type> params;
+      punct("(");
+      if (!peek_punct(")")) {
+        params.push_back(type());
+        while (peek_punct(",")) {
+          i++;
+          params.push_back(type());
+        }
+      }
+      punct(")");
+      punct("->");
+      Type ret = type();
+      return Type::function(std::move(params), std::move(ret));
+    }
     if (t.kind == TokKind::Punct && t.text == "*") return Type::pointer(type());
     if (t.kind == TokKind::Punct && t.text == "[") {
       int64_t n = integer();
@@ -256,11 +271,24 @@ Inst parse_assign(Line &l) {
     l.punct(",");
     inst.args = {a, l.reg()};
   } else if (w == "call") {
+    // `call @f(...)` calls a function by name, `call %r(...)` a function value.
+    const Tok &f = l.next("a function");
+    if (f.kind == TokKind::Global) {
+      inst.op = Op::Call;
+      inst.text = f.text;
+      inst.args = l.reg_list();
+    } else if (f.kind == TokKind::Reg) {
+      inst.op = Op::CallIndirect;
+      inst.args = l.reg_list();
+      inst.args.insert(inst.args.begin(), uint32_t(f.num));
+    } else {
+      fail(l.no, "expected a function like @name or %N");
+    }
+  } else if (w == "funcref") {
     const Tok &f = l.next("a function");
     if (f.kind != TokKind::Global) fail(l.no, "expected a function like @name");
-    inst.op = Op::Call;
+    inst.op = Op::FuncRef;
     inst.text = f.text;
-    inst.args = l.reg_list();
   } else if (w == "syscall") {
     inst.op = Op::Syscall;
     inst.args = l.reg_list();

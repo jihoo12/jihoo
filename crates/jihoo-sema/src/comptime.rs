@@ -14,7 +14,6 @@ use std::rc::Rc;
 use jihoo_ir::{Inst, Reg, Terminator, Type};
 use jihoo_syntax::ast::Expr;
 use jihoo_syntax::{Error, Pos};
-use jihoo_vm::gc::Heap;
 use jihoo_vm::{Value, Vm};
 
 use crate::env::{Env, Sig};
@@ -33,6 +32,8 @@ pub(crate) enum ConstValue {
     Str(String),
     /// Fields of a struct or elements of an array.
     Agg(Vec<ConstValue>),
+    /// A function value: the JIR name of the function.
+    Func(String),
 }
 
 impl Env<'_> {
@@ -111,7 +112,7 @@ impl Env<'_> {
                 ConstValue::Int(n) => Value::Int(*n),
                 ConstValue::Bool(b) => Value::Bool(*b),
                 ConstValue::Str(s) => vm.alloc_string(s),
-                ConstValue::Agg(_) => unreachable!("aggregate arguments are rejected earlier"),
+                ConstValue::Agg(_) | ConstValue::Func(_) => unreachable!("macro arguments are code, integers, bools or str"),
             });
         }
         let mut out = Vec::new();
@@ -124,10 +125,11 @@ impl Env<'_> {
             let at = if err.func.starts_with("comptime.") { String::new() } else { format!(" in `{}`", err.func) };
             Error::new(pos, format!("compile-time evaluation failed{at}: {}", err.msg))
         })?;
-        self.to_const(pos, v, ty, vm.heap())
+        self.to_const(pos, v, ty, &vm)
     }
 
-    fn to_const(&self, pos: Pos, v: Value, ty: &Type, heap: &Heap) -> Result<ConstValue, Error> {
+    fn to_const(&self, pos: Pos, v: Value, ty: &Type, vm: &Vm) -> Result<ConstValue, Error> {
+        let heap = vm.heap();
         Ok(match (v, ty) {
             (Value::Unit, Type::Unit) => ConstValue::Unit,
             (Value::Int(n), Type::Int(_)) => ConstValue::Int(n),
@@ -136,13 +138,14 @@ impl Env<'_> {
             (Value::Agg(r), Type::Struct(_)) => {
                 let fields = heap.items(r).to_vec();
                 let tys: Vec<Type> = (0..fields.len() as u32).map(|i| self.field_type(ty, i)).collect();
-                let items = fields.into_iter().zip(&tys).map(|(v, t)| self.to_const(pos, v, t, heap));
+                let items = fields.into_iter().zip(&tys).map(|(v, t)| self.to_const(pos, v, t, vm));
                 ConstValue::Agg(items.collect::<Result<_, _>>()?)
             }
             (Value::Agg(r), Type::Array(elem, _)) => {
-                let items = heap.items(r).to_vec().into_iter().map(|v| self.to_const(pos, v, elem, heap));
+                let items = heap.items(r).to_vec().into_iter().map(|v| self.to_const(pos, v, elem, vm));
                 ConstValue::Agg(items.collect::<Result<_, _>>()?)
             }
+            (Value::Func(i), Type::Fn(..)) => ConstValue::Func(vm.func_name(i).to_string()),
             (_, Type::Ptr(_)) => {
                 return Err(Error::new(
                     pos,
@@ -158,7 +161,7 @@ fn callees(f: &jihoo_ir::Function) -> Vec<String> {
     let mut out = Vec::new();
     for b in &f.blocks {
         for inst in &b.insts {
-            if let Inst::Call { func, .. } = inst {
+            if let Inst::Call { func, .. } | Inst::FuncRef { func, .. } = inst {
                 out.push(func.clone());
             }
         }
@@ -174,6 +177,7 @@ impl FnCx<'_> {
             (_, ConstValue::Int(n)) => self.konst(ty.clone(), *n),
             (_, ConstValue::Bool(b)) => self.konst(Type::Bool, *b as i64),
             (_, ConstValue::Str(s)) => self.emit_to(Type::Str, |dst| Inst::Str { dst, value: s.clone() }),
+            (_, ConstValue::Func(f)) => self.emit_to(ty.clone(), |dst| Inst::FuncRef { dst, func: f.clone() }),
             (Type::Struct(name), ConstValue::Agg(items)) => {
                 let fields = (0..items.len() as u32)
                     .map(|i| {

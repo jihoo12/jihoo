@@ -4,9 +4,9 @@
 // (part of the optimization pipeline) turns them back into SSA values. `addr %r`
 // is simply the address of that alloca, which mem2reg then leaves in memory.
 //
-// Type mapping: iN/uN -> iN, bool -> i1, *T -> ptr, unit -> {} (empty struct),
-// $S -> a named LLVM struct, [N x T] -> [N x T]. `str` is a GC type and never
-// reaches this backend.
+// Type mapping: iN/uN -> iN, bool -> i1, *T and fn(...) -> R -> ptr, unit -> {}
+// (empty struct), $S -> a named LLVM struct, [N x T] -> [N x T]. `str` is a GC
+// type and never reaches this backend.
 //
 // Aggregates (structs and arrays) are never loaded or stored as SSA values: LLVM
 // handles large first-class aggregates very poorly (a 64 KiB array copy takes
@@ -72,7 +72,8 @@ class Types {
       case jir::Type::Unit: return StructType::get(ctx_);
       case jir::Type::Bool: return Type::getInt1Ty(ctx_);
       case jir::Type::Int: return Type::getIntNTy(ctx_, t.bits);
-      case jir::Type::Ptr: return PointerType::get(ctx_, 0);
+      case jir::Type::Ptr:
+      case jir::Type::Fn: return PointerType::get(ctx_, 0);
       case jir::Type::Struct: return info(t.name).ty;
       case jir::Type::Array: return ArrayType::get(lower(*t.pointee), t.count);
       case jir::Type::Str: break;
@@ -84,14 +85,15 @@ class Types {
 
   // Aggregate parameters become pointers; an aggregate result becomes a leading
   // `sret` pointer parameter and a void return.
-  FunctionType *signature(const jir::Function &f) const {
-    std::vector<Type *> params;
+  FunctionType *signature(const std::vector<jir::Type> &params, const jir::Type &ret) const {
+    std::vector<Type *> lowered;
     Type *ptr = PointerType::get(ctx_, 0);
-    if (is_agg(f.ret)) params.push_back(ptr);
-    for (const auto &t : f.params) params.push_back(is_agg(t) ? ptr : lower(t));
-    Type *ret = is_agg(f.ret) ? Type::getVoidTy(ctx_) : lower(f.ret);
-    return FunctionType::get(ret, params, false);
+    if (is_agg(ret)) lowered.push_back(ptr);
+    for (const auto &t : params) lowered.push_back(is_agg(t) ? ptr : lower(t));
+    Type *r = is_agg(ret) ? Type::getVoidTy(ctx_) : lower(ret);
+    return FunctionType::get(r, lowered, false);
   }
+  FunctionType *signature(const jir::Function &f) const { return signature(f.params, f.ret); }
 
   // JIR type of field `index` of struct type `t`.
   const jir::Type &field(const jir::Type &t, int64_t index) const {
@@ -199,6 +201,25 @@ class FnGen {
   Value *sret_ = nullptr;       // where an aggregate result goes
 
   bool agg(uint32_t r) { return Types::is_agg(type(r)); }
+
+  // Calls `callee` of type `ty` with the operands of `inst` from index `first`
+  // on, and stores the result in `inst.dst`. `what` names the callee in errors.
+  void call(FunctionType *ty, Value *callee, const jir::Inst &inst, size_t first, const std::string &what) {
+    bool sret = agg(inst.dst);
+    size_t n = inst.args.size() - first;
+    if (ty->getNumParams() != n + sret) fail(f_.name, "wrong number of arguments to " + what);
+    std::vector<Value *> args;
+    if (sret) args.push_back(slot(inst.dst));
+    for (size_t i = first; i < inst.args.size(); i++) {
+      // Aggregates are passed by pointer; the callee copies them.
+      uint32_t r = inst.args[i];
+      args.push_back(agg(r) ? slot(r) : load(r));
+      if (args.back()->getType() != ty->getParamType(args.size() - 1))
+        fail(f_.name, "argument " + std::to_string(i - first + 1) + " to " + what + " has the wrong type");
+    }
+    Value *result = b_.CreateCall(ty, callee, args);
+    if (!sret) store(inst.dst, result);
+  }
 
   void memcopy(Value *dst, Value *src, const jir::Type &t) {
     const DataLayout &dl = mod_.getDataLayout();
@@ -410,20 +431,20 @@ class FnGen {
       case Op::Call: {
         auto it = fns_.find(inst.text);
         if (it == fns_.end()) fail(f_.name, "call to unknown function @" + inst.text);
-        Function *callee = it->second;
-        bool sret = agg(inst.dst);
-        if (callee->arg_size() != inst.args.size() + sret)
-          fail(f_.name, "wrong number of arguments to @" + inst.text);
-        std::vector<Value *> args;
-        if (sret) args.push_back(slot(inst.dst));
-        for (size_t i = 0; i < inst.args.size(); i++) {
-          // Aggregates are passed by pointer; the callee copies them.
-          args.push_back(agg(arg_reg(i)) ? slot(arg_reg(i)) : arg(i));
-          if (args.back()->getType() != callee->getArg(i + sret)->getType())
-            fail(f_.name, "argument " + std::to_string(i + 1) + " to @" + inst.text + " has the wrong type");
-        }
-        Value *result = b_.CreateCall(callee, args);
-        if (!sret) store(inst.dst, result);
+        call(it->second->getFunctionType(), it->second, inst, 0, "@" + inst.text);
+        return;
+      }
+      case Op::FuncRef: {
+        auto it = fns_.find(inst.text);
+        if (it == fns_.end()) fail(f_.name, "funcref to unknown function @" + inst.text);
+        if (type(inst.dst).kind != jir::Type::Fn) fail(f_.name, "`funcref` result is not a function type");
+        store(inst.dst, it->second);
+        return;
+      }
+      case Op::CallIndirect: {
+        const jir::Type &t = type(arg_reg(0));
+        if (t.kind != jir::Type::Fn) fail(f_.name, "%" + std::to_string(arg_reg(0)) + " is not a function");
+        call(types_.signature(t.params, *t.pointee), arg(0), inst, 1, "%" + std::to_string(arg_reg(0)));
         return;
       }
       case Op::Struct: {

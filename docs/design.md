@@ -53,9 +53,10 @@ fn area(w: i64, h: i64) -> i64 {   // signatures are written out
 }
 ```
 
-- Types: `unit`, `bool`, `i8`…`i64`, `u8`…`u64`, structs, plus `str` (hosted
-  only, garbage collected) and `*T` (freestanding only, raw pointer). A string
-  literal is a `str` when hosted and a `*u8` to constant bytes when freestanding.
+- Types: `unit`, `bool`, `i8`…`i64`, `u8`…`u64`, structs, arrays, function types
+  `fn(A, B) -> R`, plus `str` (hosted only, garbage collected) and `*T`
+  (freestanding only, raw pointer). A string literal is a `str` when hosted and a
+  `*u8` to constant bytes when freestanding.
 - Bitwise operators `&`, `|`, `^`, `<<`, `>>` work on integers, and `!` flips
   every bit of an integer. `>>` is arithmetic for signed types and logical for
   unsigned ones; shift amounts are taken modulo the bit width, so `x << 64` on an
@@ -261,6 +262,42 @@ push(i64, &v, 42)
 `mmap`, and a growable `Vec(T)` built on it, all in jihoo (see
 `examples/arena.jh`).
 
+## Function values
+
+```jihoo
+struct Command {
+    name: str
+    run: fn(i64) -> i64          // `fn(A, B) -> R`; without `-> R` it returns unit
+}
+
+fn map(xs: [i64; 4], f: fn(i64) -> i64) -> [i64; 4] { ... xs[i] = f(xs[i]) ... }
+fn twice(comptime f: fn(i64) -> i64, x: i64) -> i64 { return f(f(x)) }
+
+map(xs, square)                  // a function name is a value
+commands[i].run(7)               // so is anything of a function type
+pick(1)(2, 3)                    // a function returning a function
+```
+
+- A function name used as a value has type `fn(params) -> ret`. Module
+  functions work the same way (`alloc.push` as a value). Generic functions and
+  macros are not values; builtins such as `print` are not functions.
+- Any expression of a function type can be called: `f(x)`, `s.f(x)`,
+  `fs[0](x)`, `make()(x)`. A local of a function type hides a function of the
+  same name when called; a local of another type does not, so `let len = len(a)`
+  still works.
+- Function values are plain values in both profiles: on the VM an index into
+  the module's functions, natively a code pointer (8 bytes, so `size_of` and
+  struct layouts work). In JIR they are `funcref @f` and `call %r(...)`.
+- A function known at compile time is called directly, without indirection:
+  a `comptime f: fn(...)` parameter (one instance per function passed), or a
+  constant (`const F = inc`). Compile-time code can compute function values,
+  `const G = choose(1)`, and store them in constant structs and arrays.
+- Function values cannot be compared with `==`. They are code pointers today,
+  but closures will be function values too, and there is no good answer to
+  whether two closures are equal.
+- No closures yet: a function value cannot capture local variables. That is
+  the next step; see the roadmap.
+
 ## Macros
 
 ```jihoo
@@ -417,3 +454,11 @@ free of LLVM.
 5. ~~Expression macros, generic structs, bitwise operators, modules and an
    `alloc` library, `pub`, statement and item macros, `unique`/`ident`.~~
    Automatic hygiene; field visibility.
+6. ~~GC hardening (one root set, generation-checked references, stress mode);
+   function values.~~
+7. Sum types and `match`.
+8. Closures, lowered in the frontend to a function plus a struct of captured
+   values (captured by value, like every other value in jihoo).
+9. Goroutine-like tasks and channels on the VM: one OS thread, a deterministic
+   scheduler, the stacks of all tasks as GC roots. Freestanding code gets
+   coroutines as a library on top of function values and `asm`.

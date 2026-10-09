@@ -338,6 +338,25 @@ impl Parser {
 
     fn type_expr(&mut self) -> PResult<TypeExpr> {
         let pos = self.pos();
+        if self.eat(&Tok::Fn) {
+            self.expect(&Tok::LParen, "`(` and parameter types")?;
+            let mut params = Vec::new();
+            while *self.peek() != Tok::RParen {
+                params.push(self.type_expr()?);
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect(&Tok::RParen, "`,` or `)`")?;
+            // `-> R` must be on the same line, so a field type ends at the newline.
+            let ret = if self.same_line(&Tok::Arrow) {
+                self.bump();
+                Some(Box::new(self.type_expr()?))
+            } else {
+                None
+            };
+            return Ok(TypeExpr { pos, kind: TypeExprKind::Fn(params, ret) });
+        }
         if self.eat(&Tok::Star) {
             let inner = self.type_expr()?;
             return Ok(TypeExpr { pos, kind: TypeExprKind::Ptr(Box::new(inner)) });
@@ -547,6 +566,10 @@ impl Parser {
                 let index = self.with_struct_lit(true, |p| p.expr())?;
                 self.expect(&Tok::RBracket, "`]`")?;
                 e = Expr { pos, kind: ExprKind::Index(Box::new(e), Box::new(index)) };
+            } else if self.same_line(&Tok::LParen) {
+                let pos = self.pos();
+                let args = self.call_args()?;
+                e = Expr { pos, kind: ExprKind::CallExpr(Box::new(e), args) };
             } else {
                 return Ok(e);
             }
@@ -638,6 +661,7 @@ impl Parser {
                 self.bump();
                 ExprKind::Asm(Box::new(self.asm_args()?))
             }
+            Tok::Fn => ExprKind::FnType(self.type_expr()?),
             Tok::Quote => {
                 self.bump();
                 self.quote()?
@@ -1122,6 +1146,23 @@ mod tests {
         assert_eq!(parse_stmts("let a = 1\nb = a").unwrap().len(), 2);
         assert_eq!(parse_items("pub fn f() {}\nstruct S { x: i64 }").unwrap().funcs.len(), 1);
         assert!(parse_items("import x").is_err());
+    }
+
+    #[test]
+    fn function_types_and_calls() {
+        let p = parse("struct S {\n  f: fn(i64, *u8) -> i64\n  g: fn()\n}\nfn h() -> fn(i64) -> i64 { return s.f(1)(2) }").unwrap();
+        let TypeExprKind::Fn(params, Some(ret)) = &p.structs[0].fields[0].ty.kind else { panic!() };
+        assert!(params.len() == 2 && matches!(&ret.kind, TypeExprKind::Named(n) if n == "i64"));
+        // Without `->` on the same line, the type ends: `g` returns unit.
+        assert!(matches!(&p.structs[0].fields[1].ty.kind, TypeExprKind::Fn(ps, None) if ps.is_empty()));
+        assert!(matches!(&p.funcs[0].ret.as_ref().unwrap().kind, TypeExprKind::Fn(_, Some(_))));
+        let Stmt::Return { value: Some(v), .. } = &p.funcs[0].body.stmts[0] else { panic!() };
+        let ExprKind::CallExpr(callee, args) = &v.kind else { panic!("{v:?}") };
+        assert!(matches!(&callee.kind, ExprKind::Call(n, _) if n == "s.f") && args.len() == 1);
+        // A call never continues on the next line.
+        assert_eq!(body("f\n(1)").len(), 2);
+        assert!(matches!(&body("let t = Vec(fn(u8) -> u8)")[0], Stmt::Let { value, .. }
+            if matches!(&value.kind, ExprKind::Call(_, a) if matches!(a[0].kind, ExprKind::FnType(_)))));
     }
 
     #[test]

@@ -247,6 +247,14 @@ impl<'p> Env<'p> {
             TypeExprKind::Array(elem, n) => {
                 Ok(Type::array(self.resolve_in(elem, b, in_macro)?, self.array_len(n, b)?))
             }
+            TypeExprKind::Fn(params, ret) => {
+                let params = params.iter().map(|p| self.resolve_in(p, b, in_macro)).collect::<Result<_, _>>()?;
+                let ret = match ret {
+                    Some(r) => self.resolve_in(r, b, in_macro)?,
+                    None => Type::Unit,
+                };
+                Ok(Type::Fn(params, Box::new(ret)))
+            }
             TypeExprKind::Generic(name, args) => {
                 let key = self.key_or_err(t.pos, b, name)?;
                 self.check_visible(t.pos, b.module, &key)?;

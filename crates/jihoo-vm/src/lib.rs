@@ -20,6 +20,8 @@ pub enum Value {
     Str(GcRef),
     /// A struct or an array.
     Agg(GcRef),
+    /// A function value: an index into the module's functions.
+    Func(u32),
 }
 
 impl Value {
@@ -27,7 +29,7 @@ impl Value {
     pub fn gc_ref(&self) -> Option<GcRef> {
         match self {
             Value::Str(r) | Value::Agg(r) => Some(*r),
-            Value::Unit | Value::Int(_) | Value::Bool(_) => None,
+            Value::Unit | Value::Int(_) | Value::Bool(_) | Value::Func(_) => None,
         }
     }
 }
@@ -131,6 +133,16 @@ impl<'m> Vm<'m> {
 
     pub fn heap_mut(&mut self) -> &mut Heap {
         &mut self.heap
+    }
+
+    /// The function value for function `name`, if the module has it.
+    pub fn func_value(&self, name: &str) -> Option<Value> {
+        self.fn_index.get(name).map(|&i| Value::Func(i as u32))
+    }
+
+    /// The name of the function a `Value::Func` refers to.
+    pub fn func_name(&self, index: u32) -> &'m str {
+        &self.module.funcs[index as usize].name
     }
 
     pub fn run_main(&mut self, out: &mut dyn Write) -> Result<i64, VmError> {
@@ -302,6 +314,17 @@ impl<'m> Vm<'m> {
                 let args: Vec<Value> = args.iter().map(|r| self.get(*r)).collect();
                 self.push_frame(callee, &args, Some(*dst))?;
             }
+            Inst::FuncRef { dst, func } => {
+                let v = Value::Func(self.fn_index[func.as_str()] as u32);
+                self.set(*dst, v);
+            }
+            Inst::CallIndirect { dst, callee, args } => {
+                let Value::Func(callee) = self.get(*callee) else {
+                    return Err(self.error("called a value that is not a function"));
+                };
+                let args: Vec<Value> = args.iter().map(|r| self.get(*r)).collect();
+                self.push_frame(callee as usize, &args, Some(*dst))?;
+            }
             Inst::ToStr { dst, src } => {
                 let text = match (f.reg_type(*src), self.get(*src)) {
                     (Type::Int(jihoo_ir::IntTy::U64), Value::Int(n)) => (n as u64).to_string(),
@@ -327,7 +350,7 @@ impl<'m> Vm<'m> {
                     Value::Int(n) => n.to_string(),
                     Value::Bool(b) => b.to_string(),
                     Value::Str(r) => self.heap.str(r).to_string(),
-                    v @ (Value::Unit | Value::Agg(_)) => {
+                    v @ (Value::Unit | Value::Agg(_) | Value::Func(_)) => {
                         return Err(self.error(&format!("cannot print {}", type_name(v))))
                     }
                 };
@@ -535,6 +558,7 @@ fn type_name(v: Value) -> &'static str {
         Value::Bool(_) => "bool",
         Value::Str(_) => "str",
         Value::Agg(_) => "aggregate",
+        Value::Func(_) => "function",
     }
 }
 

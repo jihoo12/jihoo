@@ -1,0 +1,67 @@
+// Function values: passed, returned, stored in structs and arrays, and called
+// indirectly, including with aggregate arguments and results.
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+struct Shape {
+    scale: fn(Point, i64) -> Point
+    weight: u8
+}
+
+fn add(a: i64, b: i64) -> i64 { return a + b }
+fn mul(a: i64, b: i64) -> i64 { return a * b }
+fn sub(a: i64, b: i64) -> i64 { return a - b }
+
+fn stretch(p: Point, k: i64) -> Point {
+    p.x = p.x * k
+    return p
+}
+
+fn shrink(p: Point, k: i64) -> Point {
+    return Point { x: p.x / k, y: p.y / k }
+}
+
+fn fold(xs: [i64; 5], init: i64, f: fn(i64, i64) -> i64) -> i64 {
+    let acc = init
+    let i = 0
+    while i < len(xs) {
+        acc = f(acc, xs[i])
+        i = i + 1
+    }
+    return acc
+}
+
+fn pick(n: i64) -> fn(i64, i64) -> i64 {
+    if n == 0 { return add }
+    if n == 1 { return mul }
+    return sub
+}
+
+fn twice(comptime f: fn(u8) -> u8, x: u8) -> u8 { return f(f(x)) }
+fn bump(x: u8) -> u8 { return x + 100 }
+
+const OPS = [add, mul, sub]
+
+fn entry() -> i64 {
+    let xs = [1, 2, 3, 4, 5]
+    let total = fold(xs, 0, add) + fold(xs, 1, mul) // 15 + 120
+
+    let shapes = [Shape { scale: stretch, weight: 2 }, Shape { scale: shrink, weight: 3 }]
+    let p = Point { x: 12, y: 30 }
+    let i = 0
+    while i < 2 {
+        let q = shapes[i].scale(p, 3)
+        total = total + q.x * (shapes[i].weight as i64) + q.y
+        i = i + 1
+    }
+
+    total = total + pick(0)(2, 3) + pick(1)(2, 3) + pick(2)(2, 3)
+    total = total + OPS[2](10, 4)
+    let f = OPS[0]
+    f = sub
+    total = total + f(50, 8)
+    return total + (twice(bump, 50) as i64) // u8: 50 + 200 wraps to 250
+}

@@ -98,6 +98,8 @@ pub enum TypeExprKind {
     /// `Pair(i64)`: an instance of a generic struct. Arguments are written as
     /// expressions; type arguments are read back as types.
     Generic(String, Vec<Expr>),
+    /// `fn(A, B) -> R`; without `-> R` the function returns unit.
+    Fn(Vec<TypeExpr>, Option<Box<TypeExpr>>),
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +155,12 @@ pub enum ExprKind {
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Call(String, Vec<Expr>),
+    /// A call of a function value that is not a plain name: `s.f(x)`,
+    /// `fs[0](x)`, `make()(x)`.
+    CallExpr(Box<Expr>, Vec<Expr>),
+    /// A function type where an expression is expected: a type argument, as in
+    /// `Vec(fn(i64) -> i64)`.
+    FnType(TypeExpr),
     /// `Point { x: 1, y: 2 }` or `Pair(i64) { a: 1, b: 2 }`
     StructLit(TypeExpr, Vec<FieldInit>),
     /// `base.field`
@@ -291,6 +299,11 @@ pub fn set_pos(e: &mut Expr, pos: Pos) {
             set_pos(r, pos);
         }
         ExprKind::Call(_, args) | ExprKind::ArrayLit(args) => args.iter_mut().for_each(|a| set_pos(a, pos)),
+        ExprKind::CallExpr(f, args) => {
+            set_pos(f, pos);
+            args.iter_mut().for_each(|a| set_pos(a, pos));
+        }
+        ExprKind::FnType(t) => ty(t),
         ExprKind::Quote(_, _, holes) => holes.iter_mut().for_each(|(_, a)| set_pos(a, pos)),
         ExprKind::MacroCall(_, args) => args.iter_mut().for_each(|a| set_pos(&mut a.expr, pos)),
         ExprKind::StructLit(t, fields) => {
@@ -324,6 +337,12 @@ fn set_type_pos(t: &mut TypeExpr, pos: Pos) {
             set_pos(n, pos);
         }
         TypeExprKind::Generic(_, args) => args.iter_mut().for_each(|a| set_pos(a, pos)),
+        TypeExprKind::Fn(params, ret) => {
+            params.iter_mut().for_each(|t| set_type_pos(t, pos));
+            if let Some(r) = ret {
+                set_type_pos(r, pos);
+            }
+        }
     }
 }
 

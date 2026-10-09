@@ -443,6 +443,45 @@ fn generic_errors() {
     assert!(err("fn main(comptime T: type) {}").contains("comptime parameters"));
 }
 
+// ---- function values ----
+
+#[test]
+fn function_values() {
+    let m = check(
+        "fn inc(x: i64) -> i64 { return x + 1 }\n\
+         fn apply(f: fn(i64) -> i64, x: i64) -> i64 { return f(x) }\n\
+         fn twice(comptime f: fn(i64) -> i64, x: i64) -> i64 { return f(f(x)) }\n\
+         const F = inc\n\
+         fn main() { let len = 3\n print(apply(inc, len) + twice(inc, 1) + F(0)) }",
+    )
+    .unwrap();
+    let text = m.to_string();
+    assert!(text.contains("funcref @inc"), "{text}");
+    assert!(text.contains("fn @apply(fn(i64) -> i64, i64) -> i64"), "{text}");
+    assert!(text.contains("= call %0(%1)"), "{text}");
+    // Functions known at compile time are called directly.
+    assert!(text.contains("fn @twice.0(i64) -> i64") && !text.contains("call %0(%0)"), "{text}");
+
+    let e = err("fn inc(x: i64) -> i64 { return x }\nfn main() { let f: fn(i64) = inc }");
+    assert!(e.contains("must be fn(i64), found fn(i64) -> i64"), "{e}");
+    assert!(err("fn main() { let x = 1\n print(x(2)) }").contains("`x` is not a function; it has type i64"));
+    assert!(err("fn main() { let f = print }").contains("`print` is a builtin"));
+    assert!(err("fn g(comptime T: type) {}\nfn main() { let f = g }").contains("cannot be used as a value"));
+    assert!(err("macro m() -> expr { return quote(1) }\nfn main() { let f = m }").contains("macros cannot be used as values"));
+    assert!(err("fn inc(x: i64) -> i64 { return x }\nfn main() { print(inc(1)(2)) }").contains("this function is not a function"));
+    assert!(err("fn inc(x: i64) -> i64 { return x }\nfn main() { let f = inc\n print(f(1, 2)) }").contains("`f` takes 1 arguments, 2 given"));
+    assert!(err("fn main() { let t = fn(i64) }").contains("is a type, not a value"));
+    // Function values have no equality, so closures can be added later without
+    // having to define what comparing them means.
+    assert!(err("fn inc(x: i64) -> i64 { return x }\nfn main() { print(inc == inc) }").contains("cannot apply `==`"));
+}
+
+#[test]
+fn function_values_in_freestanding_code() {
+    let m = check(&fs("struct S { f: fn(*u8) -> i64 }\nfn g(p: *u8) -> i64 { return 0 }\nfn h() -> i64 { let s = S { f: g }\n return s.f(\"x\") }")).unwrap();
+    assert!(m.to_string().contains("struct $S { f: fn(*u8) -> i64 } size 8 align 8"), "{m}");
+}
+
 // ---- inline asm ----
 
 #[test]
