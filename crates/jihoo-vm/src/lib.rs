@@ -284,19 +284,34 @@ impl<'m> Vm<'m> {
             }
             Inst::Syscall { .. } => return Err(self.error("`syscall` is not available on the VM")),
             Inst::Asm { .. } => return Err(self.error("inline asm is not available on the VM")),
-            Inst::Quote { dst, pieces, holes } => {
+            Inst::Quote { dst, pieces, holes, kinds } => {
+                use jihoo_ir::HoleKind;
                 let mut code = pieces[0].clone();
-                for (hole, piece) in holes.iter().zip(&pieces[1..]) {
-                    let text = match (f.reg_type(*hole), self.get(*hole)) {
+                for ((hole, kind), piece) in holes.iter().zip(kinds).zip(&pieces[1..]) {
+                    let ty = f.reg_type(*hole);
+                    let text = match (kind, ty, self.get(*hole)) {
                         // Parenthesized, so `$x * 2` keeps its meaning whatever `x` is.
-                        (Type::Expr, Value::Str(r)) => format!("({})", self.heap.str(r)),
-                        (Type::Str, Value::Str(r)) => string_literal(self.heap.str(r)),
-                        (Type::Int(jihoo_ir::IntTy::U64), Value::Int(n)) => (n as u64).to_string(),
+                        (HoleKind::Expr, Type::Expr, Value::Str(r)) => format!("({})", self.heap.str(r)),
+                        (HoleKind::Expr, Type::Str, Value::Str(r)) => string_literal(self.heap.str(r)),
+                        (HoleKind::Expr, Type::Int(jihoo_ir::IntTy::U64), Value::Int(n)) => (n as u64).to_string(),
                         // Parenthesized so that a negative number stays one operand.
-                        (_, Value::Int(n)) if n < 0 => format!("({n})"),
-                        (_, Value::Int(n)) => n.to_string(),
-                        (_, Value::Bool(b)) => b.to_string(),
-                        (t, _) => return Err(self.error(&format!("cannot insert a value of type {t} into code"))),
+                        (HoleKind::Expr, _, Value::Int(n)) if n < 0 => format!("({n})"),
+                        (HoleKind::Expr, _, Value::Int(n)) => n.to_string(),
+                        (HoleKind::Expr, _, Value::Bool(b)) => b.to_string(),
+                        (HoleKind::Ident, Type::Str | Type::Expr, Value::Str(r)) => {
+                            let name = self.heap.str(r).trim().to_string();
+                            if !is_identifier(&name) {
+                                return Err(self.error(&format!("`{name}` is not a valid name")));
+                            }
+                            name
+                        }
+                        // Statements and items on lines of their own.
+                        (HoleKind::Stmts, Type::Stmts | Type::Expr, Value::Str(r))
+                        | (HoleKind::Items, Type::Items, Value::Str(r)) => format!("\n{}\n", self.heap.str(r)),
+                        (kind, t, _) => {
+                            let place = format!("{kind:?}").to_lowercase();
+                            return Err(self.error(&format!("cannot insert a value of type {t} where a {place} goes")));
+                        }
                     };
                     code.push_str(&text);
                     code.push_str(piece);
@@ -427,6 +442,12 @@ impl<'m> Vm<'m> {
         };
         VmError { func, msg: msg.into() }
     }
+}
+
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// `s` as jihoo source: a string literal that reads back as `s`.

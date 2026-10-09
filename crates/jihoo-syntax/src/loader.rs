@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::ast::Program;
 use crate::{parse_file, Error};
 
+#[derive(Debug, Clone)]
 pub struct Module {
     /// Prefix of this module's items in JIR, such as `alloc`; empty for the root.
     pub name: String,

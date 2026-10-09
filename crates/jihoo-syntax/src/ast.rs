@@ -8,6 +8,15 @@ pub struct Program {
     pub structs: Vec<StructDecl>,
     pub consts: Vec<ConstDecl>,
     pub funcs: Vec<FnDecl>,
+    /// `name!(...)` at the top level: replaced by the items the macro returns.
+    pub macro_calls: Vec<ItemMacro>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ItemMacro {
+    pub pos: Pos,
+    pub name: String,
+    pub args: Vec<MacroArg>,
 }
 
 /// `import a.b` (the file `a/b.jh`, used as `b.item`) or `import a.b as c`.
@@ -164,9 +173,10 @@ pub enum ExprKind {
     Asm(Box<AsmExpr>),
     /// `name!(args)`: a macro call, replaced by the code the macro returns.
     MacroCall(String, Vec<MacroArg>),
-    /// `quote(a + $x)`: code as a value, inside macros. `pieces` is the template
-    /// text around the holes, so `pieces.len() == holes.len() + 1`.
-    Quote(Vec<String>, Vec<Expr>),
+    /// Code as a value, inside macros: `quote(a + $x)` (an expression),
+    /// `quote { ... }` (statements) or `quote items { ... }` (items). `pieces` is
+    /// the template text around the holes, so `pieces.len() == holes.len() + 1`.
+    Quote(CodeKind, Vec<String>, Vec<(HoleKind, Expr)>),
     /// `$x` or `$(expr)` inside a quote template; only appears in the template's
     /// parsed form, which exists to check that the template is an expression.
     Hole(Box<Expr>),
@@ -176,6 +186,27 @@ pub enum ExprKind {
     SizeOf(TypeExpr),
     /// `align_of(T)`
     AlignOf(TypeExpr),
+}
+
+/// What kind of code a quote, or a macro, produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeKind {
+    Expr,
+    Stmts,
+    Items,
+}
+
+/// Where a hole sits in a quote template, which decides how a value is inserted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoleKind {
+    /// In place of an expression.
+    Expr,
+    /// In place of a name: `fn $name()`, `let $v = ...`.
+    Ident,
+    /// As a statement of its own: `$body`.
+    Stmts,
+    /// As an item of its own, in `quote items { ... }`.
+    Items,
 }
 
 /// An argument of a macro call: its source text and its parsed form.
@@ -260,7 +291,7 @@ pub fn set_pos(e: &mut Expr, pos: Pos) {
             set_pos(r, pos);
         }
         ExprKind::Call(_, args) | ExprKind::ArrayLit(args) => args.iter_mut().for_each(|a| set_pos(a, pos)),
-        ExprKind::Quote(_, holes) => holes.iter_mut().for_each(|a| set_pos(a, pos)),
+        ExprKind::Quote(_, _, holes) => holes.iter_mut().for_each(|(_, a)| set_pos(a, pos)),
         ExprKind::MacroCall(_, args) => args.iter_mut().for_each(|a| set_pos(&mut a.expr, pos)),
         ExprKind::StructLit(t, fields) => {
             ty(t);
@@ -293,5 +324,82 @@ fn set_type_pos(t: &mut TypeExpr, pos: Pos) {
             set_pos(n, pos);
         }
         TypeExprKind::Generic(_, args) => args.iter_mut().for_each(|a| set_pos(a, pos)),
+    }
+}
+
+/// Like [`set_pos`], for every statement of a block.
+pub fn set_block_pos(b: &mut Block, pos: Pos) {
+    b.end = pos;
+    b.stmts.iter_mut().for_each(|s| set_stmt_pos(s, pos));
+}
+
+pub fn set_stmt_pos(s: &mut Stmt, pos: Pos) {
+    match s {
+        Stmt::Let { pos: p, ty, value, .. } => {
+            *p = pos;
+            if let Some(t) = ty {
+                set_type_pos(t, pos);
+            }
+            set_pos(value, pos);
+        }
+        Stmt::Assign { target, value } => {
+            set_pos(target, pos);
+            set_pos(value, pos);
+        }
+        Stmt::Return { pos: p, value } => {
+            *p = pos;
+            if let Some(v) = value {
+                set_pos(v, pos);
+            }
+        }
+        Stmt::If { cond, then, els } => {
+            set_pos(cond, pos);
+            set_block_pos(then, pos);
+            if let Some(e) = els {
+                set_block_pos(e, pos);
+            }
+        }
+        Stmt::While { cond, body } => {
+            set_pos(cond, pos);
+            set_block_pos(body, pos);
+        }
+        Stmt::Expr(e) => set_pos(e, pos),
+    }
+}
+
+/// Like [`set_pos`], for every item of a program (the output of an item macro).
+pub fn set_program_pos(p: &mut Program, pos: Pos) {
+    for s in &mut p.structs {
+        s.pos = pos;
+        for prm in &mut s.params {
+            prm.pos = pos;
+            set_type_pos(&mut prm.ty, pos);
+        }
+        for f in &mut s.fields {
+            f.pos = pos;
+            set_type_pos(&mut f.ty, pos);
+        }
+    }
+    for c in &mut p.consts {
+        c.pos = pos;
+        if let Some(t) = &mut c.ty {
+            set_type_pos(t, pos);
+        }
+        set_pos(&mut c.value, pos);
+    }
+    for f in &mut p.funcs {
+        f.pos = pos;
+        for prm in &mut f.params {
+            prm.pos = pos;
+            set_type_pos(&mut prm.ty, pos);
+        }
+        if let Some(t) = &mut f.ret {
+            set_type_pos(t, pos);
+        }
+        set_block_pos(&mut f.body, pos);
+    }
+    for m in &mut p.macro_calls {
+        m.pos = pos;
+        m.args.iter_mut().for_each(|a| set_pos(&mut a.expr, pos));
     }
 }

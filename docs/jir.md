@@ -79,7 +79,7 @@ It takes no parameters and returns `unit` or `i64`.
 | `str`             | GC-managed string, hosted only           | —             |
 | `*T`              | raw pointer to `T`, freestanding only    | `ptr`         |
 | `$Name`           | struct, by value                         | named struct  |
-| `expr`            | code, inside macros; compile time only   | —             |
+| `expr`, `stmts`, `items` | code, inside macros; compile time only | —        |
 | `[N x T]`         | array of `N` `T`s, by value              | `[N x T]`     |
 
 `str` and `*T` are deliberately separate: GC references and raw pointers must never
@@ -194,7 +194,12 @@ runtime error and native code traps.
 | `%d = syscall(%n, %a, ...)`     | int or `*T`, 1 to 7 operands | `i64` | freestanding only: raw Linux syscall `%n` |
 | `print %a`                      | int, `bool` or `str`  |        | hosted only: print the value and a newline |
 | `%d = asm "tmpl", "cons"(%a, ...)` | int, `bool` or `*T` | int, `*T` or `unit` | freestanding only: inline assembly |
-| `%d = quote ["p0", "p1", ...](%h, ...)` | `expr`, int, `bool` or `str` | `expr` | compile time only: code from template pieces and holes |
+| `%d = quote ["p0", "p1", ...](kind %h, ...)` | see below | `expr`, `stmts` or `items` | compile time only: code from template pieces and holes |
+
+Each `quote` hole has a kind: `expr` (code in parentheses, or an int, bool or
+`str` literal), `ident` (a `str` or `expr` that is an identifier, inserted as
+is), `stmts` (`stmts` or `expr` code on lines of its own) or `items` (`items`
+code on lines of its own).
 
 `asm` passes `tmpl` and `cons` to LLVM unchanged: the template uses LLVM operand
 references (`${0}` is the output if there is one, then the inputs, in order;

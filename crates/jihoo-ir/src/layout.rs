@@ -29,7 +29,7 @@ pub fn of(t: &Type, fields: &Fields<'_>) -> Option<Layout> {
             Layout { size: bytes, align: bytes }
         }
         Type::Ptr(_) => Layout { size: 8, align: 8 },
-        Type::Str | Type::Expr => return None,
+        Type::Str | Type::Expr | Type::Stmts | Type::Items => return None,
         Type::Array(elem, n) => {
             let e = of(elem, fields)?;
             Layout { size: e.size.checked_mul(*n)?, align: e.align }

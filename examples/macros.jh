@@ -23,6 +23,33 @@ macro point(x: expr) -> expr {
     return quote(Point { x: $x, y: power!($x, 2) })
 }
 
+// `stmts` macros add statements to the block they are used in.
+macro swap(a: expr, b: expr) -> stmts {
+    return quote {
+        let tmp = $a
+        $a = $b
+        $b = tmp
+    }
+}
+
+// `items` macros define functions and types at the top level. `$name` in a name
+// position inserts a `str` as a name.
+macro getters(name: str, fields: i64) -> items {
+    let out = quote items {}
+    let i = 0
+    while i < fields {
+        let getter = name + "_" + stringify(quote($i))
+        out = quote items {
+            $out
+            fn $getter(p: Point) -> i64 { return p.x * $i + p.y }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+getters!("mix", 3)                   // defines mix_0, mix_1 and mix_2
+
 struct Point {
     x: i64
     y: i64
@@ -42,6 +69,11 @@ fn main() -> i64 {
     print(power!(y, 4))              // 81, as y * y * y * y with no loop at runtime
     print(power!(y + 1, 2))          // 16: (y + 1) * (y + 1)
     let p = point!(y)
+    let a = 1
+    let b = 2
+    swap!(a, b)
+    print(a * 10 + b)                // 21
+    print(mix_2(p))                  // 3 * 2 + 9 = 15
     let failures = expect!(p.y == 9)
     failures = failures + expect!(power!(2, 10) == 1024)
     failures = failures + expect!(p.x + 1 == 5)

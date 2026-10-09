@@ -271,11 +271,16 @@ impl<'p> Env<'p> {
                 if name == "type" {
                     return Err(Error::new(t.pos, "`type` can only be the type of a `comptime` parameter"));
                 }
-                if name == "expr" {
+                if let Some(code) = match name.as_str() {
+                    "expr" => Some(Type::Expr),
+                    "stmts" => Some(Type::Stmts),
+                    "items" => Some(Type::Items),
+                    _ => None,
+                } {
                     return if in_macro {
-                        Ok(Type::Expr)
+                        Ok(code)
                     } else {
-                        Err(Error::new(t.pos, "`expr` (a piece of code) is only available in macros"))
+                        Err(Error::new(t.pos, format!("`{name}` (a piece of code) is only available in macros")))
                     };
                 }
                 if let Some(ty) = Type::from_name(name) {
@@ -478,8 +483,9 @@ impl<'p> Env<'p> {
                     None => Type::Unit,
                 };
                 if is_macro {
-                    if ret != Type::Expr {
-                        return Err(Error::new(decl.pos, format!("macro `{name}` must return `expr`, not {ret}")));
+                    if !ret.is_code() {
+                        let msg = format!("macro `{name}` must return `expr`, `stmts` or `items`, not {ret}");
+                        return Err(Error::new(decl.pos, msg));
                     }
                     for (p, t) in decl.params.iter().zip(&params) {
                         if p.comptime {

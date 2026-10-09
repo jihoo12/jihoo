@@ -336,9 +336,50 @@ power!(y + 1, 2)    // expands to ((1) * (y + 1)) * (y + 1)
 - Macro bodies may use `str` even in freestanding programs, since they only run on
   the VM; a `str` inserted into code becomes a string literal. Macros are
   type checked even when unused, and are never part of the compiled program.
-- Macros produce expressions only, not statements or items.
 
-Planned next: statement and item macros.
+### Statement and item macros
+
+```jihoo
+macro swap(a: expr, b: expr) -> stmts {
+    return quote {
+        let tmp = $a
+        $a = $b
+        $b = tmp
+    }
+}
+
+macro adders(n: i64) -> items {
+    let out = quote items {}
+    let i = 1
+    while i <= n {
+        out = quote items {
+            $out
+            fn $("add" + stringify(quote($i)))(x: i64) -> i64 { return x + $i }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+adders!(3)            // at the top level: defines add1, add2, add3
+fn main() {
+    swap!(x, y)       // on a line of its own: three statements in this block
+}
+```
+
+- A macro returns `expr`, `stmts` or `items`, built with `quote(...)`,
+  `quote { ... }` and `quote items { ... }`. An `expr` macro is used as an
+  expression, a `stmts` macro as a statement of its own (its `let`s stay visible
+  after it), and an `items` macro at the top level of a module.
+- A hole's position decides what it takes: in an expression, code (parenthesized)
+  or a literal value; in a name position (`fn $name`, `let $v`, a struct name),
+  a `str` that must be an identifier; as a statement of its own, `stmts` or
+  `expr`; as an item of its own, `items`.
+- Item macros are expanded before the program is analyzed, in rounds: each round
+  analyzes lazily what the macros need, runs them, and adds the produced items to
+  the module that called the macro. Produced code may call item macros, so this
+  repeats, up to 16 rounds.
+
 
 ## GC
 
@@ -354,4 +395,5 @@ grows past twice the size that survived the last collection (1 MiB minimum).
    inline asm.~~
 4. ~~`comptime` on the VM, generic functions.~~
 5. ~~Expression macros, generic structs, bitwise operators, modules and an
-   `alloc` library, `pub`.~~ Statement and item macros.
+   `alloc` library, `pub`, statement and item macros.~~ Hygiene for macros;
+   field visibility.

@@ -90,9 +90,11 @@ pub enum Type {
     Struct(String),
     /// `[T; N]`, a fixed-size array. Also a value type.
     Array(Box<Type>, u64),
-    /// A piece of code (an expression), inside macros. Only exists while
-    /// compiling: the VM represents it as the expression's source text.
+    /// Pieces of code inside macros: an expression, statements, or items. They
+    /// only exist while compiling; the VM represents them as source text.
     Expr,
+    Stmts,
+    Items,
 }
 
 impl Type {
@@ -137,9 +139,14 @@ impl Type {
             Type::Str => profile == Profile::Hosted,
             Type::Ptr(inner) => profile == Profile::Freestanding && inner.available_in(profile),
             Type::Array(elem, _) => elem.available_in(profile),
-            Type::Expr => false,
+            Type::Expr | Type::Stmts | Type::Items => false,
             Type::Unit | Type::Bool | Type::Int(_) | Type::Struct(_) => true,
         }
+    }
+
+    /// `expr`, `stmts` or `items`.
+    pub fn is_code(&self) -> bool {
+        matches!(self, Type::Expr | Type::Stmts | Type::Items)
     }
 
     pub fn is_printable(&self) -> bool {
@@ -173,6 +180,8 @@ impl fmt::Display for Type {
             Type::Struct(name) => f.write_str(name),
             Type::Array(elem, n) => write!(f, "[{elem}; {n}]"),
             Type::Expr => f.write_str("expr"),
+            Type::Stmts => f.write_str("stmts"),
+            Type::Items => f.write_str("items"),
         }
     }
 }

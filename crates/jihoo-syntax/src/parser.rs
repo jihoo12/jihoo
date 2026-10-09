@@ -21,6 +21,32 @@ pub fn parse_file(src: &str, file: u16) -> Result<Program, Error> {
     Parser::new(src, file)?.program()
 }
 
+/// Parses statements, such as the code a statement macro produced.
+pub fn parse_stmts(src: &str) -> Result<Vec<Stmt>, Error> {
+    let mut p = Parser::new(src, 0)?;
+    let mut stmts = Vec::new();
+    loop {
+        while p.eat(&Tok::Semi) {}
+        if *p.peek() == Tok::Eof {
+            return Ok(stmts);
+        }
+        stmts.push(p.stmt()?);
+        if *p.peek() != Tok::Eof {
+            p.end_of_stmt()?;
+        }
+    }
+}
+
+/// Parses items (no imports or attributes), such as an item macro's output.
+pub fn parse_items(src: &str) -> Result<Program, Error> {
+    let mut p = Parser::new(src, 0)?;
+    let prog = p.items(false)?;
+    if !prog.imports.is_empty() {
+        return Err(Error::new(prog.imports[0].pos, "code made by a macro cannot `import`"));
+    }
+    Ok(prog)
+}
+
 /// Parses a single expression, such as the code a macro produced.
 pub fn parse_expr(src: &str) -> Result<Expr, Error> {
     let mut p = Parser::new(src, 0)?;
@@ -37,9 +63,9 @@ struct Parser {
     i: usize,
     /// Set while parsing an `if`/`while` condition.
     no_struct_lit: bool,
-    /// Set while parsing a `quote(...)` template: the holes found so far, with
-    /// their byte ranges in the source.
-    holes: Option<Vec<(usize, usize, Expr)>>,
+    /// Set while parsing a quote template: the holes found so far, with their
+    /// byte ranges in the source and where they sit.
+    holes: Option<Vec<(usize, usize, Expr, HoleKind)>>,
 }
 
 type PResult<T> = Result<T, Error>;
@@ -102,8 +128,32 @@ impl Parser {
                 let pos = self.bump().pos;
                 Ok((pos, name))
             }
+            // `fn $name()` in a template: a name filled in by the macro.
+            Tok::Dollar if self.holes.is_some() => {
+                let pos = self.pos();
+                self.hole(HoleKind::Ident)?;
+                Ok((pos, "__hole__".into()))
+            }
             _ => Err(self.unexpected(what)),
         }
+    }
+
+    /// `$x` or `$(expr)` in a template, recorded as a hole of `kind`.
+    fn hole(&mut self, kind: HoleKind) -> PResult<Expr> {
+        let pos = self.pos();
+        let start = self.cur().start;
+        self.expect(&Tok::Dollar, "`$`")?;
+        if self.holes.is_none() {
+            return Err(Error::new(pos, "`$` can only be used inside `quote(...)`"));
+        }
+        // The hole itself is ordinary code; it may not contain holes.
+        let saved = self.holes.take();
+        let inner = self.hole_body();
+        self.holes = saved;
+        let inner = inner?;
+        let end = self.prev_end();
+        self.holes.as_mut().unwrap().push((start, end, inner.clone(), kind));
+        Ok(Expr { pos, kind: ExprKind::Hole(Box::new(inner)) })
     }
 
     /// True if the current token is `t` on the same line as the previous token.
@@ -142,12 +192,37 @@ impl Parser {
             let pos = self.bump().pos;
             attrs.push((pos, name));
         }
+        let mut prog = self.items(false)?;
+        prog.attrs = attrs;
+        Ok(prog)
+    }
+
+    /// Items up to the end of the file, or up to a `}` if `in_braces`.
+    fn items(&mut self, in_braces: bool) -> PResult<Program> {
         let mut imports = Vec::new();
         let mut structs = Vec::new();
         let mut consts = Vec::new();
         let mut funcs = Vec::new();
-        while *self.peek() != Tok::Eof {
+        let mut macro_calls = Vec::new();
+        loop {
             match self.peek() {
+                Tok::Eof if !in_braces => break,
+                Tok::RBrace if in_braces => break,
+                // `$items` in `quote items { ... }`.
+                Tok::Dollar if self.holes.is_some() => {
+                    self.hole(HoleKind::Items)?;
+                }
+                // `name!(...)` / `module.name!(...)`: an item macro.
+                Tok::Ident(_) if self.item_macro_follows() => {
+                    let pos = self.pos();
+                    let mut name = self.ident("a macro name")?.1;
+                    if self.eat(&Tok::Dot) {
+                        name = format!("{name}.{}", self.ident("a macro name")?.1);
+                    }
+                    self.expect(&Tok::Bang, "`!`")?;
+                    let args = self.macro_args()?;
+                    macro_calls.push(ItemMacro { pos, name, args });
+                }
                 Tok::Import => imports.push(self.import()?),
                 Tok::Fn | Tok::Macro => funcs.push(self.fn_decl(false)?),
                 Tok::Struct => structs.push(self.struct_decl(false)?),
@@ -167,7 +242,16 @@ impl Parser {
                 _ => return Err(self.unexpected("`fn`, `macro`, `struct`, `const` or `import`")),
             }
         }
-        Ok(Program { attrs, imports, structs, consts, funcs })
+        Ok(Program { attrs: vec![], imports, structs, consts, funcs, macro_calls })
+    }
+
+    fn item_macro_follows(&self) -> bool {
+        let t = |k: usize| self.toks.get(self.i + k).map(|x| &x.tok);
+        matches!(
+            (t(1), t(2), t(3), t(4)),
+            (Some(Tok::Bang), Some(Tok::LParen), _, _)
+                | (Some(Tok::Dot), Some(Tok::Ident(_)), Some(Tok::Bang), Some(Tok::LParen))
+        )
     }
 
     fn import(&mut self) -> PResult<Import> {
@@ -372,6 +456,12 @@ impl Parser {
                     let value = self.expr()?;
                     Ok(Stmt::Assign { target: e, value })
                 } else {
+                    // A hole on its own is a place for statements.
+                    if matches!(e.kind, ExprKind::Hole(_)) {
+                        if let Some(h) = self.holes.as_mut().and_then(|h| h.last_mut()) {
+                            h.3 = HoleKind::Stmts;
+                        }
+                    }
                     Ok(Stmt::Expr(e))
                 }
             }
@@ -552,21 +642,7 @@ impl Parser {
                 self.bump();
                 self.quote()?
             }
-            Tok::Dollar => {
-                let start = self.cur().start;
-                self.bump();
-                let Some(_) = self.holes else {
-                    return Err(Error::new(pos, "`$` can only be used inside `quote(...)`"));
-                };
-                // The hole itself is ordinary code; it may not contain holes.
-                let saved = self.holes.take();
-                let inner = self.hole_body();
-                self.holes = saved;
-                let inner = inner?;
-                let end = self.prev_end();
-                self.holes.as_mut().unwrap().push((start, end, inner.clone()));
-                ExprKind::Hole(Box::new(inner))
-            }
+            Tok::Dollar => return self.hole(HoleKind::Expr),
             Tok::LParen => {
                 self.bump();
                 let e = self.with_struct_lit(true, |p| p.expr())?;
@@ -612,32 +688,56 @@ impl Parser {
         Ok(args)
     }
 
-    /// `quote(template)`: the template must parse as an expression, with `$x` and
-    /// `$(expr)` holes standing in for code inserted when the macro runs.
+    /// `quote(expr)`, `quote { stmts }` or `quote items { items }`. The template
+    /// must parse as that kind of code, with `$x` and `$(expr)` holes standing in
+    /// for code inserted when the macro runs.
     fn quote(&mut self) -> PResult<ExprKind> {
         let pos = self.pos();
         if self.holes.is_some() {
             return Err(Error::new(pos, "`quote` cannot be nested"));
         }
-        self.expect(&Tok::LParen, "`(`")?;
+        let kind = match self.peek().clone() {
+            Tok::LParen => CodeKind::Expr,
+            Tok::LBrace => CodeKind::Stmts,
+            Tok::Ident(w) if w == "items" => {
+                self.bump();
+                CodeKind::Items
+            }
+            _ => return Err(self.unexpected("`(`, `{` or `items {` after `quote`")),
+        };
+        let close = if kind == CodeKind::Expr { Tok::RParen } else { Tok::RBrace };
+        self.bump(); // `(` or `{`
         let start = self.cur().start;
         self.holes = Some(Vec::new());
-        let parsed = self.with_struct_lit(true, |p| p.expr());
+        let parsed = self.with_struct_lit(true, |p| match kind {
+            CodeKind::Expr => p.expr().map(|_| ()),
+            CodeKind::Items => p.items(true).map(|_| ()),
+            CodeKind::Stmts => loop {
+                while p.eat(&Tok::Semi) {}
+                if *p.peek() == Tok::RBrace {
+                    break Ok(());
+                }
+                if let Err(e) = p.stmt().and_then(|_| p.end_of_stmt()) {
+                    break Err(e);
+                }
+            },
+        });
         let holes = self.holes.take().unwrap();
         parsed?;
-        let end = self.prev_end();
-        self.expect(&Tok::RParen, "`)`")?;
+        // An empty template has no last token of its own.
+        let end = if self.cur().start > start { self.prev_end().max(start) } else { start };
+        self.expect(&close, if kind == CodeKind::Expr { "`)`" } else { "`}`" })?;
 
         let mut pieces = Vec::new();
         let mut exprs = Vec::new();
         let mut at = start;
-        for (s, e, expr) in holes {
+        for (s, e, expr, hole) in holes {
             pieces.push(self.src[at..s].to_string());
-            exprs.push(expr);
+            exprs.push((hole, expr));
             at = e;
         }
         pieces.push(self.src[at..end].to_string());
-        Ok(ExprKind::Quote(pieces, exprs))
+        Ok(ExprKind::Quote(kind, pieces, exprs))
     }
 
     /// `("line", "line", out(reg) T, in("rdi") x, clobber("rcx", "memory"))`
@@ -980,7 +1080,7 @@ mod tests {
             .unwrap();
         assert!(p.funcs[0].is_macro && !p.funcs[1].is_macro);
         let Stmt::Return { value: Some(q), .. } = &p.funcs[0].body.stmts[0] else { panic!() };
-        let ExprKind::Quote(pieces, holes) = &q.kind else { panic!() };
+        let ExprKind::Quote(CodeKind::Expr, pieces, holes) = &q.kind else { panic!() };
         assert_eq!(pieces, &["", " + ", " * 2"]);
         assert_eq!(holes.len(), 2);
         let Stmt::Let { value, .. } = &p.funcs[1].body.stmts[0] else { panic!() };
@@ -993,6 +1093,35 @@ mod tests {
         assert!(parse("macro m() -> expr { return quote(quote(1)) }").unwrap_err().msg.contains("cannot be nested"));
         assert!(parse("macro m() -> expr { return quote(1 +) }").is_err());
         assert_eq!(parse_expr("(1) * (2)").unwrap().pos, Pos::new(1, 5));
+    }
+
+    #[test]
+    fn statement_and_item_quotes() {
+        let p = parse(
+            "macro m(a: expr, body: stmts, name: str) -> items {\n\
+             let s = quote {\n  let t = $a\n  $body\n  $a = t\n}\n\
+             let e = quote {}\n\
+             return quote items {\n  $prev\n  pub fn $name() -> i64 { $body\n return $a }\n}\n}\n\
+             m!(x, y, \"f\")\nother.m!(1)",
+        )
+        .unwrap();
+        let stmts = &p.funcs[0].body.stmts;
+        let Stmt::Let { value, .. } = &stmts[0] else { panic!() };
+        let ExprKind::Quote(CodeKind::Stmts, pieces, holes) = &value.kind else { panic!("{value:?}") };
+        let kinds: Vec<HoleKind> = holes.iter().map(|h| h.0).collect();
+        assert_eq!(kinds, [HoleKind::Expr, HoleKind::Stmts, HoleKind::Expr]);
+        assert_eq!(pieces[0], "let t = "); // from the first token
+        let Stmt::Let { value, .. } = &stmts[1] else { panic!() };
+        assert!(matches!(&value.kind, ExprKind::Quote(CodeKind::Stmts, p, h) if p == &[""] && h.is_empty()));
+        let Stmt::Return { value: Some(v), .. } = &stmts[2] else { panic!() };
+        let ExprKind::Quote(CodeKind::Items, _, holes) = &v.kind else { panic!() };
+        let kinds: Vec<HoleKind> = holes.iter().map(|h| h.0).collect();
+        assert_eq!(kinds, [HoleKind::Items, HoleKind::Ident, HoleKind::Stmts, HoleKind::Expr]);
+        assert_eq!(p.macro_calls.len(), 2);
+        assert_eq!(p.macro_calls[1].name, "other.m");
+        assert_eq!(parse_stmts("let a = 1\nb = a").unwrap().len(), 2);
+        assert_eq!(parse_items("pub fn f() {}\nstruct S { x: i64 }").unwrap().funcs.len(), 1);
+        assert!(parse_items("import x").is_err());
     }
 
     #[test]

@@ -131,7 +131,7 @@ impl Env<'_> {
             (Value::Unit, Type::Unit) => ConstValue::Unit,
             (Value::Int(n), Type::Int(_)) => ConstValue::Int(n),
             (Value::Bool(b), Type::Bool) => ConstValue::Bool(b),
-            (Value::Str(r), Type::Str | Type::Expr) => ConstValue::Str(heap.str(r).to_string()),
+            (Value::Str(r), t) if *t == Type::Str || t.is_code() => ConstValue::Str(heap.str(r).to_string()),
             (Value::Agg(r), Type::Struct(_)) => {
                 let fields = heap.items(r).to_vec();
                 let tys: Vec<Type> = (0..fields.len() as u32).map(|i| self.field_type(ty, i)).collect();

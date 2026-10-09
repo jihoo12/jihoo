@@ -1,0 +1,42 @@
+// Statement and item macros generate ordinary code, so both backends see the same.
+
+struct Acc {
+    total: i64
+}
+
+macro unrolled_sum(xs: expr, n: i64) -> stmts {
+    let body = quote {}
+    let i = 0
+    while i < n {
+        body = quote {
+            $body
+            acc.total = acc.total + $xs[$i]
+        }
+        i = i + 1
+    }
+    return quote {
+        let acc = Acc { total: 0 }
+        $body
+    }
+}
+
+macro scale_fns(count: i64) -> items {
+    let out = quote items {}
+    let i = 1
+    while i <= count {
+        out = quote items {
+            $out
+            fn $("scale" + stringify(quote($i)))(x: i64) -> i64 { return x * $i }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+scale_fns!(4)
+
+fn entry() -> i64 {
+    let xs = [3, 1, 4, 1, 5]
+    unrolled_sum!(xs, 5)                      // acc.total = 14
+    return acc.total + scale1(1) + scale2(10) + scale4(25)   // 14 + 1 + 20 + 100 = 135
+}

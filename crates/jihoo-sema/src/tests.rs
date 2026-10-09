@@ -693,3 +693,59 @@ fn private_items_stay_in_their_module() {
         assert!(e.contains(what), "{use_}: {e}");
     }
 }
+
+// ---- statement and item macros ----
+
+#[test]
+fn statement_macros_add_statements_to_the_block() {
+    let src = "macro swap(a: expr, b: expr) -> stmts {\n  return quote {\n    let tmp = $a\n    $a = $b\n    $b = tmp\n  }\n}\n\
+               macro repeat(n: i64, body: expr) -> stmts {\n  let out = quote {}\n  let i = 0\n  while i < n {\n    out = quote {\n      $out\n      $body\n    }\n    i = i + 1\n  }\n  return out\n}\n\
+               fn main() {\n  let x = 1\n  let y = 2\n  swap!(x, y)\n  print(x * 10 + y)\n  swap!(x, y)\n  repeat!(3, print(x))\n}";
+    assert_eq!(run(src), "21\n1\n1\n1\n");
+    // The declarations a statement macro makes are visible after it.
+    let src = "macro define(name: str, v: i64) -> stmts { return quote { let $name = $v } }\n\
+               fn main() {\n  define!(\"answer\", 42)\n  print(answer)\n}";
+    assert_eq!(run(src), "42\n");
+}
+
+#[test]
+fn item_macros_define_functions_and_types() {
+    let src = "macro adders(n: i64) -> items {\n  let out = quote items {}\n  let i = 1\n  while i <= n {\n    out = quote items {\n      $out\n      fn $(\"add\" + stringify(quote($i)))(x: i64) -> i64 { return x + $i }\n    }\n    i = i + 1\n  }\n  return out\n}\n\
+               macro point_type(name: str) -> items { return quote items { struct $name { x: i64, y: i64 } } }\n\
+               adders!(3)\npoint_type!(\"P\")\n\
+               fn main() {\n  let p = P { x: add1(0), y: add3(10) }\n  print(p.x + p.y + add2(0))\n}";
+    assert_eq!(run(src), "16\n");
+    // Item macros can produce item macro calls, expanded in a later round.
+    let src = "macro make_one() -> items { return quote items { fn one() -> i64 { return 1 } } }\n\
+               macro both() -> items { return quote items {\n  make_one!()\n  fn two() -> i64 { return one() + 1 }\n} }\n\
+               both!()\nfn main() { print(two()) }";
+    assert_eq!(run(src), "2\n");
+}
+
+#[test]
+fn item_macros_across_modules() {
+    let m = check_files(&[
+        ("main.jh", "import gen\ngen.getter!(\"seven\", 7)\nfn main() { print(seven()) }"),
+        ("gen.jh", "pub macro getter(name: str, v: i64) -> items { return quote items { fn $name() -> i64 { return $v } } }"),
+    ])
+    .unwrap();
+    // The produced function belongs to the module that called the macro.
+    assert!(m.func("seven").is_some(), "{m}");
+}
+
+#[test]
+fn statement_and_item_macro_errors() {
+    let swap = "macro s() -> stmts { return quote { let a = 1 } }\n";
+    assert!(err(&format!("{swap}fn main() {{ let x = s!() }}")).contains("produces stmts, so use it on a line of its own"));
+    assert!(err(&format!("{swap}s!()\nfn main() {{}}")).contains("only `items` macros can be used at the top level"));
+    let e = err("macro m() -> items { return quote items { fn $(\"no way\")() {} } }\nm!()\nfn main() {}");
+    assert!(e.contains("`no way` is not a valid name"), "{e}");
+    let e = err("macro m(x: expr) -> stmts { return quote { $(quote items {}) } }\nfn main() { m!(1) }");
+    assert!(e.contains("this hole needs `stmts` or `expr`, not items"), "{e}");
+    let e = err("macro m() -> items { return quote items { m!() } }\nm!()\nfn main() {}");
+    assert!(e.contains("after 16 rounds"), "{e}");
+    // Errors inside produced items point at the call.
+    let e = err("macro m() -> items { return quote items { fn f() -> i64 { return true } } }\nm!()\nfn main() {}");
+    assert!(e.starts_with("2:1:"), "{e}");
+    assert!(err("fn f(x: stmts) {}\nfn main() {}").contains("only available in macros"));
+}

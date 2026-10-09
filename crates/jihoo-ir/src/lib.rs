@@ -204,10 +204,23 @@ pub enum Inst {
     /// LLVM constraint string with one input entry per register in `args`. `dst`
     /// is the output, or `unit`.
     Asm { dst: Reg, template: String, constraints: String, args: Vec<Reg> },
-    /// Compile time only (macros): builds an `expr` from template text and holes.
-    /// `pieces.len() == holes.len() + 1`. An `expr` hole is inserted in
-    /// parentheses, other values as literals.
-    Quote { dst: Reg, pieces: Vec<String>, holes: Vec<Reg> },
+    /// Compile time only (macros): builds code (`expr`, `stmts` or `items`, by the
+    /// type of `dst`) from template text and holes, with
+    /// `pieces.len() == holes.len() + 1`. `kinds` says where each hole sits.
+    Quote { dst: Reg, pieces: Vec<String>, holes: Vec<Reg>, kinds: Vec<HoleKind> },
+}
+
+/// Where a hole of a `quote` sits, which decides how its value is inserted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoleKind {
+    /// An expression: code in parentheses, other values as literals.
+    Expr,
+    /// A name: a `str` (or `expr`) that must be an identifier, inserted as is.
+    Ident,
+    /// A statement of its own: `stmts` or `expr` code.
+    Stmts,
+    /// An item of its own: `items` code.
+    Items,
 }
 
 #[derive(Debug, Clone)]

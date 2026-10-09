@@ -64,6 +64,12 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
         }
     }
 
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    let expanded = expand_item_macros(profile, mods)?;
+    let mods = &expanded[..];
+
     let (env, name_errors) = Env::new(profile, mods);
     errors.extend(name_errors);
     if !errors.is_empty() {
@@ -153,6 +159,68 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
         errors.retain(|e| seen.insert((e.pos, e.msg.clone())));
         Err(errors)
     }
+}
+
+/// Bound on rounds of item macro expansion (an expansion may call item macros).
+const MAX_ITEM_ROUNDS: usize = 16;
+
+/// Replaces every top-level `name!(...)` with the items the macro returns.
+///
+/// Each round analyzes the program as it is (lazily, so only what the macros
+/// need), runs every item macro, and adds the produced items to the calling
+/// module. Produced items may call item macros themselves, which the next round
+/// expands.
+fn expand_item_macros(profile: Profile, mods: &[Module]) -> Result<Vec<Module>, Vec<Error>> {
+    let mut mods = mods.to_vec();
+    for _ in 0..MAX_ITEM_ROUNDS {
+        if mods.iter().all(|m| m.program.macro_calls.is_empty()) {
+            return Ok(mods);
+        }
+        let mut produced = Vec::new();
+        let mut errors = Vec::new();
+        {
+            let (env, name_errors) = Env::new(profile, &mods);
+            if !name_errors.is_empty() {
+                return Err(name_errors);
+            }
+            for (m, module) in mods.iter().enumerate() {
+                for call in &module.program.macro_calls {
+                    let sig = Rc::new(Sig { params: vec![], ret: Type::Unit });
+                    let mut cx = FnCx::new(&env, sig, env.root(m).clone());
+                    let items = cx.expand_code(call.pos, &call.name, &call.args).and_then(|(kind, code)| {
+                        if kind != Type::Items {
+                            let msg = format!("`{}!` produces {kind}; only `items` macros can be used at the top level", call.name);
+                            return Err(Error::new(call.pos, msg));
+                        }
+                        let mut p = jihoo_syntax::parse_items(&code).map_err(|e| {
+                            Error::new(call.pos, format!("`{}!` produced code that does not parse: {} in `{code}`", call.name, e.msg))
+                        })?;
+                        set_program_pos(&mut p, call.pos);
+                        Ok(p)
+                    });
+                    match items {
+                        Ok(p) => produced.push((m, p)),
+                        Err(e) => errors.push(e),
+                    }
+                }
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        for m in &mut mods {
+            m.program.macro_calls.clear();
+        }
+        for (m, p) in produced {
+            let prog = &mut mods[m].program;
+            prog.structs.extend(p.structs);
+            prog.consts.extend(p.consts);
+            prog.funcs.extend(p.funcs);
+            prog.macro_calls.extend(p.macro_calls);
+        }
+    }
+    let pos = mods.iter().flat_map(|m| &m.program.macro_calls).map(|c| c.pos).next().unwrap_or_default();
+    Err(vec![Error::new(pos, format!("item macros still produce item macros after {MAX_ITEM_ROUNDS} rounds"))])
 }
 
 fn is_builtin(name: &str) -> bool {
@@ -512,6 +580,12 @@ impl<'a> FnCx<'a> {
 
                 self.switch_to(end_bb);
             }
+            // A statement macro adds its statements to this block.
+            Stmt::Expr(Expr { pos, kind: ExprKind::MacroCall(name, args) })
+                if self.macro_kind(name) == Some(Type::Stmts) =>
+            {
+                self.macro_stmts(*pos, name, args)?;
+            }
             Stmt::Expr(e) => {
                 self.expr(e, None)?;
             }
@@ -539,7 +613,7 @@ impl<'a> FnCx<'a> {
             ExprKind::Var(name) => self.var(e.pos, name)?,
             ExprKind::Asm(a) => self.inline_asm(e.pos, a)?,
             ExprKind::MacroCall(name, args) => self.macro_call(e.pos, name, args, expected)?,
-            ExprKind::Quote(pieces, holes) => self.quote(e.pos, pieces, holes)?,
+            ExprKind::Quote(kind, pieces, holes) => self.quote(e.pos, *kind, pieces, holes)?,
             ExprKind::Hole(_) => unreachable!("holes only exist inside quote templates"),
             ExprKind::Comptime(inner) => {
                 let (ty, v) = self.env.comptime(inner, expected, &self.bindings)?;
