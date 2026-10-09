@@ -529,6 +529,32 @@ fn enum_errors() {
     assert!(err("struct E { x: i64 }\nenum E { A }\nfn main() {}").contains("type `E` is defined twice"));
 }
 
+// ---- refs ----
+
+#[test]
+fn refs() {
+    let m = check(
+        "enum List(T: type) { Cons(T, ref List(T)), Nil }\n\
+         struct P { x: i64 }\n\
+         fn sum(l: List(i64)) -> i64 {\n match l {\n Cons(x, rest) => return x + sum(*rest)\n Nil => return 0\n }\n}\n\
+         fn main() { let l = List.Cons(1, ref List.Cons(2, ref List.Nil))\n let p = ref P { x: 3 }\n print(sum(l) + p.x) }",
+    )
+    .unwrap();
+    let text = m.to_string();
+    // A ref breaks the cycle, and a type holding a ref has no fixed layout.
+    assert!(text.contains("enum $\"List(i64)\" { Cons(i64, ref $\"List(i64)\"), Nil }\n"), "{text}");
+    assert!(text.contains("= ref %") && text.contains("= deref %"), "{text}");
+
+    let e = err("struct P { x: i64 }\nfn main() { let p = ref P { x: 1 }\n p.x = 2 }");
+    assert!(e.contains("cannot assign to a value behind a `ref`"), "{e}");
+    assert!(err("fn main() { let r = ref 1\n *r = 2 }").contains("behind a `ref`"));
+    assert!(err("fn main() { let r = ref 1\n print(r == r) }").contains("cannot apply `==`"));
+    assert!(err(&fs("fn f() { let r = ref 1 }")).contains("only available in hosted mode"));
+    assert!(err(&fs("fn f(r: ref i64) {}")).contains("use a pointer (`*T`)"));
+    assert!(err("fn main() { let r = ref [1, 2]\n r[0] = 5 }").contains("behind a `ref`"));
+    assert!(err("fn main() { let x = 1\n let r = ref x\n print(r + 1) }").contains("cannot apply `+` to ref i64 and i64"));
+}
+
 // ---- inline asm ----
 
 #[test]

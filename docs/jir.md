@@ -83,6 +83,7 @@ It takes no parameters and returns `unit` or `i64`.
 | `expr`, `stmts`, `items` | code, inside macros; compile time only | —        |
 | `[N x T]`         | array of `N` `T`s, by value              | `[N x T]`     |
 | `fn(T, ...) -> R` | function value                           | `ptr`         |
+| `ref T`           | immutable GC reference to a `T`, hosted only | —         |
 
 `str` and `*T` are deliberately separate: GC references and raw pointers must never
 mix. That separation is what will later allow GC-enabled native builds.
@@ -194,6 +195,16 @@ The result type is what the destination register must be declared as.
 | `%d = variant K(%a, %b, ...)`       | the payload of variant K | the enum (type of `%d`) | build variant K |
 | `%d = tag %e`                       | an enum               | `u32`  | the index of the variant `%e` holds |
 | `%d = payload %e, K, N`             | an enum               | type of value N of variant K | read a payload value; `%e` must hold variant K (the VM checks; natively it is undefined) |
+
+### References (hosted only)
+
+| syntax                              | operands              | result | meaning |
+|-------------------------------------|-----------------------|--------|---------|
+| `%d = ref %v`                       | `T`                   | `ref T` | a new reference to a copy of `%v` |
+| `%d = deref %r`                     | `ref T`               | `T`    | the value `%r` refers to |
+
+A `ref` field breaks the rule that a struct or enum may not contain itself.
+Types containing a `ref` have no fixed layout, like those containing `str`.
 
 ### Arrays
 

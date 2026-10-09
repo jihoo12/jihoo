@@ -251,6 +251,15 @@ impl<'p> Env<'p> {
             TypeExprKind::Array(elem, n) => {
                 Ok(Type::array(self.resolve_in(elem, b, in_macro)?, self.array_len(n, b)?))
             }
+            TypeExprKind::Ref(inner) => {
+                if self.profile != Profile::Hosted && !in_macro {
+                    return Err(Error::new(
+                        t.pos,
+                        "`ref` types are garbage collected and only available in hosted mode; use a pointer (`*T`)",
+                    ));
+                }
+                Ok(Type::Ref(Box::new(self.resolve_in(inner, b, in_macro)?)))
+            }
             TypeExprKind::Fn(params, ret) => {
                 let params = params.iter().map(|p| self.resolve_in(p, b, in_macro)).collect::<Result<_, _>>()?;
                 let ret = match ret {

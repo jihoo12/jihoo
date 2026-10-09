@@ -75,7 +75,7 @@ impl Cx<'_> {
                 Err(format!("unknown struct `${name}`"))
             }
             Type::Enum(name) if !self.enums.contains_key(name.as_str()) => Err(format!("unknown enum `${name}`")),
-            Type::Ptr(inner) | Type::Array(inner, _) => self.check_type(inner),
+            Type::Ptr(inner) | Type::Array(inner, _) | Type::Ref(inner) => self.check_type(inner),
             Type::Fn(params, ret) => params.iter().chain([&**ret]).try_for_each(|t| self.check_type(t)),
             _ => Ok(()),
         }
@@ -237,6 +237,17 @@ impl Cx<'_> {
                             fields.iter().zip(payload).try_for_each(|(r, t)| expect(r, t))
                         }
                     }
+                    Inst::Ref { dst, src } => {
+                        if profile != Profile::Hosted {
+                            Err("`ref` needs the GC and is only available in hosted mode".into())
+                        } else {
+                            expect(dst, &Type::Ref(Box::new(ty(src)?.clone())))
+                        }
+                    }
+                    Inst::Deref { dst, src } => match ty(src)? {
+                        Type::Ref(inner) => expect(dst, inner),
+                        t => Err(format!("`deref` needs a ref, found {}", t.jir())),
+                    },
                     Inst::Tag { dst, src } => match ty(src)? {
                         Type::Enum(_) => expect(dst, &Type::Int(IntTy::U32)),
                         t => Err(format!("`tag` needs an enum, found {}", t.jir())),

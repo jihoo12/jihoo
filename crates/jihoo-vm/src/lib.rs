@@ -296,6 +296,15 @@ impl<'m> Vm<'m> {
                 let r = self.alloc_agg(values);
                 self.set(*dst, Value::Agg(r));
             }
+            // A ref is a one-element aggregate: immutable, like every heap object.
+            Inst::Ref { dst, src } => {
+                let r = self.alloc_agg(vec![self.get(*src)]);
+                self.set(*dst, Value::Agg(r));
+            }
+            Inst::Deref { dst, src } => {
+                let v = self.heap.items(self.agg_ref(*src)?)[0];
+                self.set(*dst, v);
+            }
             Inst::Tag { dst, src } => {
                 let tag = self.heap.items(self.agg_ref(*src)?)[0];
                 self.set(*dst, tag);
@@ -800,6 +809,39 @@ fn main() {
         let Value::Str(r) = vm.call_named("join", &[a, b], &mut Vec::new()).unwrap() else { panic!() };
         assert_eq!(vm.heap().str(r), "left right");
         assert!(vm.heap().stats().collections >= 2);
+    }
+
+    #[test]
+    fn lists_survive_stress_collection() {
+        // Each cell is only reachable through the cell after it.
+        let src = "
+enum List { Cons(i64, ref List), Nil }
+fn main() {
+    let l = List.Nil
+    let i = 0
+    while i < 300 {
+        l = List.Cons(i, ref l)
+        i = i + 1
+    }
+    let total = 0
+    let done = false
+    while !done {
+        match l {
+            Cons(x, rest) => {
+                total = total + x
+                l = *rest
+            }
+            Nil => done = true
+        }
+    }
+    print(total)
+}";
+        let m = compile(src);
+        let mut vm = Vm::new(&m);
+        vm.heap_mut().set_stress(true);
+        let mut out = Vec::new();
+        vm.run_main(&mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "44850\n");
     }
 
     #[test]

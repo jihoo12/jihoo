@@ -103,6 +103,8 @@ impl Display for Inst {
             Inst::FieldPtr { dst, ptr, index } => write!(f, "{dst} = fieldptr {ptr}, {index}"),
             Inst::Variant { dst, index, fields } => write!(f, "{dst} = variant {index}({})", list(fields)),
             Inst::Tag { dst, src } => write!(f, "{dst} = tag {src}"),
+            Inst::Ref { dst, src } => write!(f, "{dst} = ref {src}"),
+            Inst::Deref { dst, src } => write!(f, "{dst} = deref {src}"),
             Inst::Payload { dst, src, variant, index } => write!(f, "{dst} = payload {src}, {variant}, {index}"),
             Inst::Array { dst, items } => write!(f, "{dst} = array({})", list(items)),
             Inst::Splat { dst, value } => write!(f, "{dst} = splat {value}"),

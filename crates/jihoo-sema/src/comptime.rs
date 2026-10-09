@@ -147,6 +147,12 @@ impl Env<'_> {
                 ConstValue::Agg(items.collect::<Result<_, _>>()?)
             }
             (Value::Func(i), Type::Fn(..)) => ConstValue::Func(vm.func_name(i).to_string()),
+            // A ref becomes a one-element aggregate; sharing is not kept, which
+            // cannot be observed since refs are immutable.
+            (Value::Agg(r), Type::Ref(inner)) => {
+                let v = heap.items(r)[0];
+                ConstValue::Agg(vec![self.to_const(pos, v, inner, vm)?])
+            }
             (Value::Agg(r), Type::Enum(_)) => {
                 let items = heap.items(r).to_vec();
                 let Value::Int(tag) = items[0] else { unreachable!("enum without a tag") };
@@ -197,6 +203,10 @@ impl FnCx<'_> {
                     })
                     .collect();
                 self.emit_to(ty.clone(), |dst| Inst::Struct { dst, name: name.clone(), fields })
+            }
+            (Type::Ref(inner), ConstValue::Agg(items)) => {
+                let src = self.splice(inner, &items[0]);
+                self.emit_to(ty.clone(), |dst| Inst::Ref { dst, src })
             }
             (Type::Enum(_), ConstValue::Agg(items)) => {
                 let ConstValue::Int(tag) = items[0] else { unreachable!("enum without a tag") };

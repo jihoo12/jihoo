@@ -381,6 +381,10 @@ impl Parser {
             let inner = self.type_expr()?;
             return Ok(TypeExpr { pos, kind: TypeExprKind::Ptr(Box::new(inner)) });
         }
+        if self.eat(&Tok::Ref) {
+            let inner = self.type_expr()?;
+            return Ok(TypeExpr { pos, kind: TypeExprKind::Ref(Box::new(inner)) });
+        }
         if self.eat(&Tok::LBracket) {
             let elem = self.type_expr()?;
             self.expect(&Tok::Semi, "`;` and an array length")?;
@@ -620,6 +624,7 @@ impl Parser {
             Tok::Bang => |e| ExprKind::Unary(UnOp::Not, e),
             Tok::Star => ExprKind::Deref,
             Tok::Amp => ExprKind::AddrOf,
+            Tok::Ref => ExprKind::NewRef,
             Tok::Comptime => ExprKind::Comptime,
             _ => return self.postfix(),
         };
@@ -946,6 +951,7 @@ fn punct(t: &Tok) -> &'static str {
         Tok::Struct => "struct",
         Tok::Enum => "enum",
         Tok::Match => "match",
+        Tok::Ref => "ref",
         Tok::FatArrow => "=>",
         Tok::As => "as",
         Tok::Const => "const",

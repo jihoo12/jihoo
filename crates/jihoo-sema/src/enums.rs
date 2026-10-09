@@ -80,13 +80,33 @@ impl FnCx<'_> {
                     (t.clone(), None)
                 }
                 _ => {
-                    // Evaluate the payload first: its types decide the instance.
-                    let regs = args
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|a| self.expr(a, None))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    (self.infer_enum(pos, &key, variant, &regs)?, Some(regs))
+                    // Evaluate the payload in order. Once the values so far decide
+                    // the instance, the rest get its payload types as hints, so
+                    // `List.Cons(1, ref List.Nil)` works.
+                    let args = args.unwrap_or_default();
+                    let mut regs = Vec::with_capacity(args.len());
+                    let mut found: Result<Type, String> = Err(String::new());
+                    for (i, a) in args.iter().enumerate() {
+                        let hint = match &found {
+                            Ok(t) => self.payload_hint(t, variant, i)?,
+                            Err(_) => None,
+                        };
+                        regs.push(self.expr(a, hint.as_ref())?);
+                        if found.is_err() {
+                            found = self.infer_enum(pos, &key, variant, &regs)?;
+                        }
+                    }
+                    if args.is_empty() {
+                        found = self.infer_enum(pos, &key, variant, &regs)?;
+                    }
+                    let ty = found.map_err(|param| {
+                        let name = &self.env.type_decl(&key).unwrap().1.name;
+                        let msg = format!(
+                            "cannot infer `{param}` of `{name}` here; write `{name}(...).{variant}` or give the value a type"
+                        );
+                        Error::new(pos, msg)
+                    })?;
+                    (ty, Some(regs))
                 }
             },
         };
@@ -121,10 +141,11 @@ impl FnCx<'_> {
         Ok(self.emit_to(ty.clone(), |dst| Inst::Variant { dst, index: index as u32, fields }))
     }
 
-    /// The instance of generic enum `key` that variant `variant` with payload
-    /// `regs` belongs to: each type parameter is the type of a payload value
-    /// declared as exactly that parameter.
-    fn infer_enum(&self, pos: Pos, key: &str, variant: &str, regs: &[Reg]) -> Result<Type, Error> {
+    /// The instance of generic enum `key` that variant `variant` with the first
+    /// payload values `regs` belongs to: each type parameter is the type of a
+    /// payload value declared as exactly that parameter. `Err` names a
+    /// parameter that these values do not decide.
+    fn infer_enum(&self, pos: Pos, key: &str, variant: &str, regs: &[Reg]) -> Result<Result<Type, String>, Error> {
         let (_, decl) = self.env.type_decl(key).unwrap();
         let name = &decl.name;
         let Some(v) = decl.variants.iter().flatten().find(|v| v.name == variant) else {
@@ -135,16 +156,18 @@ impl FnCx<'_> {
             let found = v.fields.iter().zip(regs).find(|(t, _)| matches!(&t.kind, TypeExprKind::Named(n) if *n == p.name));
             match found {
                 Some((_, r)) if is_type_param(p) => args.push(self.ty(*r).clone()),
-                _ => {
-                    let msg = format!(
-                        "cannot infer `{}` of `{name}` here; write `{name}(...).{variant}` or give the value a type",
-                        p.name
-                    );
-                    return Err(Error::new(pos, msg));
-                }
+                _ => return Ok(Err(p.name.clone())),
             }
         }
-        Ok(self.env.instance_of(key, args))
+        Ok(Ok(self.env.instance_of(key, args)))
+    }
+
+    /// The type of payload value `i` of variant `variant` of enum type `t`, if
+    /// there is one.
+    fn payload_hint(&self, t: &Type, variant: &str, i: usize) -> Result<Option<Type>, Error> {
+        let Type::Enum(name) = t else { return Ok(None) };
+        let variants = self.env.enum_variants(Pos::default(), name)?;
+        Ok(variants.iter().find(|(n, _)| n == variant).and_then(|(_, ts)| ts.get(i).cloned()))
     }
 
     /// `match value { pattern => body ... }`.

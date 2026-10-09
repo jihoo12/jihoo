@@ -100,11 +100,12 @@ pub(crate) fn is_type_param(p: &Param) -> bool {
 }
 
 /// Reads an argument written in expression syntax as a type: `u8`, `*u8` (a
-/// dereference) and `[u8; 4]` (an array repeat) all parse as expressions.
+/// dereference), `ref u8` and `[u8; 4]` (an array repeat) all parse as expressions.
 fn expr_to_type(e: &Expr) -> Result<TypeExpr, Error> {
     let kind = match &e.kind {
         ExprKind::Var(n) => TypeExprKind::Named(n.clone()),
         ExprKind::Deref(inner) => TypeExprKind::Ptr(Box::new(expr_to_type(inner)?)),
+        ExprKind::NewRef(inner) => TypeExprKind::Ref(Box::new(expr_to_type(inner)?)),
         ExprKind::ArrayRepeat(elem, n) => TypeExprKind::Array(Box::new(expr_to_type(elem)?), n.clone()),
         // `Pair(u8)` parses as a call.
         ExprKind::Call(name, args) => TypeExprKind::Generic(name.clone(), args.clone()),

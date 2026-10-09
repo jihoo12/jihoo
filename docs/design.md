@@ -54,9 +54,9 @@ fn area(w: i64, h: i64) -> i64 {   // signatures are written out
 ```
 
 - Types: `unit`, `bool`, `i8`…`i64`, `u8`…`u64`, structs, enums, arrays, function types
-  `fn(A, B) -> R`, plus `str` (hosted only, garbage collected) and `*T`
-  (freestanding only, raw pointer). A string literal is a `str` when hosted and a
-  `*u8` to constant bytes when freestanding.
+  `fn(A, B) -> R`, plus `str` and `ref T` (hosted only, garbage collected) and
+  `*T` (freestanding only, raw pointer). A string literal is a `str` when hosted
+  and a `*u8` to constant bytes when freestanding.
 - Bitwise operators `&`, `|`, `^`, `<<`, `>>` work on integers, and `!` flips
   every bit of an integer. `>>` is arithmetic for signed types and logical for
   unsigned ones; shift amounts are taken modulo the bit width, so `x << 64` on an
@@ -345,9 +345,40 @@ return Option.Some(i)                // ... or from the payload, or the return t
   a `u32` tag followed by a union of the payloads (`size_of(Shape)` is 24); on
   the VM it is a GC object.
 - Not yet: nested patterns, guards, `match` as an expression, and equality on
-  enums. Recursive enums (`enum List { Cons(i64, List), Nil }`) need a reference
-  type; for now freestanding code uses pointers, and hosted code cannot build
-  them yet.
+  enums. A type cannot contain itself by value; recursive data goes through a
+  `ref` (hosted) or a pointer (freestanding).
+
+## References
+
+```jihoo
+enum List(T: type) {
+    Cons(T, ref List(T))
+    Nil
+}
+
+fn sum(l: List(i64)) -> i64 {
+    match l {
+        Cons(x, rest) => return x + sum(*rest)
+        Nil => return 0
+    }
+}
+
+let l = List.Cons(1, ref List.Cons(2, ref List.Nil))
+let p = ref Point { x: 1, y: 2 }
+print(p.x)                     // fields and elements read through a ref
+```
+
+- `ref T` is an immutable reference to a `T` on the GC heap. `ref e` makes one
+  holding a copy of `e`; `*r` is the value, and `r.x` and `r[i]` read through it.
+- Refs are immutable: `*r = v` and `r.x = v` are errors. So a value shared
+  through refs behaves exactly as if it had been copied, and jihoo keeps its
+  value semantics; a new version is built from the parts that change and refs
+  to the parts that do not (see `examples/lists.jh`). There is no `==` on refs.
+- A `ref` breaks the rule that a type cannot contain itself, which is what makes
+  lists and trees possible.
+- Hosted only, like `str`: the GC owns the value. Freestanding code uses
+  pointers. On the VM a ref is a one-element heap object; in JIR it is `ref T`,
+  with `ref` and `deref` instructions.
 
 ## Macros
 
@@ -507,8 +538,8 @@ free of LLVM.
    Automatic hygiene; field visibility.
 6. ~~GC hardening (one root set, generation-checked references, stress mode);
    function values.~~
-7. ~~Sum types and `match`.~~ Nested patterns, `match` expressions, and a GC
-   reference type in hosted code for recursive data (lists, trees).
+7. ~~Sum types and `match`; `ref T` for recursive data.~~ Nested patterns and
+   `match` expressions.
 8. Closures, lowered in the frontend to a function plus a struct of captured
    values (captured by value, like every other value in jihoo).
 9. Goroutine-like tasks and channels on the VM: one OS thread, a deterministic

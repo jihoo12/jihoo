@@ -216,6 +216,10 @@ pub enum Inst {
     Tag { dst: Reg, src: Reg },
     /// Payload value `index` of enum value `src`, which must be variant `variant`.
     Payload { dst: Reg, src: Reg, variant: u32, index: u32 },
+    /// Hosted only: a new `ref T` holding a copy of `src`.
+    Ref { dst: Reg, src: Reg },
+    /// Hosted only: the value `ref T` `src` refers to.
+    Deref { dst: Reg, src: Reg },
     /// Builds an array from all of its elements.
     Array { dst: Reg, items: Vec<Reg> },
     /// An array with every element set to `value`.

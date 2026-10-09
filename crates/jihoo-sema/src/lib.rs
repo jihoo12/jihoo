@@ -773,6 +773,18 @@ impl<'a> FnCx<'a> {
                 let place = self.place(e)?;
                 self.read(place)
             }
+            ExprKind::NewRef(inner) => {
+                if self.profile() != Profile::Hosted && !self.in_macro {
+                    return Err(Error::new(e.pos, "`ref` allocates on the GC heap; it is only available in hosted mode"));
+                }
+                let hint = match expected {
+                    Some(Type::Ref(t)) => Some(&**t),
+                    _ => None,
+                };
+                let src = self.expr(inner, hint)?;
+                let ty = Type::Ref(Box::new(self.ty(src).clone()));
+                self.emit_to(ty, |dst| Inst::Ref { dst, src })
+            }
             ExprKind::AddrOf(inner) => {
                 if self.profile() != Profile::Freestanding {
                     return Err(Error::new(e.pos, "`&` makes a pointer; pointers are only available in freestanding mode"));

@@ -6,12 +6,16 @@
 //!   `setfield`/`setelem`, innermost first.
 //! - A *memory place* is a pointer (`*p`, `p[i]`, `p.x` where `p: *Struct`).
 //!   Writing it is a `store`; fields and elements use `fieldptr`/`elemptr`.
+//! - What a `ref` refers to (`*r`, `r.x`, `r[i]`) is a register place holding
+//!   the value read through the ref. It cannot be written: refs are immutable.
 
 use jihoo_ir::{BinOp, Inst, Reg, Type};
 use jihoo_syntax::ast::{Expr, ExprKind};
 use jihoo_syntax::{Error, Pos};
 
 use crate::FnCx;
+
+const BEHIND_REF: &str = "a value behind a `ref` (refs are immutable; build a new value and a new ref instead)";
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Step {
@@ -25,8 +29,9 @@ pub(crate) enum Place {
         root: Reg,
         path: Vec<Step>,
         ty: Type,
-        /// False for temporaries such as `f().x`.
-        assignable: bool,
+        /// What the place is, if it cannot be written: "a temporary value" for
+        /// `f().x`, for example. `None` for variables.
+        readonly: Option<&'static str>,
     },
     Mem {
         /// Pointer to the place.
@@ -56,9 +61,9 @@ impl FnCx<'_> {
     /// Extends `base` (whose type is a struct or array) by `step`.
     fn step(&mut self, base: Place, step: Step, ty: Type) -> Place {
         match base {
-            Place::Reg { root, mut path, assignable, .. } => {
+            Place::Reg { root, mut path, readonly, .. } => {
                 path.push(step);
-                Place::Reg { root, path, ty, assignable }
+                Place::Reg { root, path, ty, readonly }
             }
             Place::Mem { ptr, .. } => self.step_ptr(ptr, step, ty),
         }
@@ -78,7 +83,7 @@ impl FnCx<'_> {
         match &e.kind {
             ExprKind::Var(name) if self.local(name).is_some() => {
                 let root = self.lookup(e.pos, name)?;
-                Ok(Place::Reg { root, path: vec![], ty: self.ty(root).clone(), assignable: true })
+                Ok(Place::Reg { root, path: vec![], ty: self.ty(root).clone(), readonly: None })
             }
             // `alias.CONST`: a constant of an imported module.
             ExprKind::Field(base, item)
@@ -86,7 +91,7 @@ impl FnCx<'_> {
             {
                 let ExprKind::Var(alias) = &base.kind else { unreachable!() };
                 let root = self.var(e.pos, &format!("{alias}.{item}"))?;
-                Ok(Place::Reg { root, path: vec![], ty: self.ty(root).clone(), assignable: false })
+                Ok(Place::Reg { root, path: vec![], ty: self.ty(root).clone(), readonly: Some("a constant") })
             }
             ExprKind::Field(base, name) => {
                 let base = self.place(base)?;
@@ -100,6 +105,12 @@ impl FnCx<'_> {
                         let (index, fty) = self.env.field(e.pos, &inner, name)?;
                         let ptr = self.read(base);
                         Ok(self.step_ptr(ptr, Step::Field(index), fty))
+                    }
+                    // `r.x` with `r: ref Struct` reads through the ref.
+                    Type::Ref(inner) if matches!(*inner, Type::Struct(_)) => {
+                        let (index, fty) = self.env.field(e.pos, &inner, name)?;
+                        let target = self.deref(base);
+                        Ok(self.step(target, Step::Field(index), fty))
                     }
                     t => Err(Error::new(e.pos, format!("type {t} has no fields"))),
                 }
@@ -117,6 +128,13 @@ impl FnCx<'_> {
                         let ptr = self.read(base);
                         let i = self.index(index)?;
                         Ok(self.step_ptr(ptr, Step::Elem(i), *elem))
+                    }
+                    // `r[i]` with `r: ref [T; N]` reads through the ref.
+                    Type::Ref(inner) if matches!(*inner, Type::Array(..)) => {
+                        let Type::Array(elem, _) = *inner else { unreachable!() };
+                        let target = self.deref(base);
+                        let i = self.index(index)?;
+                        Ok(self.step(target, Step::Elem(i), *elem))
                     }
                     // `p[i]` with `p: *T` is `*(p + i)`: no bounds check.
                     p @ Type::Ptr(_) => {
@@ -139,6 +157,10 @@ impl FnCx<'_> {
             }
             ExprKind::Deref(inner) => {
                 let p = self.expr(inner, None)?;
+                if let Type::Ref(ty) = self.ty(p).clone() {
+                    let root = self.emit_to(*ty.clone(), |dst| Inst::Deref { dst, src: p });
+                    return Ok(Place::Reg { root, path: vec![], ty: *ty, readonly: Some(BEHIND_REF) });
+                }
                 let Some(ty) = self.ty(p).pointee().cloned() else {
                     return Err(Error::new(e.pos, format!("cannot dereference {}", self.ty(p))));
                 };
@@ -146,9 +168,17 @@ impl FnCx<'_> {
             }
             _ => {
                 let root = self.expr(e, None)?;
-                Ok(Place::Reg { root, path: vec![], ty: self.ty(root).clone(), assignable: false })
+                Ok(Place::Reg { root, path: vec![], ty: self.ty(root).clone(), readonly: Some("a temporary value") })
             }
         }
+    }
+
+    /// The place a `ref` place refers to.
+    fn deref(&mut self, r: Place) -> Place {
+        let src = self.read(r);
+        let Type::Ref(ty) = self.ty(src).clone() else { unreachable!("not a ref") };
+        let root = self.emit_to(*ty.clone(), |dst| Inst::Deref { dst, src });
+        Place::Reg { root, path: vec![], ty: *ty, readonly: Some(BEHIND_REF) }
     }
 
     fn index(&mut self, index: &Expr) -> Result<Reg, Error> {
@@ -176,7 +206,7 @@ impl FnCx<'_> {
     /// Writes `value` (already checked to have the place's type) to `place`.
     pub(crate) fn write(&mut self, pos: Pos, place: Place, value: Reg) -> Result<(), Error> {
         match place {
-            Place::Reg { assignable: false, .. } => Err(Error::new(pos, "cannot assign to this expression")),
+            Place::Reg { readonly: Some(what), .. } => Err(Error::new(pos, format!("cannot assign to {what}"))),
             Place::Reg { root, path, .. } => {
                 // The aggregates along the path: root, root.a, root.a[i], ...
                 let mut along = vec![root];
@@ -210,9 +240,7 @@ impl FnCx<'_> {
     pub(crate) fn addr_of(&mut self, pos: Pos, place: Place) -> Result<Reg, Error> {
         match place {
             Place::Mem { ptr, .. } => Ok(ptr),
-            Place::Reg { assignable: false, .. } => {
-                Err(Error::new(pos, "cannot take the address of a temporary value"))
-            }
+            Place::Reg { readonly: Some(what), .. } => Err(Error::new(pos, format!("cannot take the address of {what}"))),
             Place::Reg { root, path, .. } => {
                 let root_ty = self.ty(root).clone();
                 let mut ptr = self.emit_to(Type::ptr(root_ty.clone()), |dst| Inst::Addr { dst, src: root });

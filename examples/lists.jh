@@ -1,0 +1,62 @@
+// Recursive data with `ref`: an immutable reference to a value on the GC heap.
+// A type cannot contain itself, but it can contain a `ref` to itself.
+// Hosted only; freestanding code uses pointers.
+//   jihoo run examples/lists.jh
+
+enum List(T: type) {
+    Cons(T, ref List(T))
+    Nil
+}
+
+enum Tree {
+    Leaf
+    Node(ref Tree, i64, ref Tree)
+}
+
+fn range(lo: i64, hi: i64) -> List(i64) {
+    if lo >= hi {
+        return List.Nil
+    }
+    return List.Cons(lo, ref range(lo + 1, hi))
+}
+
+fn sum(l: List(i64)) -> i64 {
+    match l {
+        Cons(x, rest) => return x + sum(*rest)    // `*rest` reads through the ref
+        Nil => return 0
+    }
+}
+
+// Inserting builds a new tree that shares the untouched subtrees with the old
+// one: refs are immutable, so sharing is never visible.
+fn insert(t: Tree, v: i64) -> Tree {
+    match t {
+        Leaf => return Tree.Node(ref Tree.Leaf, v, ref Tree.Leaf)
+        Node(l, x, r) => {
+            if v < x {
+                return Tree.Node(ref insert(*l, v), x, r)
+            }
+            return Tree.Node(l, x, ref insert(*r, v))
+        }
+    }
+}
+
+fn show(t: Tree) -> str {
+    match t {
+        Leaf => return "."
+        Node(l, x, r) => return "(" + show(*l) + " " + to_str(x) + " " + show(*r) + ")"
+    }
+}
+
+fn main() {
+    print(sum(range(1, 11)))          // 55
+
+    let t = Tree.Leaf
+    let xs = [5, 2, 8, 1, 9]
+    let i = 0
+    while i < len(xs) {
+        t = insert(t, xs[i])
+        i = i + 1
+    }
+    print(show(t))
+}
