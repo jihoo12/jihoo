@@ -1,0 +1,110 @@
+// Enums and `match`: payloads of every alignment, enums inside structs, arrays
+// and other enums, generic enums, constants, and integer and bool patterns.
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+enum Shape {
+    Dot
+    Line(u8, u8)
+    Circle(Point, i64)
+    Poly([u8; 3])
+}
+
+enum Option(T: type) {
+    Some(T)
+    None
+}
+
+enum Expr {
+    Num(i64)
+    Neg(i64)
+    Apply(fn(i64, i64) -> i64, i64, i64)
+}
+
+struct Tagged {
+    tag: u8
+    shape: Shape
+}
+
+fn add(a: i64, b: i64) -> i64 { return a + b }
+
+fn size(s: Shape) -> i64 {
+    match s {
+        Dot => return 1
+        Line(a, b) => return (b - a) as i64
+        Circle(c, r) => return c.x + c.y + r
+        Poly(sides) => return (sides[0] + sides[1] + sides[2]) as i64
+    }
+}
+
+fn eval(e: Expr) -> i64 {
+    match e {
+        Num(n) => return n
+        Neg(n) => return -n
+        Apply(f, a, b) => return f(a, b)
+    }
+}
+
+fn first_big(xs: [i64; 4]) -> Option(i64) {
+    let i = 0
+    while i < len(xs) {
+        if xs[i] > 10 { return Option.Some(xs[i]) }
+        i = i + 1
+    }
+    return Option.None
+}
+
+fn unwrap_or(o: Option(i64), d: i64) -> i64 {
+    match o {
+        Some(v) => return v
+        None => return d
+    }
+}
+
+fn nested(o: Option(Shape)) -> i64 {
+    match o {
+        Some(s) => return size(s) * 2
+        None => return 0
+    }
+}
+
+fn digit(n: i64) -> i64 {
+    let r = 0
+    match n {
+        0 => r = 7
+        1 => r = 11
+        -1 => r = 13
+        _ => r = 17
+    }
+    return r
+}
+
+fn flag(b: bool) -> i64 {
+    match b {
+        true => return 3
+        false => return 5
+    }
+}
+
+const ORIGIN_RING = Shape.Circle(Point { x: 0, y: 0 }, 9)
+
+fn entry() -> i64 {
+    let shapes = [Shape.Dot, Shape.Line(3, 250), Shape.Circle(Point { x: 1, y: 2 }, 3), Shape.Poly([10, 20, 30]), ORIGIN_RING]
+    let total = 0
+    let i = 0
+    while i < len(shapes) {
+        total = total + size(shapes[i])    // 1 + 247 + 6 + 60 + 9
+        i = i + 1
+    }
+    let t = Tagged { tag: 4, shape: Shape.Line(1, 2) }
+    t.shape = Shape.Poly([1, 1, 1])
+    total = total + size(t.shape) + (t.tag as i64)                       // + 3 + 4
+    total = total + eval(Expr.Num(5)) + eval(Expr.Neg(2)) + eval(Expr.Apply(add, 20, 22))  // + 45
+    total = total + unwrap_or(first_big([1, 2, 30, 4]), 0) + unwrap_or(first_big([1, 2, 3, 4]), 100)  // + 130
+    total = total + nested(Option.Some(Shape.Line(0, 9))) + nested(Option(Shape).None)  // + 18
+    total = total + digit(0) + digit(1) + digit(-1) + digit(5) + flag(true) + flag(false)  // + 56
+    return total
+}

@@ -288,6 +288,26 @@ impl<'m> Vm<'m> {
                 let r = self.alloc_agg(vec![self.get(*value); *n as usize]);
                 self.set(*dst, Value::Agg(r));
             }
+            // An enum is an aggregate of its tag followed by the variant's payload.
+            Inst::Variant { dst, index, fields } => {
+                let mut values = Vec::with_capacity(fields.len() + 1);
+                values.push(Value::Int(*index as i64));
+                values.extend(fields.iter().map(|r| self.get(*r)));
+                let r = self.alloc_agg(values);
+                self.set(*dst, Value::Agg(r));
+            }
+            Inst::Tag { dst, src } => {
+                let tag = self.heap.items(self.agg_ref(*src)?)[0];
+                self.set(*dst, tag);
+            }
+            Inst::Payload { dst, src, variant, index } => {
+                let items = self.heap.items(self.agg_ref(*src)?);
+                if items[0] != Value::Int(*variant as i64) {
+                    return Err(self.error(&format!("read the payload of variant {variant} from another variant")));
+                }
+                let v = items[1 + *index as usize];
+                self.set(*dst, v);
+            }
             Inst::Elem { dst, src, index } => {
                 let r = self.agg_ref(*src)?;
                 let i = self.bounds_check(r, *index)?;

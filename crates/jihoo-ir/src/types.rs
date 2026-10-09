@@ -88,6 +88,8 @@ pub enum Type {
     Ptr(Box<Type>),
     /// A struct, by name. Structs are values: copying one copies its fields.
     Struct(String),
+    /// An enum (sum type), by name. Also a value type.
+    Enum(String),
     /// `[T; N]`, a fixed-size array. Also a value type.
     Array(Box<Type>, u64),
     /// `fn(A, B) -> R`: a function value. Natively a code pointer.
@@ -143,7 +145,7 @@ impl Type {
             Type::Array(elem, _) => elem.available_in(profile),
             Type::Fn(params, ret) => params.iter().chain([&**ret]).all(|t| t.available_in(profile)),
             Type::Expr | Type::Stmts | Type::Items => false,
-            Type::Unit | Type::Bool | Type::Int(_) | Type::Struct(_) => true,
+            Type::Unit | Type::Bool | Type::Int(_) | Type::Struct(_) | Type::Enum(_) => true,
         }
     }
 
@@ -164,7 +166,7 @@ impl Type {
     pub fn jir(&self) -> String {
         match self {
             Type::Ptr(t) => format!("*{}", t.jir()),
-            Type::Struct(name) => format!("${}", struct_name_jir(name)),
+            Type::Struct(name) | Type::Enum(name) => format!("${}", struct_name_jir(name)),
             Type::Array(elem, n) => format!("[{n} x {}]", elem.jir()),
             Type::Fn(params, ret) => {
                 let params: Vec<String> = params.iter().map(Type::jir).collect();
@@ -184,7 +186,7 @@ impl fmt::Display for Type {
             Type::Int(t) => f.write_str(t.name()),
             Type::Str => f.write_str("str"),
             Type::Ptr(t) => write!(f, "*{t}"),
-            Type::Struct(name) => f.write_str(name),
+            Type::Struct(name) | Type::Enum(name) => f.write_str(name),
             Type::Array(elem, n) => write!(f, "[{elem}; {n}]"),
             Type::Fn(params, ret) => {
                 let params: Vec<String> = params.iter().map(Type::to_string).collect();

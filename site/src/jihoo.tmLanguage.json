@@ -54,7 +54,7 @@
           }
         },
         {
-          "match": "\\b(struct)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "\\b(struct|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": { "name": "storage.type.struct.jihoo" },
             "2": { "name": "entity.name.type.jihoo" }
@@ -64,8 +64,8 @@
     },
     "keywords": {
       "patterns": [
-        { "name": "keyword.control.jihoo", "match": "\\b(if|else|while|return)\\b" },
-        { "name": "storage.type.jihoo", "match": "\\b(let|const|fn|macro|struct)\\b" },
+        { "name": "keyword.control.jihoo", "match": "\\b(if|else|while|match|return)\\b" },
+        { "name": "storage.type.jihoo", "match": "\\b(let|const|fn|macro|struct|enum)\\b" },
         { "name": "storage.modifier.jihoo", "match": "\\b(pub|comptime)\\b" },
         { "name": "keyword.other.jihoo", "match": "\\b(import|as|quote|asm|items)\\b" }
       ]

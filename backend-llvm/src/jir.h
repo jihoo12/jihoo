@@ -18,7 +18,7 @@ struct Type {
   bool is_signed = false;          // Int
   std::shared_ptr<Type> pointee;   // Ptr: the pointee; Array: the element type; Fn: the result
   uint64_t count = 0;              // Array
-  std::string name;                // Struct
+  std::string name;                // Struct: a struct or enum name
   std::vector<Type> params;        // Fn
 
   static Type unit() { return {}; }
@@ -90,11 +90,20 @@ struct StructDef {
   uint64_t size = 0, align = 0;
 };
 
+// An enum: a u32 tag, then the payload of the active variant. Variants are
+// addressed by index.
+struct EnumDef {
+  std::string name;
+  std::vector<std::pair<std::string, std::vector<Type>>> variants;
+  bool has_layout = false;
+  uint64_t size = 0, align = 0;
+};
+
 enum class Op {
   Const, Unit, Str, Copy, Neg, Not,
   Add, Sub, Mul, Div, Rem, Eq, Ne, Lt, Le, Gt, Ge, And, Or, Xor, Shl, Shr,
   Cast, Call, FuncRef, CallIndirect, Struct, Field, SetField, Load, Store, Addr, FieldPtr,
-  Array, Splat, Elem, SetElem, ElemPtr,
+  Array, Splat, Elem, SetElem, ElemPtr, Variant, Tag, Payload,
   Syscall, Print, Asm,
 };
 
@@ -102,7 +111,8 @@ struct Inst {
   Op op;
   uint32_t dst = 0;            // unused for Store and Print
   std::vector<uint32_t> args;  // operand registers
-  int64_t imm = 0;             // Const value, or field index
+  int64_t imm = 0;             // Const value, field index, or variant index
+  int64_t imm2 = 0;            // Payload: index of the value in the variant
   std::string text;            // Str bytes, Call/FuncRef function, Struct name, or Asm template
   std::string constraints;     // Asm only: LLVM constraint string
 };
@@ -131,6 +141,7 @@ struct Function {
 struct Module {
   Profile profile = Profile::Hosted;
   std::vector<StructDef> structs;
+  std::vector<EnumDef> enums;
   std::vector<Function> funcs;
 };
 

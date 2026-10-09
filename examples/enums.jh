@@ -1,0 +1,60 @@
+// Enums (sum types) and `match`. A value of an enum is one of its variants,
+// each with its own payload; `match` must cover every variant (or use `_`).
+//   jihoo run examples/enums.jh
+
+enum Shape {
+    Circle(i64)
+    Rect(i64, i64)
+    Empty
+}
+
+enum Option(T: type) {
+    Some(T)
+    None
+}
+
+fn area(s: Shape) -> i64 {
+    match s {
+        Circle(r) => return 3 * r * r
+        Rect(w, h) => return w * h
+        Empty => return 0
+    }
+}
+
+// The type argument of `Option` comes from the return type.
+fn find(names: [str; 3], want: str) -> Option(i64) {
+    let i = 0
+    while i < len(names) {
+        if names[i] == want {
+            return Option.Some(i)
+        }
+        i = i + 1
+    }
+    return Option.None
+}
+
+fn report(names: [str; 3], want: str) {
+    match find(names, want) {
+        Some(i) => print(want + " is at " + to_str(i))
+        None => print(want + " is missing")
+    }
+}
+
+fn main() {
+    let shapes = [Shape.Circle(2), Shape.Rect(3, 4), Shape.Empty]
+    let i = 0
+    while i < len(shapes) {
+        print(area(shapes[i]))
+        i = i + 1
+    }
+
+    let names = ["ada", "grace", "barbara"]
+    report(names, "grace")
+    report(names, "alan")
+
+    // Integers and bools can be matched too.
+    match len(names) % 2 {
+        0 => print("even")
+        _ => print("odd")
+    }
+}

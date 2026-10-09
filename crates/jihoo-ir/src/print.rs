@@ -26,8 +26,23 @@ impl Display for Module {
             let fields: Vec<String> = s.fields.iter().map(|(n, t)| format!("{n}: {}", t.jir())).collect();
             write!(f, "struct ${} {{ {} }}", types::struct_name_jir(&s.name), fields.join(", "))?;
             // The backend checks this against LLVM's data layout.
-            let fields = |n: &str| self.struct_def(n).map(|d| d.fields.iter().map(|(_, t)| t.clone()).collect());
-            if let Some(l) = layout::of(&Type::Struct(s.name.clone()), &fields) {
+            if let Some(l) = layout::of(&Type::Struct(s.name.clone()), &|t| self.members(t)) {
+                write!(f, " size {} align {}", l.size, l.align)?;
+            }
+            writeln!(f)?;
+        }
+        for e in &self.enums {
+            writeln!(f)?;
+            let variants: Vec<String> = e
+                .variants
+                .iter()
+                .map(|(n, ts)| match ts.is_empty() {
+                    true => n.clone(),
+                    false => format!("{n}({})", ts.iter().map(Type::jir).collect::<Vec<_>>().join(", ")),
+                })
+                .collect();
+            write!(f, "enum ${} {{ {} }}", types::struct_name_jir(&e.name), variants.join(", "))?;
+            if let Some(l) = layout::of(&Type::Enum(e.name.clone()), &|t| self.members(t)) {
                 write!(f, " size {} align {}", l.size, l.align)?;
             }
             writeln!(f)?;
@@ -86,6 +101,9 @@ impl Display for Inst {
             Inst::Store { ptr, value } => write!(f, "store {ptr}, {value}"),
             Inst::Addr { dst, src } => write!(f, "{dst} = addr {src}"),
             Inst::FieldPtr { dst, ptr, index } => write!(f, "{dst} = fieldptr {ptr}, {index}"),
+            Inst::Variant { dst, index, fields } => write!(f, "{dst} = variant {index}({})", list(fields)),
+            Inst::Tag { dst, src } => write!(f, "{dst} = tag {src}"),
+            Inst::Payload { dst, src, variant, index } => write!(f, "{dst} = payload {src}, {variant}, {index}"),
             Inst::Array { dst, items } => write!(f, "{dst} = array({})", list(items)),
             Inst::Splat { dst, value } => write!(f, "{dst} = splat {value}"),
             Inst::Elem { dst, src, index } => write!(f, "{dst} = elem {src}, {index}"),

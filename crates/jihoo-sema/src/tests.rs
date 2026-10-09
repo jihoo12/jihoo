@@ -482,6 +482,53 @@ fn function_values_in_freestanding_code() {
     assert!(m.to_string().contains("struct $S { f: fn(*u8) -> i64 } size 8 align 8"), "{m}");
 }
 
+// ---- enums and match ----
+
+const SHAPE: &str = "enum Shape {\n  Circle(i64)\n  Rect(i64, i64)\n  Empty\n}\nenum Option(T: type) { Some(T), None }\n";
+
+#[test]
+fn enums_and_match() {
+    let m = check(&format!(
+        "{SHAPE}fn area(s: Shape) -> i64 {{\n match s {{\n Circle(r) => return r * r\n Rect(w, h) => return w * h\n Empty => return 0\n }}\n}}\n\
+         fn main() {{ print(area(Shape.Rect(2, 3)))\n let o = Option.Some(1)\n let n: Option(u8) = Option.None }}"
+    ))
+    .unwrap();
+    let text = m.to_string();
+    assert!(text.contains("enum $Shape { Circle(i64), Rect(i64, i64), Empty } size 24 align 8"), "{text}");
+    assert!(text.contains("enum $\"Option(i64)\"") && text.contains("enum $\"Option(u8)\""), "{text}");
+    assert!(text.contains("= tag %0") && text.contains("= payload %0, 1, 1"), "{text}");
+    // Every arm returns, so there is no missing `return` and no fall-through.
+    assert!(text.contains("unreachable"), "{text}");
+}
+
+#[test]
+fn enum_errors() {
+    let m = |body: &str| err(&format!("{SHAPE}fn f(s: Shape) {{\n{body}\n}}\nfn main() {{}}"));
+    assert!(m("match s {\n Circle(r) => {}\n}").contains("`match` does not cover `Rect`, `Empty`"));
+    assert!(m("match s {\n Square => {}\n _ => {}\n}").contains("has no variant `Square` (it has Circle, Rect, Empty)"));
+    assert!(m("match s {\n Rect(w) => {}\n _ => {}\n}").contains("`Rect` holds 2 values, 1 given"));
+    assert!(m("match s {\n Rect => {}\n _ => {}\n}").contains("write `Rect(_, _)` to ignore them"));
+    assert!(m("match s {\n Empty() => {}\n _ => {}\n}").contains("`Empty` holds no values"));
+    assert!(m("match s {\n _ => {}\n Empty => {}\n}").contains("unreachable arm: the `_` arm"));
+    assert!(m("match s {\n Empty => {}\n Empty => {}\n _ => {}\n}").contains("`Empty` is already matched"));
+    assert!(m("match s {\n Rect(a, a) => {}\n _ => {}\n}").contains("`a` is bound twice"));
+    assert!(m("match s {\n Circle(r) => {}\n _ => {}\n}\nprint(r)").contains("unknown variable `r`"));
+    assert!(m("match 3 {\n 1 => {}\n}").contains("does not cover every other integer"));
+    assert!(m("match true {\n true => {}\n}").contains("does not cover `false`"));
+    assert!(m("match 3 {\n Empty => {}\n _ => {}\n}").contains("is a variant pattern, but the value is i64"));
+    assert!(m("let x: u8 = 1\nmatch x {\n 300 => {}\n _ => {}\n}").contains("300 does not fit in u8"));
+    assert!(m("match \"a\" {\n _ => {}\n}").contains("cannot `match` on str"));
+    assert!(m("let t = Shape.Square").contains("enum `Shape` has no variant `Square`"));
+    assert!(m("let t = Shape.Circle").contains("`Shape.Circle` holds 1 values; write `Shape.Circle(...)`"));
+    assert!(m("let t = Shape.Empty()").contains("`Shape.Empty` holds no values"));
+    assert!(m("let t = Shape.Circle(true)").contains("argument 1 of `Shape.Circle` must be i64, found bool"));
+    assert!(m("let t = Option.None").contains("cannot infer `T` of `Option` here"));
+    assert!(m("let t = s.x").contains("type Shape has no fields"));
+    assert!(err("enum L { Cons(i64, L), Nil }\nfn main() {}").contains("enum `L` contains itself (L -> L)"));
+    assert!(err("enum E { A, A }\nfn main() {}").contains("variant `A` is declared twice"));
+    assert!(err("struct E { x: i64 }\nenum E { A }\nfn main() {}").contains("type `E` is defined twice"));
+}
+
 // ---- inline asm ----
 
 #[test]

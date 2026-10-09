@@ -30,7 +30,8 @@ pub(crate) enum ConstValue {
     Int(i64),
     Bool(bool),
     Str(String),
-    /// Fields of a struct or elements of an array.
+    /// Fields of a struct or elements of an array; for an enum, the variant
+    /// index followed by the payload.
     Agg(Vec<ConstValue>),
     /// A function value: the JIR name of the function.
     Func(String),
@@ -103,7 +104,7 @@ impl Env<'_> {
             i += 1;
         }
 
-        let module = jihoo_ir::Module { profile: self.profile, structs: vec![], funcs };
+        let module = jihoo_ir::Module { profile: self.profile, structs: vec![], enums: vec![], funcs };
         let mut vm = Vm::new(&module).with_fuel(FUEL).with_uniques(self.uniques.get());
         let mut values = Vec::new();
         for a in args {
@@ -146,6 +147,16 @@ impl Env<'_> {
                 ConstValue::Agg(items.collect::<Result<_, _>>()?)
             }
             (Value::Func(i), Type::Fn(..)) => ConstValue::Func(vm.func_name(i).to_string()),
+            (Value::Agg(r), Type::Enum(_)) => {
+                let items = heap.items(r).to_vec();
+                let Value::Int(tag) = items[0] else { unreachable!("enum without a tag") };
+                let tys = self.payload_types(ty, tag as u32);
+                let mut out = vec![ConstValue::Int(tag)];
+                for (v, t) in items[1..].iter().zip(&tys) {
+                    out.push(self.to_const(pos, *v, t, vm)?);
+                }
+                ConstValue::Agg(out)
+            }
             (_, Type::Ptr(_)) => {
                 return Err(Error::new(
                     pos,
@@ -186,6 +197,12 @@ impl FnCx<'_> {
                     })
                     .collect();
                 self.emit_to(ty.clone(), |dst| Inst::Struct { dst, name: name.clone(), fields })
+            }
+            (Type::Enum(_), ConstValue::Agg(items)) => {
+                let ConstValue::Int(tag) = items[0] else { unreachable!("enum without a tag") };
+                let tys = self.env.payload_types(ty, tag as u32);
+                let fields = items[1..].iter().zip(&tys).map(|(v, t)| self.splice(t, v)).collect();
+                self.emit_to(ty.clone(), |dst| Inst::Variant { dst, index: tag as u32, fields })
             }
             (Type::Array(elem, _), ConstValue::Agg(items)) => {
                 // `[0; 4096]` stays one `splat` instead of 4096 constants.

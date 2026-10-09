@@ -53,7 +53,7 @@ fn area(w: i64, h: i64) -> i64 {   // signatures are written out
 }
 ```
 
-- Types: `unit`, `bool`, `i8`…`i64`, `u8`…`u64`, structs, arrays, function types
+- Types: `unit`, `bool`, `i8`…`i64`, `u8`…`u64`, structs, enums, arrays, function types
   `fn(A, B) -> R`, plus `str` (hosted only, garbage collected) and `*T`
   (freestanding only, raw pointer). A string literal is a `str` when hosted and a
   `*u8` to constant bytes when freestanding.
@@ -298,6 +298,57 @@ pick(1)(2, 3)                    // a function returning a function
 - No closures yet: a function value cannot capture local variables. That is
   the next step; see the roadmap.
 
+## Enums and `match`
+
+```jihoo
+enum Shape {
+    Circle(i64)
+    Rect(i64, i64)
+    Empty
+}
+enum Option(T: type) { Some(T), None }
+
+fn area(s: Shape) -> i64 {
+    match s {
+        Circle(r) => return 3 * r * r
+        Rect(w, h) => return w * h
+        Empty => return 0
+    }
+}
+
+let s = Shape.Rect(3, 4)
+let o: Option(u8) = Option.None      // `Option(u8)` from the expected type
+return Option.Some(i)                // ... or from the payload, or the return type
+```
+
+- An enum (sum type) holds one of its variants, each with its own payload of
+  values. Variants are written after the enum: `Shape.Empty`, `Shape.Rect(3, 4)`,
+  `geo.Shape.Empty`, `Option(i64).Some(1)`. Enums are values like structs, in
+  both profiles, and share the struct rules: `pub`, generic parameters, no
+  containing themselves by value.
+- For a generic enum the arguments can be left out: they are taken from the
+  expected type (a typed `let`, an argument, a return value), or else from
+  payload values declared with exactly a type parameter (`Some(T)`).
+  `let x = Option.None` cannot be inferred and is an error that says so.
+- `match` is a statement. Arms are tested in order; the first one that matches
+  runs. A variant pattern names the variant without the enum (the type is
+  known) and binds each payload value to a new local, or ignores it with `_`:
+  `Rect(w, _)`. Integers and bools can be matched against literals.
+- `_` is the only pattern that matches anything; a bare name is always a
+  variant, so a misspelled variant is an error, not a binding. A `match` must
+  cover every variant (or both bools), or end with `_`; integers always need
+  `_`. Missing variants are listed by name, and arms that can never run are
+  errors. Since an exhaustive `match` has no fall-through, a function whose arms
+  all `return` needs no `return` after it.
+- In JIR an enum is `enum $Shape { Circle(i64), Rect(i64, i64), Empty }` with
+  `variant`, `tag` and `payload` instructions. Natively it has the C layout of
+  a `u32` tag followed by a union of the payloads (`size_of(Shape)` is 24); on
+  the VM it is a GC object.
+- Not yet: nested patterns, guards, `match` as an expression, and equality on
+  enums. Recursive enums (`enum List { Cons(i64, List), Nil }`) need a reference
+  type; for now freestanding code uses pointers, and hosted code cannot build
+  them yet.
+
 ## Macros
 
 ```jihoo
@@ -456,7 +507,8 @@ free of LLVM.
    Automatic hygiene; field visibility.
 6. ~~GC hardening (one root set, generation-checked references, stress mode);
    function values.~~
-7. Sum types and `match`.
+7. ~~Sum types and `match`.~~ Nested patterns, `match` expressions, and a GC
+   reference type in hosted code for recursive data (lists, trees).
 8. Closures, lowered in the frontend to a function plus a struct of captured
    values (captured by value, like every other value in jihoo).
 9. Goroutine-like tasks and channels on the VM: one OS thread, a deterministic

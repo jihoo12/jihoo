@@ -57,6 +57,7 @@ bb3:
 jir 0                          ; format version, must come first
 profile hosted|freestanding    ; language profile
 struct ...                     ; zero or more structs
+enum ...                       ; zero or more enums
 fn ...                         ; zero or more functions
 ```
 
@@ -78,7 +79,7 @@ It takes no parameters and returns `unit` or `i64`.
 | `u8` … `u64`      | unsigned integers                        | `i8` … `i64`  |
 | `str`             | GC-managed string, hosted only           | —             |
 | `*T`              | raw pointer to `T`, freestanding only    | `ptr`         |
-| `$Name`           | struct, by value                         | named struct  |
+| `$Name`           | struct or enum, by value                 | named struct  |
 | `expr`, `stmts`, `items` | code, inside macros; compile time only | —        |
 | `[N x T]`         | array of `N` `T`s, by value              | `[N x T]`     |
 | `fn(T, ...) -> R` | function value                           | `ptr`         |
@@ -108,6 +109,24 @@ target's data layout disagrees. It is omitted for structs without a fixed layout
 
 Structs and arrays are values: `copy` copies all fields or elements, and
 `setfield`/`setelem` produce a new value.
+
+## Enums
+
+```
+enum $Name { A, B(T, U), ... } size S align A
+```
+
+A sum type: a value is one of the variants, and each variant carries its own
+payload values. Instructions refer to variants and payload values by index.
+Structs and enums share one namespace. Like a struct, an enum may hold other
+types by value but not itself, and `size S align A` is omitted when it contains
+`str`.
+
+The layout is the C layout of `struct { uint32_t tag; union { ... } payload; }`,
+where each variant's payload is laid out like a struct of its values. Natively
+the backend uses `{ i32, [N x iA] }`, with `A` the largest payload alignment, and
+reads a variant's payload through a struct of its value types at the payload's
+address. On the VM an enum is a GC object holding the tag and the payload.
 
 ## Functions
 
@@ -167,6 +186,14 @@ The result type is what the destination register must be declared as.
 | `%d = struct $S(%a, %b, ...)`       | every field, in order | `$S`   | build a struct |
 | `%d = field %s, N`                  | `$S`                  | type of field N | read a field |
 | `%d = setfield %s, N, %v`           | `$S`, type of field N | `$S`   | copy of `%s` with field N replaced |
+
+### Enums
+
+| syntax                              | operands              | result | meaning |
+|-------------------------------------|-----------------------|--------|---------|
+| `%d = variant K(%a, %b, ...)`       | the payload of variant K | the enum (type of `%d`) | build variant K |
+| `%d = tag %e`                       | an enum               | `u32`  | the index of the variant `%e` holds |
+| `%d = payload %e, K, N`             | an enum               | type of value N of variant K | read a payload value; `%e` must hold variant K (the VM checks; natively it is undefined) |
 
 ### Arrays
 

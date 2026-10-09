@@ -225,21 +225,21 @@ impl Parser {
                 }
                 Tok::Import => imports.push(self.import()?),
                 Tok::Fn | Tok::Macro => funcs.push(self.fn_decl(false)?),
-                Tok::Struct => structs.push(self.struct_decl(false)?),
+                Tok::Struct | Tok::Enum => structs.push(self.struct_decl(false)?),
                 Tok::Const => consts.push(self.const_decl(false)?),
                 Tok::Pub => {
                     self.bump();
                     match self.peek() {
                         Tok::Fn | Tok::Macro => funcs.push(self.fn_decl(true)?),
-                        Tok::Struct => structs.push(self.struct_decl(true)?),
+                        Tok::Struct | Tok::Enum => structs.push(self.struct_decl(true)?),
                         Tok::Const => consts.push(self.const_decl(true)?),
-                        _ => return Err(self.unexpected("`fn`, `macro`, `struct` or `const` after `pub`")),
+                        _ => return Err(self.unexpected("`fn`, `macro`, `struct`, `enum` or `const` after `pub`")),
                     }
                 }
                 Tok::InnerAttr(_) => {
                     return Err(Error::new(self.pos(), "`#![...]` must come before any item"))
                 }
-                _ => return Err(self.unexpected("`fn`, `macro`, `struct`, `const` or `import`")),
+                _ => return Err(self.unexpected("`fn`, `macro`, `struct`, `enum`, `const` or `import`")),
             }
         }
         Ok(Program { attrs: vec![], imports, structs, consts, funcs, macro_calls })
@@ -287,8 +287,10 @@ impl Parser {
         Ok(ConstDecl { pos, is_pub, name, ty, value })
     }
 
+    /// `struct Name(params) { fields }` or `enum Name(params) { variants }`.
     fn struct_decl(&mut self, is_pub: bool) -> PResult<StructDecl> {
-        let pos = self.expect(&Tok::Struct, "`struct`")?.pos;
+        let is_enum = *self.peek() == Tok::Enum;
+        let pos = self.bump().pos; // `struct` or `enum`
         let (_, name) = self.ident("struct name")?;
         let mut params = Vec::new();
         if self.eat(&Tok::LParen) {
@@ -305,13 +307,31 @@ impl Parser {
             }
             self.expect(&Tok::RParen, "`)`")?;
         }
+        if is_enum {
+            let variants = self.braced_list(|p| {
+                let (pos, name) = p.ident("variant name")?;
+                let mut fields = Vec::new();
+                if p.same_line(&Tok::LParen) {
+                    p.bump();
+                    while *p.peek() != Tok::RParen {
+                        fields.push(p.type_expr()?);
+                        if !p.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    p.expect(&Tok::RParen, "`,` or `)`")?;
+                }
+                Ok(VariantDecl { pos, name, fields })
+            })?;
+            return Ok(StructDecl { pos, is_pub, name, params, fields: vec![], variants: Some(variants) });
+        }
         let fields = self.braced_list(|p| {
             let (pos, name) = p.ident("field name")?;
             p.expect(&Tok::Colon, "`:` and a field type")?;
             let ty = p.type_expr()?;
             Ok(FieldDecl { pos, name, ty })
         })?;
-        Ok(StructDecl { pos, is_pub, name, params, fields })
+        Ok(StructDecl { pos, is_pub, name, params, fields, variants: None })
     }
 
     fn fn_decl(&mut self, is_pub: bool) -> PResult<FnDecl> {
@@ -462,6 +482,12 @@ impl Parser {
                 Ok(Stmt::Return { pos, value })
             }
             Tok::If => self.if_stmt(),
+            Tok::Match => {
+                let pos = self.bump().pos;
+                let value = self.cond()?;
+                let arms = self.braced_list(|p| p.match_arm())?;
+                Ok(Stmt::Match { pos, value, arms })
+            }
             Tok::While => {
                 self.bump();
                 let cond = self.cond()?;
@@ -484,6 +510,54 @@ impl Parser {
                     Ok(Stmt::Expr(e))
                 }
             }
+        }
+    }
+
+    /// `pattern => { ... }` or `pattern => statement`.
+    fn match_arm(&mut self) -> PResult<MatchArm> {
+        let pos = self.pos();
+        let pattern = self.pattern()?;
+        self.expect(&Tok::FatArrow, "`=>`")?;
+        let body = if *self.peek() == Tok::LBrace {
+            self.block()?
+        } else {
+            let s = self.stmt()?;
+            Block { stmts: vec![s], end: self.toks[self.i - 1].pos }
+        };
+        Ok(MatchArm { pos, pattern, body })
+    }
+
+    fn pattern(&mut self) -> PResult<Pattern> {
+        let negative = self.eat(&Tok::Minus);
+        match self.peek().clone() {
+            Tok::Int(n) => {
+                self.bump();
+                Ok(Pattern::Int(if negative { -(n as i128) } else { n as i128 }))
+            }
+            _ if negative => Err(self.unexpected("an integer")),
+            Tok::True | Tok::False => Ok(Pattern::Bool(self.bump().tok == Tok::True)),
+            Tok::Ident(name) if name == "_" => {
+                self.bump();
+                Ok(Pattern::Wild)
+            }
+            Tok::Ident(name) => {
+                self.bump();
+                if !self.same_line(&Tok::LParen) {
+                    return Ok(Pattern::Variant(name, None));
+                }
+                self.bump();
+                let mut binds = Vec::new();
+                while *self.peek() != Tok::RParen {
+                    let (pos, n) = self.ident("a name or `_`")?;
+                    binds.push((pos, Some(n).filter(|n| n != "_")));
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&Tok::RParen, "`,` or `)`")?;
+                Ok(Pattern::Variant(name, Some(binds)))
+            }
+            _ => Err(self.unexpected("a pattern (a variant, a literal or `_`)")),
         }
     }
 
@@ -870,6 +944,9 @@ fn punct(t: &Tok) -> &'static str {
         Tok::True => "true",
         Tok::False => "false",
         Tok::Struct => "struct",
+        Tok::Enum => "enum",
+        Tok::Match => "match",
+        Tok::FatArrow => "=>",
         Tok::As => "as",
         Tok::Const => "const",
         Tok::Comptime => "comptime",
@@ -1163,6 +1240,22 @@ mod tests {
         assert_eq!(body("f\n(1)").len(), 2);
         assert!(matches!(&body("let t = Vec(fn(u8) -> u8)")[0], Stmt::Let { value, .. }
             if matches!(&value.kind, ExprKind::Call(_, a) if matches!(a[0].kind, ExprKind::FnType(_)))));
+    }
+
+    #[test]
+    fn enums_and_match() {
+        let p = parse("pub enum Option(T: type) {\n  Some(T)\n  None\n}\nfn f() {\n match o {\n  Some(x, _) => return x\n  None => { g() }\n  -1 => {}\n  _ => {}\n }\n}").unwrap();
+        let e = &p.structs[0];
+        assert!(e.is_pub && e.is_enum() && e.params.len() == 1);
+        let vs = e.variants.as_ref().unwrap();
+        assert!(vs[0].name == "Some" && vs[0].fields.len() == 1 && vs[1].fields.is_empty());
+        let Stmt::Match { arms, .. } = &p.funcs[0].body.stmts[0] else { panic!() };
+        assert!(matches!(&arms[0].pattern, Pattern::Variant(n, Some(b)) if n == "Some" && b[0].1.as_deref() == Some("x") && b[1].1.is_none()));
+        assert!(matches!(&arms[1].pattern, Pattern::Variant(n, None) if n == "None"));
+        assert!(matches!(arms[2].pattern, Pattern::Int(-1)) && matches!(arms[3].pattern, Pattern::Wild));
+        // The value is not a struct literal: `o {` starts the arms.
+        assert!(parse("fn f() { match p { _ => {} } }").is_ok());
+        assert!(parse("fn f() { match p { 1 {} } }").unwrap_err().msg.contains("expected `=>`"));
     }
 
     #[test]

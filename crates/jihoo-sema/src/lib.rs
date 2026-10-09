@@ -14,6 +14,7 @@
 
 mod asm;
 mod comptime;
+mod enums;
 mod env;
 mod generic;
 mod macros;
@@ -78,15 +79,32 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
     }
 
     // Ask for every item; the lazy queries compute what each one needs.
-    // Generic structs only exist as instances, collected at the end.
+    // Generic structs and enums only exist as instances, collected at the end.
     let mut structs = Vec::new();
+    let mut enums = Vec::new();
+    let mut define = |t: Type, pos: Pos, errors: &mut Vec<Error>| {
+        let r = env.check_acyclic(&t).and_then(|_| match t {
+            Type::Enum(name) => {
+                let variants = env.enum_variants(pos, &name)?;
+                enums.push(ir::EnumDef { name, variants: (*variants).clone() });
+                Ok(())
+            }
+            Type::Struct(name) => {
+                let fields = env.struct_fields(pos, &name)?;
+                structs.push(ir::StructDef { name, fields: (*fields).clone() });
+                Ok(())
+            }
+            _ => unreachable!(),
+        });
+        if let Err(e) = r {
+            errors.push(e);
+        }
+    };
     for (m, module) in mods.iter().enumerate() {
         for s in module.program.structs.iter().filter(|s| s.params.is_empty()) {
             let key = env.key(m, &s.name).unwrap();
-            match env.struct_fields(s.pos, &key).and_then(|f| env.check_acyclic(&key).map(|_| f)) {
-                Ok(fields) => structs.push(ir::StructDef { name: key, fields: (*fields).clone() }),
-                Err(e) => errors.push(e),
-            }
+            let t = if s.is_enum() { Type::Enum(key) } else { Type::Struct(key) };
+            define(t, s.pos, &mut errors);
         }
         for c in &module.program.consts {
             if let Some(Err(e)) = env.constant(&env.key(m, &c.name).unwrap()) {
@@ -144,16 +162,12 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
         }
     }
 
-    for name in env.struct_instance_names() {
-        let pos = Pos::new(1, 1);
-        match env.struct_fields(pos, &name).and_then(|f| env.check_acyclic(&name).map(|_| f)) {
-            Ok(fields) => structs.push(ir::StructDef { name, fields: (*fields).clone() }),
-            Err(e) => errors.push(e),
-        }
+    for t in env.struct_instances() {
+        define(t, Pos::new(1, 1), &mut errors);
     }
 
     if errors.is_empty() {
-        Ok(ir::Module { profile, structs, funcs })
+        Ok(ir::Module { profile, structs, enums, funcs })
     } else {
         // One failing item can surface as the same error through several others.
         let mut seen = std::collections::HashSet::new();
@@ -639,6 +653,7 @@ impl<'a> FnCx<'a> {
                 }
                 self.switch_to(end_bb);
             }
+            Stmt::Match { pos, value, arms } => self.match_stmt(*pos, value, arms)?,
             Stmt::While { cond, body } => {
                 let cond_bb = self.new_block();
                 let body_bb = self.new_block();
@@ -710,8 +725,14 @@ impl<'a> FnCx<'a> {
             ExprKind::Binary(BinOp::And, l, r) => self.short_circuit(true, l, r)?,
             ExprKind::Binary(BinOp::Or, l, r) => self.short_circuit(false, l, r)?,
             ExprKind::Binary(op, l, r) => self.binary(e.pos, *op, l, r, expected)?,
-            ExprKind::Call(name, args) => self.call(e.pos, name, args)?,
+            ExprKind::Call(name, args) => self.call(e.pos, name, args, expected)?,
             ExprKind::CallExpr(f, args) => {
+                // `geo.Shape.Circle(1)`, `Option(i64).Some(1)`: a variant.
+                if let ExprKind::Field(base, variant) = &f.kind {
+                    if let Some(en) = self.enum_path(base)? {
+                        return self.construct(e.pos, en, variant, Some(args), expected);
+                    }
+                }
                 let callee = self.expr(f, None)?;
                 self.call_value(e.pos, callee, "this function", args)?
             }
@@ -743,6 +764,12 @@ impl<'a> FnCx<'a> {
                 self.konst(Type::I64, n)
             }
             ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Deref(_) => {
+                // `Shape.Empty`: a variant without a payload.
+                if let ExprKind::Field(base, variant) = &e.kind {
+                    if let Some(en) = self.enum_path(base)? {
+                        return self.construct(e.pos, en, variant, None, expected);
+                    }
+                }
                 let place = self.place(e)?;
                 self.read(place)
             }
@@ -902,7 +929,7 @@ impl<'a> FnCx<'a> {
         }))
     }
 
-    fn call(&mut self, pos: Pos, name: &str, args: &[Expr]) -> Result<Reg, Error> {
+    fn call(&mut self, pos: Pos, name: &str, args: &[Expr], expected: Option<&Type>) -> Result<Reg, Error> {
         match name {
             "print" => {
                 if self.profile() != Profile::Hosted {
@@ -1003,13 +1030,17 @@ impl<'a> FnCx<'a> {
                 if let Some(r) = self.local(name).filter(|&r| matches!(self.ty(r), Type::Fn(..))) {
                     return self.call_value(pos, r, &format!("`{name}`"), args);
                 }
-                // `s.f(x)`: a function stored in a field of a local.
                 if let Some((base, field)) = name.split_once('.') {
+                    let base_expr = Expr { pos, kind: ExprKind::Var(base.to_string()) };
+                    // `s.f(x)`: a function stored in a field of a local.
                     if self.local(base).is_some() {
-                        let base = Expr { pos, kind: ExprKind::Var(base.to_string()) };
-                        let callee = Expr { pos, kind: ExprKind::Field(Box::new(base), field.to_string()) };
+                        let callee = Expr { pos, kind: ExprKind::Field(Box::new(base_expr), field.to_string()) };
                         let r = self.expr(&callee, None)?;
                         return self.call_value(pos, r, &format!("`{name}`"), args);
+                    }
+                    // `Shape.Circle(1)`: a variant of an enum.
+                    if let Some(en) = self.enum_path(&base_expr)? {
+                        return self.construct(pos, en, field, Some(args), expected);
                     }
                 }
                 // A comptime parameter or constant naming a function: a direct call.

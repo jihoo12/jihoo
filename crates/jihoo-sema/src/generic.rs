@@ -42,7 +42,7 @@ impl Bindings {
         self.items.iter().rev().find(|(n, _)| n == name).map(|(_, b)| b)
     }
 
-    fn push(&mut self, name: &str, b: Binding) {
+    pub(crate) fn push(&mut self, name: &str, b: Binding) {
         self.items.push((name.to_string(), b));
     }
 

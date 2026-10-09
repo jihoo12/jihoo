@@ -40,31 +40,26 @@ namespace {
 }
 
 // Module-wide type information.
+//
+// An enum is `{ i32 tag, [N x iA] payload }`, where A is the largest alignment of
+// a variant's payload and N * A bytes hold the largest payload. Each variant's
+// payload is accessed through a literal struct of its value types, at the
+// payload's address. This is the C layout of `struct { u32 tag; union {...} }`.
 class Types {
  public:
-  Types(LLVMContext &ctx, const jir::Module &m, const DataLayout &dl) : ctx_(ctx) {
-    // Create all structs first so fields can refer to any of them through pointers.
-    for (const auto &s : m.structs) {
-      if (structs_.count(s.name)) throw CodegenError("duplicate struct $" + s.name);
-      structs_[s.name] = {StructType::create(ctx, "jihoo." + s.name), &s};
-    }
-    for (const auto &s : m.structs) {
-      std::vector<Type *> fields;
-      for (const auto &f : s.fields) fields.push_back(lower(f.second));
-      structs_[s.name].ty->setBody(fields);
-    }
+  Types(LLVMContext &ctx, const jir::Module &m, const DataLayout &dl) : ctx_(ctx), dl_(dl) {
+    // Create every named type first, so members can refer to any of them through pointers.
+    for (const auto &s : m.structs) add(s.name, &s, nullptr);
+    for (const auto &e : m.enums) add(e.name, nullptr, &e);
+    // A body needs the sizes of the types held by value, so those come first.
+    for (const auto &s : m.structs) define(s.name);
+    for (const auto &e : m.enums) define(e.name);
     // `size_of`/`align_of` were folded to constants by the frontend; make sure
     // they describe the same layout LLVM uses for this target.
-    for (const auto &s : m.structs) {
-      if (!s.has_layout) continue;
-      StructType *ty = structs_[s.name].ty;
-      uint64_t size = dl.getTypeAllocSize(ty);
-      uint64_t align = dl.getABITypeAlign(ty).value();
-      if (size != s.size || align != s.align)
-        throw CodegenError("layout mismatch for $" + s.name + ": JIR says size " + std::to_string(s.size) +
-                           " align " + std::to_string(s.align) + ", the target says size " +
-                           std::to_string(size) + " align " + std::to_string(align));
-    }
+    for (const auto &s : m.structs)
+      if (s.has_layout) check_layout(s.name, s.size, s.align);
+    for (const auto &e : m.enums)
+      if (e.has_layout) check_layout(e.name, e.size, e.align);
   }
 
   Type *lower(const jir::Type &t) const {
@@ -81,6 +76,7 @@ class Types {
     throw CodegenError("type `str` is garbage collected and cannot be compiled natively");
   }
 
+  // Structs, enums and arrays.
   static bool is_agg(const jir::Type &t) { return t.kind == jir::Type::Struct || t.kind == jir::Type::Array; }
 
   // Aggregate parameters become pointers; an aggregate result becomes a leading
@@ -97,26 +93,95 @@ class Types {
 
   // JIR type of field `index` of struct type `t`.
   const jir::Type &field(const jir::Type &t, int64_t index) const {
-    if (t.kind != jir::Type::Struct) throw CodegenError(t.str() + " is not a struct");
+    if (t.kind != jir::Type::Struct || !info(t.name).def) throw CodegenError(t.str() + " is not a struct");
     const auto &fields = info(t.name).def->fields;
     if (index < 0 || size_t(index) >= fields.size())
       throw CodegenError(t.str() + " has no field " + std::to_string(index));
     return fields[index].second;
   }
 
-  StructType *struct_type(const std::string &name) const { return info(name).ty; }
+  StructType *struct_type(const std::string &name) const {
+    if (!info(name).def) throw CodegenError("$" + name + " is not a struct");
+    return info(name).ty;
+  }
+
+  // The payload of variant `index` of enum type `t`, as a literal struct.
+  StructType *variant(const jir::Type &t, int64_t index) const {
+    if (t.kind != jir::Type::Struct || !info(t.name).enum_def) throw CodegenError(t.str() + " is not an enum");
+    const auto &variants = info(t.name).variants;
+    if (index < 0 || size_t(index) >= variants.size())
+      throw CodegenError(t.str() + " has no variant " + std::to_string(index));
+    return variants[index];
+  }
 
  private:
   struct Info {
     StructType *ty;
-    const jir::StructDef *def;
+    const jir::StructDef *def;     // for a struct
+    const jir::EnumDef *enum_def;  // for an enum
+    std::vector<StructType *> variants;
+    bool defining = false;
   };
   LLVMContext &ctx_;
-  std::unordered_map<std::string, Info> structs_;
+  const DataLayout &dl_;
+  std::unordered_map<std::string, Info> named_;
+
+  void add(const std::string &name, const jir::StructDef *s, const jir::EnumDef *e) {
+    if (named_.count(name)) throw CodegenError("duplicate struct or enum $" + name);
+    named_[name] = {StructType::create(ctx_, "jihoo." + name), s, e, {}};
+  }
+
+  // Defines the types `t` holds by value (arrays hold their elements by value).
+  void define_members(const jir::Type &t) {
+    if (t.kind == jir::Type::Struct) define(t.name);
+    if (t.kind == jir::Type::Array) define_members(*t.pointee);
+  }
+
+  void define(const std::string &name) {
+    Info &i = named_.at(name);
+    if (!i.ty->isOpaque()) return;
+    if (i.defining) throw CodegenError("$" + name + " contains itself");
+    i.defining = true;
+    if (i.def) {
+      std::vector<Type *> fields;
+      for (const auto &f : i.def->fields) {
+        define_members(f.second);
+        fields.push_back(lower(f.second));
+      }
+      i.ty->setBody(fields);
+    } else {
+      uint64_t size = 0, align = 1;
+      for (const auto &v : i.enum_def->variants) {
+        std::vector<Type *> values;
+        for (const auto &t : v.second) {
+          define_members(t);
+          values.push_back(lower(t));
+        }
+        StructType *payload = StructType::get(ctx_, values);
+        i.variants.push_back(payload);
+        size = std::max<uint64_t>(size, dl_.getTypeAllocSize(payload));
+        align = std::max<uint64_t>(align, dl_.getABITypeAlign(payload).value());
+      }
+      uint64_t words = (size + align - 1) / align;
+      Type *word = Type::getIntNTy(ctx_, unsigned(align * 8));
+      i.ty->setBody({Type::getInt32Ty(ctx_), ArrayType::get(word, words)});
+    }
+    i.defining = false;
+  }
+
+  void check_layout(const std::string &name, uint64_t want_size, uint64_t want_align) const {
+    StructType *ty = named_.at(name).ty;
+    uint64_t size = dl_.getTypeAllocSize(ty);
+    uint64_t align = dl_.getABITypeAlign(ty).value();
+    if (size != want_size || align != want_align)
+      throw CodegenError("layout mismatch for $" + name + ": JIR says size " + std::to_string(want_size) +
+                         " align " + std::to_string(want_align) + ", the target says size " +
+                         std::to_string(size) + " align " + std::to_string(align));
+  }
 
   const Info &info(const std::string &name) const {
-    auto it = structs_.find(name);
-    if (it == structs_.end()) throw CodegenError("unknown struct $" + name);
+    auto it = named_.find(name);
+    if (it == named_.end()) throw CodegenError("unknown struct or enum $" + name);
     return it->second;
   }
 };
@@ -453,6 +518,33 @@ class FnGen {
         if (ty->getNumElements() != inst.args.size()) fail(f_.name, "wrong number of struct fields");
         for (unsigned i = 0; i < inst.args.size(); i++)
           write_mem(b_.CreateStructGEP(ty, slot(inst.dst), i), arg_reg(i));
+        return;
+      }
+      case Op::Variant: {
+        const jir::Type &t = type(inst.dst);
+        StructType *payload_ty = types_.variant(t, inst.imm);
+        if (payload_ty->getNumElements() != inst.args.size()) fail(f_.name, "wrong number of variant values");
+        Type *ty = types_.lower(t);
+        b_.CreateStore(b_.getInt32(uint32_t(inst.imm)), b_.CreateStructGEP(ty, slot(inst.dst), 0));
+        Value *payload = b_.CreateStructGEP(ty, slot(inst.dst), 1);
+        for (unsigned i = 0; i < inst.args.size(); i++)
+          write_mem(b_.CreateStructGEP(payload_ty, payload, i), arg_reg(i));
+        return;
+      }
+      case Op::Tag: {
+        const jir::Type &t = type(arg_reg(0));
+        types_.variant(t, 0);  // checks that it is an enum
+        if (slot(inst.dst)->getAllocatedType() != b_.getInt32Ty()) fail(f_.name, "`tag` result must be u32");
+        store(inst.dst, b_.CreateLoad(b_.getInt32Ty(), b_.CreateStructGEP(types_.lower(t), slot(arg_reg(0)), 0)));
+        return;
+      }
+      case Op::Payload: {
+        const jir::Type &t = type(arg_reg(0));
+        StructType *payload_ty = types_.variant(t, inst.imm);
+        if (inst.imm2 < 0 || uint64_t(inst.imm2) >= payload_ty->getNumElements())
+          fail(f_.name, "variant " + std::to_string(inst.imm) + " has no value " + std::to_string(inst.imm2));
+        Value *payload = b_.CreateStructGEP(types_.lower(t), slot(arg_reg(0)), 1);
+        read_mem(inst.dst, b_.CreateStructGEP(payload_ty, payload, unsigned(inst.imm2)));
         return;
       }
       case Op::Field: {

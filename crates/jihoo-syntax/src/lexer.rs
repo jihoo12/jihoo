@@ -17,6 +17,8 @@ pub enum Tok {
     True,
     False,
     Struct,
+    Enum,
+    Match,
     As,
     Const,
     Comptime,
@@ -37,6 +39,8 @@ pub enum Tok {
     Colon,
     Semi,
     Arrow,
+    /// `=>`
+    FatArrow,
     Assign,
     EqEq,
     NotEq,
@@ -196,6 +200,10 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 Tok::EqEq
             }
+            b'=' if self.peek() == b'>' => {
+                self.bump();
+                Tok::FatArrow
+            }
             b'=' => Tok::Assign,
             b'!' if self.peek() == b'=' => {
                 self.bump();
@@ -289,6 +297,8 @@ impl<'a> Lexer<'a> {
                     "true" => Tok::True,
                     "false" => Tok::False,
                     "struct" => Tok::Struct,
+                    "enum" => Tok::Enum,
+                    "match" => Tok::Match,
                     "as" => Tok::As,
                     "const" => Tok::Const,
                     "comptime" => Tok::Comptime,

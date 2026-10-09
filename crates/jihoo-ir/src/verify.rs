@@ -12,6 +12,7 @@ struct Cx<'m> {
     profile: Profile,
     funcs: HashMap<&'m str, &'m Function>,
     structs: HashMap<&'m str, &'m StructDef>,
+    enums: HashMap<&'m str, &'m EnumDef>,
 }
 
 pub fn verify(m: &Module) -> Result<(), String> {
@@ -19,12 +20,16 @@ pub fn verify(m: &Module) -> Result<(), String> {
         profile: m.profile,
         funcs: m.funcs.iter().map(|f| (f.name.as_str(), f)).collect(),
         structs: m.structs.iter().map(|s| (s.name.as_str(), s)).collect(),
+        enums: m.enums.iter().map(|e| (e.name.as_str(), e)).collect(),
     };
     if cx.funcs.len() != m.funcs.len() {
         return Err("duplicate function names".into());
     }
-    if cx.structs.len() != m.structs.len() {
-        return Err("duplicate struct names".into());
+    if cx.structs.len() != m.structs.len() || cx.enums.len() != m.enums.len() {
+        return Err("duplicate struct or enum names".into());
+    }
+    if let Some(e) = m.enums.iter().find(|e| cx.structs.contains_key(e.name.as_str())) {
+        return Err(format!("${} is both a struct and an enum", e.name));
     }
 
     for s in &m.structs {
@@ -32,6 +37,14 @@ pub fn verify(m: &Module) -> Result<(), String> {
             cx.check_type(t).map_err(|e| format!("in ${}.{name}: {e}", s.name))?;
         }
         cx.check_acyclic(&s.name, &mut Vec::new())?;
+    }
+    for e in &m.enums {
+        for (name, ts) in &e.variants {
+            for t in ts {
+                cx.check_type(t).map_err(|err| format!("in ${}.{name}: {err}", e.name))?;
+            }
+        }
+        cx.check_acyclic(&e.name, &mut Vec::new())?;
     }
 
     let entry = m.profile.entry();
@@ -61,30 +74,45 @@ impl Cx<'_> {
             Type::Struct(name) if !self.structs.contains_key(name.as_str()) => {
                 Err(format!("unknown struct `${name}`"))
             }
+            Type::Enum(name) if !self.enums.contains_key(name.as_str()) => Err(format!("unknown enum `${name}`")),
             Type::Ptr(inner) | Type::Array(inner, _) => self.check_type(inner),
             Type::Fn(params, ret) => params.iter().chain([&**ret]).try_for_each(|t| self.check_type(t)),
             _ => Ok(()),
         }
     }
 
-    /// A struct may not contain itself by value (it would be infinitely large).
+    /// A struct or enum may not contain itself by value (it would be infinitely
+    /// large).
     fn check_acyclic(&self, name: &str, stack: &mut Vec<String>) -> Result<(), String> {
         if stack.iter().any(|s| s == name) {
-            return Err(format!("struct ${name} contains itself"));
+            return Err(format!("${name} contains itself"));
         }
         stack.push(name.to_string());
-        for (_, t) in &self.structs[name].fields {
+        let members: Vec<&Type> = match self.structs.get(name) {
+            Some(s) => s.fields.iter().map(|(_, t)| t).collect(),
+            None => self.enums[name].variants.iter().flat_map(|(_, ts)| ts).collect(),
+        };
+        for t in members {
             // Arrays hold their elements by value; pointers break the cycle.
             let mut t = t;
             while let Type::Array(elem, _) = t {
                 t = elem;
             }
-            if let Type::Struct(inner) = t {
+            if let Type::Struct(inner) | Type::Enum(inner) = t {
                 self.check_acyclic(inner, stack)?;
             }
         }
         stack.pop();
         Ok(())
+    }
+
+    fn variant<'a>(&'a self, t: &Type, index: u32) -> Result<&'a [Type], String> {
+        let Type::Enum(name) = t else { return Err(format!("{} is not an enum", t.jir())) };
+        let def = self.enums.get(name.as_str()).ok_or_else(|| format!("unknown enum `${name}`"))?;
+        def.variants
+            .get(index as usize)
+            .map(|(_, ts)| ts.as_slice())
+            .ok_or_else(|| format!("${name} has no variant {index}"))
     }
 
     fn field<'a>(&'a self, t: &Type, index: u32) -> Result<&'a Type, String> {
@@ -201,6 +229,25 @@ impl Cx<'_> {
                         }
                     }
                     Inst::Field { dst, src, index } => expect(dst, self.field(ty(src)?, *index)?),
+                    Inst::Variant { dst, index, fields } => {
+                        let payload = self.variant(ty(dst)?, *index)?;
+                        if payload.len() != fields.len() {
+                            Err(format!("variant {index} holds {} values, {} given", payload.len(), fields.len()))
+                        } else {
+                            fields.iter().zip(payload).try_for_each(|(r, t)| expect(r, t))
+                        }
+                    }
+                    Inst::Tag { dst, src } => match ty(src)? {
+                        Type::Enum(_) => expect(dst, &Type::Int(IntTy::U32)),
+                        t => Err(format!("`tag` needs an enum, found {}", t.jir())),
+                    },
+                    Inst::Payload { dst, src, variant, index } => {
+                        let payload = self.variant(ty(src)?, *variant)?;
+                        let t = payload
+                            .get(*index as usize)
+                            .ok_or_else(|| format!("variant {variant} has no value {index}"))?;
+                        expect(dst, t)
+                    }
                     Inst::SetField { dst, src, index, value } => {
                         expect(value, self.field(ty(src)?, *index)?)?;
                         expect(dst, ty(src)?)

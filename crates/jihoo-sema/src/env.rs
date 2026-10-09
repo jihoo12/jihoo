@@ -26,6 +26,8 @@ pub(crate) struct Sig {
 }
 
 pub(crate) type Fields = Rc<Vec<(String, Type)>>;
+/// The variants of an enum: names and payload types.
+pub(crate) type Variants = Rc<Vec<(String, Vec<Type>)>>;
 
 /// An instance of a generic function.
 struct Instance {
@@ -87,6 +89,7 @@ pub(crate) struct Env<'p> {
     fn_decls: HashMap<String, (usize, &'p FnDecl)>,
     const_decls: HashMap<String, (usize, &'p ConstDecl)>,
     structs: Memo<Fields>,
+    enums: Memo<Variants>,
     sigs: Memo<Rc<Sig>>,
     consts: Memo<Rc<(Type, ConstValue)>>,
     funcs: Memo<Rc<ir::Function>>,
@@ -125,6 +128,7 @@ impl<'p> Env<'p> {
             fn_decls: HashMap::new(),
             const_decls: HashMap::new(),
             structs: Memo::new(),
+            enums: Memo::new(),
             sigs: Memo::new(),
             consts: Memo::new(),
             funcs: Memo::new(),
@@ -142,7 +146,7 @@ impl<'p> Env<'p> {
                 if Type::from_name(&s.name).is_some() {
                     errors.push(Error::new(s.pos, format!("`{}` is a builtin type name", s.name)));
                 } else if env.struct_decls.insert(env.item_key(m, &s.name), (m, s)).is_some() {
-                    errors.push(Error::new(s.pos, format!("struct `{}` is defined twice", s.name)));
+                    errors.push(Error::new(s.pos, format!("type `{}` is defined twice", s.name)));
                 }
             }
             for f in &prog.funcs {
@@ -261,15 +265,16 @@ impl<'p> Env<'p> {
                 let Some((dm, decl)) = self.struct_decls.get(&key).copied() else {
                     return Err(Error::new(t.pos, format!("unknown type `{name}`")));
                 };
+                let kind = decl.kind();
                 if decl.params.is_empty() {
-                    return Err(Error::new(t.pos, format!("struct `{name}` takes no arguments")));
+                    return Err(Error::new(t.pos, format!("{kind} `{name}` takes no arguments")));
                 }
                 if decl.params.len() != args.len() {
-                    let msg = format!("struct `{name}` takes {} arguments, {} given", decl.params.len(), args.len());
+                    let msg = format!("{kind} `{name}` takes {} arguments, {} given", decl.params.len(), args.len());
                     return Err(Error::new(t.pos, msg));
                 }
                 let bindings = self.bind(name, dm, decl.params.iter().zip(args), b)?;
-                Ok(Type::Struct(self.struct_instance(&key, bindings)))
+                Ok(named(decl, self.struct_instance(&key, bindings)))
             }
             TypeExprKind::Named(name) => {
                 match b.get(name) {
@@ -304,11 +309,12 @@ impl<'p> Env<'p> {
                     Ok(ty)
                 } else if let Some(&(_, decl)) = self.key(b.module, name).and_then(|k| self.struct_decls.get(&k)) {
                     if !decl.params.is_empty() {
-                        return Err(Error::new(t.pos, format!("struct `{name}` is generic; write `{name}(...)`")));
+                        let kind = decl.kind();
+                        return Err(Error::new(t.pos, format!("{kind} `{name}` is generic; write `{name}(...)`")));
                     }
                     let key = self.key(b.module, name).unwrap();
                     self.check_visible(t.pos, b.module, &key)?;
-                    Ok(Type::Struct(key))
+                    Ok(named(decl, key))
                 } else if name.contains('.') && self.key(b.module, name).is_none() {
                     Err(self.key_or_err(t.pos, b, name).unwrap_err())
                 } else if name == "ptr" {
@@ -365,15 +371,39 @@ impl<'p> Env<'p> {
         name
     }
 
-    /// Names of every generic struct instance so far, in creation order.
-    pub fn struct_instance_names(&self) -> Vec<String> {
-        self.struct_instances.borrow().iter().map(|(n, _, _)| n.clone()).collect()
+    /// Every generic struct and enum instance so far, in creation order, as types.
+    pub fn struct_instances(&self) -> Vec<Type> {
+        let instances = self.struct_instances.borrow();
+        instances.iter().map(|(n, d, _)| named(self.struct_decls[d.as_str()].1, n.clone())).collect()
+    }
+
+    /// The key of the generic declaration that type `name` is an instance of.
+    pub fn instance_decl(&self, name: &str) -> Option<String> {
+        self.struct_instances.borrow().iter().find(|(n, _, _)| n == name).map(|(_, d, _)| d.clone())
+    }
+
+    /// The instance of generic struct or enum `decl_key` with type arguments `args`.
+    pub fn instance_of(&self, decl_key: &str, args: Vec<Type>) -> Type {
+        let decl = self.struct_decls[decl_key].1;
+        let mut b = Bindings::in_module(self.struct_decls[decl_key].0);
+        for (p, t) in decl.params.iter().zip(args) {
+            b.push(&p.name, Binding::Type(t));
+        }
+        named(decl, self.struct_instance(decl_key, b))
+    }
+
+    /// The declaration of the struct or enum `key` (a module-qualified name).
+    pub fn type_decl(&self, key: &str) -> Option<(usize, &'p StructDecl)> {
+        self.struct_decls.get(key).copied()
     }
 
     pub fn struct_fields(&self, pos: Pos, name: &str) -> Result<Fields, Error> {
         let (decl, bindings) = self.struct_decl(pos, name)?;
         if !decl.params.is_empty() && bindings.is_empty() {
             return Err(Error::new(pos, format!("struct `{name}` is generic; write `{name}(...)`")));
+        }
+        if decl.is_enum() {
+            return Err(Error::new(pos, format!("`{name}` is an enum; it has variants, not fields")));
         }
         self.structs.get(
             name,
@@ -397,20 +427,67 @@ impl<'p> Env<'p> {
         )
     }
 
-    /// A struct may not contain itself by value; use a pointer instead.
-    pub fn check_acyclic(&self, name: &str) -> Result<(), Error> {
-        self.acyclic(name, name, &mut Vec::new())
+    /// The variants of enum `name` (an instance name for generic enums).
+    pub fn enum_variants(&self, pos: Pos, name: &str) -> Result<Variants, Error> {
+        let (decl, bindings) = self.struct_decl(pos, name)?;
+        if !decl.params.is_empty() && bindings.is_empty() {
+            return Err(Error::new(pos, format!("enum `{name}` is generic; write `{name}(...)`")));
+        }
+        let Some(decls) = &decl.variants else {
+            return Err(Error::new(pos, format!("`{name}` is a struct, not an enum")));
+        };
+        self.enums.get(
+            name,
+            || Error::new(decl.pos, format!("enum `{name}` depends on itself")),
+            || {
+                let mut variants: Vec<(String, Vec<Type>)> = Vec::new();
+                for v in decls {
+                    if variants.iter().any(|(n, _)| *n == v.name) {
+                        return Err(Error::new(v.pos, format!("variant `{}` is declared twice", v.name)));
+                    }
+                    let tys = v.fields.iter().map(|t| self.resolve(t, &bindings)).collect::<Result<_, _>>();
+                    let tys = tys.map_err(|mut e| {
+                        if !bindings.is_empty() {
+                            e.msg = format!("{} (in `{name}`)", e.msg);
+                        }
+                        e
+                    })?;
+                    variants.push((v.name.clone(), tys));
+                }
+                if variants.len() > u32::MAX as usize {
+                    return Err(Error::new(decl.pos, format!("enum `{name}` has too many variants")));
+                }
+                Ok(Rc::new(variants))
+            },
+        )
     }
 
-    fn acyclic(&self, root: &str, name: &str, stack: &mut Vec<String>) -> Result<(), Error> {
-        let pos = self.struct_decl(Pos::new(1, 1), root)?.0.pos;
-        if stack.iter().any(|s| s == name) {
+    /// The fields of a struct or the payload types of every variant of an enum.
+    fn members(&self, pos: Pos, t: &Type) -> Result<Vec<Vec<Type>>, Error> {
+        Ok(match t {
+            Type::Struct(name) => vec![self.struct_fields(pos, name)?.iter().map(|(_, t)| t.clone()).collect()],
+            Type::Enum(name) => self.enum_variants(pos, name)?.iter().map(|(_, ts)| ts.clone()).collect(),
+            _ => vec![],
+        })
+    }
+
+    /// A struct or enum may not contain itself by value; use a pointer instead.
+    pub fn check_acyclic(&self, t: &Type) -> Result<(), Error> {
+        self.acyclic(t, t, &mut Vec::new())
+    }
+
+    fn acyclic(&self, root: &Type, t: &Type, stack: &mut Vec<String>) -> Result<(), Error> {
+        let (Type::Struct(root_name) | Type::Enum(root_name)) = root else { return Ok(()) };
+        let decl = self.struct_decl(Pos::new(1, 1), root_name)?.0;
+        let name = t.to_string();
+        if stack.contains(&name) {
             let path = stack.join(" -> ");
-            return Err(Error::new(pos, format!("struct `{root}` contains itself ({path} -> {name}); use a pointer")));
+            let msg = format!("{} `{root}` contains itself ({path} -> {name}); use a pointer", decl.kind());
+            return Err(Error::new(decl.pos, msg));
         }
-        stack.push(name.to_string());
-        for (_, t) in self.struct_fields(pos, name)?.iter() {
-            if let Some(inner) = struct_by_value(t) {
+        stack.push(name);
+        for inner in self.members(decl.pos, t)?.iter().flatten() {
+            if let Some(inner) = named_by_value(inner) {
                 self.acyclic(root, inner, stack)?;
             }
         }
@@ -438,15 +515,18 @@ impl<'p> Env<'p> {
         fields[index as usize].1.clone()
     }
 
+    /// The payload types of variant `index` of enum type `t`, which was already resolved.
+    pub fn payload_types(&self, t: &Type, index: u32) -> Vec<Type> {
+        let Type::Enum(e) = t else { unreachable!("not an enum: {t}") };
+        let variants = self.enum_variants(Pos::default(), e).expect("enum was resolved before");
+        variants[index as usize].1.clone()
+    }
+
     pub fn layout(&self, pos: Pos, t: &Type) -> Result<layout::Layout, Error> {
-        if let Some(s) = struct_by_value(t) {
+        if let Some(s) = named_by_value(t) {
             self.check_acyclic(s)?;
         }
-        let fields = |name: &str| {
-            let fields = self.struct_fields(pos, name).ok()?;
-            Some(fields.iter().map(|(_, t)| t.clone()).collect())
-        };
-        layout::of(t, &fields)
+        layout::of(t, &|t| self.members(pos, t).ok())
             .ok_or_else(|| Error::new(pos, format!("type {t} has no fixed memory layout (it contains a GC reference)")))
     }
 
@@ -621,11 +701,21 @@ impl<'p> Env<'p> {
     }
 }
 
-/// The struct `t` holds by value, looking through arrays (pointers break cycles).
-fn struct_by_value(t: &Type) -> Option<&str> {
+/// The struct or enum `t` holds by value, looking through arrays (pointers break
+/// cycles).
+fn named_by_value(t: &Type) -> Option<&Type> {
     match t {
-        Type::Struct(s) => Some(s),
-        Type::Array(elem, _) => struct_by_value(elem),
+        Type::Struct(_) | Type::Enum(_) => Some(t),
+        Type::Array(elem, _) => named_by_value(elem),
         _ => None,
+    }
+}
+
+/// The type that declaration `decl` declares under the name `name`.
+fn named(decl: &StructDecl, name: String) -> Type {
+    if decl.is_enum() {
+        Type::Enum(name)
+    } else {
+        Type::Struct(name)
     }
 }

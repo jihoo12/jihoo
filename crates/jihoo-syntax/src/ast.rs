@@ -48,6 +48,31 @@ pub struct StructDecl {
     /// generic. Each distinct set of arguments is its own struct type.
     pub params: Vec<Param>,
     pub fields: Vec<FieldDecl>,
+    /// `Some` for an `enum`, whose `fields` are empty.
+    pub variants: Option<Vec<VariantDecl>>,
+}
+
+impl StructDecl {
+    pub fn is_enum(&self) -> bool {
+        self.variants.is_some()
+    }
+
+    /// `struct` or `enum`, for messages.
+    pub fn kind(&self) -> &'static str {
+        if self.is_enum() {
+            "enum"
+        } else {
+            "struct"
+        }
+    }
+}
+
+/// A variant of an enum: `Circle(i64)`, or `Empty` without a payload.
+#[derive(Debug, Clone)]
+pub struct VariantDecl {
+    pub pos: Pos,
+    pub name: String,
+    pub fields: Vec<TypeExpr>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,7 +162,32 @@ pub enum Stmt {
         cond: Expr,
         body: Block,
     },
+    /// `match value { pattern => body ... }`
+    Match {
+        pos: Pos,
+        value: Expr,
+        arms: Vec<MatchArm>,
+    },
     Expr(Expr),
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub pos: Pos,
+    pub pattern: Pattern,
+    pub body: Block,
+}
+
+#[derive(Debug, Clone)]
+pub enum Pattern {
+    /// `_`: anything.
+    Wild,
+    /// An integer literal, possibly negative.
+    Int(i128),
+    Bool(bool),
+    /// `Circle(r, _)`: a variant of the matched enum, binding its payload values
+    /// to names (`_` ignores one). `None` without parentheses: `Empty`.
+    Variant(String, Option<Vec<(Pos, Option<String>)>>),
 }
 
 #[derive(Debug, Clone)]
@@ -382,6 +432,17 @@ pub fn set_stmt_pos(s: &mut Stmt, pos: Pos) {
             set_pos(cond, pos);
             set_block_pos(body, pos);
         }
+        Stmt::Match { pos: p, value, arms } => {
+            *p = pos;
+            set_pos(value, pos);
+            for arm in arms {
+                arm.pos = pos;
+                if let Pattern::Variant(_, Some(binds)) = &mut arm.pattern {
+                    binds.iter_mut().for_each(|b| b.0 = pos);
+                }
+                set_block_pos(&mut arm.body, pos);
+            }
+        }
         Stmt::Expr(e) => set_pos(e, pos),
     }
 }
@@ -397,6 +458,10 @@ pub fn set_program_pos(p: &mut Program, pos: Pos) {
         for f in &mut s.fields {
             f.pos = pos;
             set_type_pos(&mut f.ty, pos);
+        }
+        for v in s.variants.iter_mut().flatten() {
+            v.pos = pos;
+            v.fields.iter_mut().for_each(|t| set_type_pos(t, pos));
         }
     }
     for c in &mut p.consts {

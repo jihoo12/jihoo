@@ -334,6 +334,20 @@ Inst parse_assign(Line &l) {
     uint32_t i = l.reg();
     l.punct(",");
     inst.args = {a, i, l.reg()};
+  } else if (w == "variant") {
+    inst.op = Op::Variant;
+    inst.imm = l.index();
+    inst.args = l.reg_list();
+  } else if (w == "tag") {
+    inst.op = Op::Tag;
+    inst.args = {l.reg()};
+  } else if (w == "payload") {
+    inst.op = Op::Payload;
+    inst.args = {l.reg()};
+    l.punct(",");
+    inst.imm = l.index();
+    l.punct(",");
+    inst.imm2 = l.index();
   } else if (w == "setfield") {
     inst.op = Op::SetField;
     uint32_t src = l.reg();
@@ -399,6 +413,39 @@ Module parse(const std::string &text) {
           def.has_layout = true;
         }
         m.structs.push_back(std::move(def));
+      } else if (first.kind == TokKind::Word && first.text == "enum") {
+        // enum $Name { A, B(T, U), ... } [size S align A]
+        const Tok &name = l.next("an enum name");
+        if (name.kind != TokKind::StructName) fail(no, "expected an enum like $Name");
+        EnumDef def{name.text, {}};
+        l.punct("{");
+        while (!l.peek_punct("}")) {
+          const Tok &variant = l.next("a variant name");
+          if (variant.kind != TokKind::Word) fail(no, "expected a variant name");
+          std::vector<Type> payload;
+          if (l.peek_punct("(")) {
+            l.i++;
+            if (!l.peek_punct(")")) {
+              payload.push_back(l.type());
+              while (l.peek_punct(",")) {
+                l.i++;
+                payload.push_back(l.type());
+              }
+            }
+            l.punct(")");
+          }
+          def.variants.emplace_back(variant.text, std::move(payload));
+          if (!l.peek_punct("}")) l.punct(",");
+        }
+        l.punct("}");
+        if (!l.done()) {
+          l.word("size");
+          def.size = uint64_t(l.integer());
+          l.word("align");
+          def.align = uint64_t(l.integer());
+          def.has_layout = true;
+        }
+        m.enums.push_back(std::move(def));
       } else if (first.kind == TokKind::Word && first.text == "fn") {
         if (!saw_version || !saw_profile) fail(no, "missing `jir 0` / `profile` header");
         const Tok &name = l.next("a function name");
@@ -420,7 +467,7 @@ Module parse(const std::string &text) {
         l.punct("{");
         need_regs = true;
       } else {
-        fail(no, "expected `jir`, `profile`, `struct`, or `fn`");
+        fail(no, "expected `jir`, `profile`, `struct`, `enum`, or `fn`");
       }
       l.end();
       continue;

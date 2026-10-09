@@ -51,6 +51,7 @@ pub struct BlockId(pub u32);
 pub struct Module {
     pub profile: Profile,
     pub structs: Vec<StructDef>,
+    pub enums: Vec<EnumDef>,
     pub funcs: Vec<Function>,
 }
 
@@ -62,6 +63,19 @@ impl Module {
     pub fn struct_def(&self, name: &str) -> Option<&StructDef> {
         self.structs.iter().find(|s| s.name == name)
     }
+
+    pub fn enum_def(&self, name: &str) -> Option<&EnumDef> {
+        self.enums.iter().find(|e| e.name == name)
+    }
+
+    /// What a struct or enum type holds, for [`layout::of`].
+    pub fn members(&self, t: &Type) -> Option<Vec<Vec<Type>>> {
+        match t {
+            Type::Struct(name) => Some(vec![self.struct_def(name)?.fields.iter().map(|(_, t)| t.clone()).collect()]),
+            Type::Enum(name) => Some(self.enum_def(name)?.variants.iter().map(|(_, ts)| ts.clone()).collect()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +83,14 @@ pub struct StructDef {
     pub name: String,
     /// Field names are kept for readability; instructions address fields by index.
     pub fields: Vec<(String, Type)>,
+}
+
+/// A sum type: a value is one of the variants, each with its own payload.
+/// Instructions address variants by index.
+#[derive(Debug, Clone)]
+pub struct EnumDef {
+    pub name: String,
+    pub variants: Vec<(String, Vec<Type>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +210,12 @@ pub enum Inst {
     Addr { dst: Reg, src: Reg },
     /// Freestanding only: the address of field `index` of the struct `ptr` points to.
     FieldPtr { dst: Reg, ptr: Reg, index: u32 },
+    /// Builds variant `index` of the enum type of `dst` from its payload values.
+    Variant { dst: Reg, index: u32, fields: Vec<Reg> },
+    /// The variant index of enum value `src`, as a `u32`.
+    Tag { dst: Reg, src: Reg },
+    /// Payload value `index` of enum value `src`, which must be variant `variant`.
+    Payload { dst: Reg, src: Reg, variant: u32, index: u32 },
     /// Builds an array from all of its elements.
     Array { dst: Reg, items: Vec<Reg> },
     /// An array with every element set to `value`.
