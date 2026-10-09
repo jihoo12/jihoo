@@ -242,6 +242,8 @@ pub enum PatternKind {
     /// `Point { x, y: 0, .. }`: a struct and patterns for some of its fields
     /// (`x` alone is `x: x`); `true` with `..`, which ignores the other fields.
     Struct(String, Vec<(Pos, String, Pattern)>, bool),
+    /// `p | q`: either pattern. Both bind the same names.
+    Or(Vec<Pattern>),
 }
 
 #[derive(Debug, Clone)]
@@ -573,7 +575,7 @@ fn set_pattern_pos(p: &mut Pattern, pos: Pos) {
     p.pos = pos;
     match &mut p.kind {
         PatternKind::Wild | PatternKind::Int(_) | PatternKind::Bool(_) | PatternKind::Name(_) => {}
-        PatternKind::Variant(_, args) => args.iter_mut().for_each(|a| set_pattern_pos(a, pos)),
+        PatternKind::Variant(_, args) | PatternKind::Or(args) => args.iter_mut().for_each(|a| set_pattern_pos(a, pos)),
         PatternKind::Struct(_, fields, _) => fields.iter_mut().for_each(|(p, _, f)| {
             *p = pos;
             set_pattern_pos(f, pos);

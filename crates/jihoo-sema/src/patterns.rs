@@ -31,6 +31,8 @@ pub(crate) enum Pat {
     Any(Option<String>),
     /// A constructor, and patterns for its parts.
     Ctor(Ctor, Vec<Pat>),
+    /// Any of the alternatives, which bind the same names.
+    Or(Vec<Pat>),
 }
 
 /// A way to build a value; the parts are what it holds.
@@ -130,6 +132,17 @@ impl FnCx<'_> {
                 };
                 return Err(Error::new(arm.pos, msg));
             }
+            // So must each alternative of `p | q`, given the ones before it.
+            if let (Pat::Or(alts), PatternKind::Or(written)) = (&p, &arm.pattern.kind) {
+                let mut seen = covered.clone();
+                for (alt, w) in alts.iter().zip(written) {
+                    if self.useful(&seen, std::slice::from_ref(alt), std::slice::from_ref(&ty)).is_none() {
+                        let msg = format!("unreachable alternative: `{}` is already matched above", self.show(alt, &ty));
+                        return Err(Error::new(w.pos, msg));
+                    }
+                    seen.push(vec![alt.clone()]);
+                }
+            }
             if arm.guard.is_none() {
                 covered.push(vec![p.clone()]);
             }
@@ -180,8 +193,8 @@ impl FnCx<'_> {
     // ---- checking ----
 
     /// Checks `p` against type `t`. `names` are the names bound so far in the
-    /// whole pattern, which must differ.
-    fn check_pattern(&self, p: &Pattern, t: &Type, names: &mut Vec<String>) -> Result<Pat, Error> {
+    /// whole pattern, which must differ, with their types.
+    fn check_pattern(&self, p: &Pattern, t: &Type, names: &mut Vec<(String, Type)>) -> Result<Pat, Error> {
         let err = |msg: String| Err(Error::new(p.pos, msg));
         // A pattern for what a ref refers to reads through the ref; `_` and a
         // name that binds take the ref itself.
@@ -214,11 +227,42 @@ impl FnCx<'_> {
                         _ => err(format!("`{n}` looks like a variant, but the value is {t}, not an enum")),
                     };
                 }
-                if names.contains(n) {
+                if names.iter().any(|(m, _)| m == n) {
                     return err(format!("`{n}` is bound twice in this pattern"));
                 }
-                names.push(n.clone());
+                names.push((n.clone(), t.clone()));
                 Pat::Any(Some(n.clone()))
+            }
+            PatternKind::Or(alts) => {
+                // Every alternative must bind the same names, with the same types.
+                let before = names.len();
+                let mut bound: Option<Vec<(String, Type)>> = None;
+                let mut pats = Vec::with_capacity(alts.len());
+                for a in alts {
+                    let mut these = names.clone();
+                    pats.push(self.check_pattern(a, t, &mut these)?);
+                    let mut new = these.split_off(before);
+                    new.sort_by(|x, y| x.0.cmp(&y.0));
+                    match &bound {
+                        None => bound = Some(new),
+                        Some(first) if *first != new => {
+                            let only = first.iter().chain(&new).find(|(n, _)| {
+                                first.iter().all(|(m, _)| m != n) || new.iter().all(|(m, _)| m != n)
+                            });
+                            let msg = match only {
+                                Some((n, _)) => format!("`{n}` is bound in some alternatives of this `|` pattern but not in others"),
+                                None => {
+                                    let ((n, a), (_, b)) = first.iter().zip(&new).find(|(x, y)| x.1 != y.1).unwrap();
+                                    format!("`{n}` is {a} in one alternative of this `|` pattern and {b} in another")
+                                }
+                            };
+                            return Err(Error::new(a.pos, msg));
+                        }
+                        Some(_) => {}
+                    }
+                }
+                names.extend(bound.unwrap_or_default());
+                Pat::Or(pats)
             }
             PatternKind::Variant(n, args) => {
                 if !matches!(t, Type::Enum(_)) {
@@ -328,6 +372,14 @@ impl FnCx<'_> {
         let Some(head) = q.first() else {
             return rows.is_empty().then(Vec::new);
         };
+        // `p | q` is useful if one of its alternatives is.
+        if let Pat::Or(alts) = head {
+            return alts.iter().find_map(|a| {
+                let q: Vec<Pat> = std::iter::once(a.clone()).chain(q[1..].iter().cloned()).collect();
+                self.useful(rows, &q, tys)
+            });
+        }
+        let rows = &expand(rows);
         if let Pat::Ctor(c, _) = head {
             return self.useful_ctor(rows, q, tys, *c);
         }
@@ -374,7 +426,7 @@ impl FnCx<'_> {
     fn useful_ctor(&self, rows: &[Vec<Pat>], q: &[Pat], tys: &[Type], c: Ctor) -> Option<Vec<Pat>> {
         let parts = self.parts(&tys[0], c);
         let n = parts.len();
-        let rows: Vec<Vec<Pat>> = rows.iter().filter_map(|r| specialize(r, c, n)).collect();
+        let rows: Vec<Vec<Pat>> = expand(rows).iter().filter_map(|r| specialize(r, c, n)).collect();
         let q = specialize(q, c, n)?;
         let tys: Vec<Type> = parts.into_iter().chain(tys[1..].iter().cloned()).collect();
         let mut w = self.useful(&rows, &q, &tys)?;
@@ -396,6 +448,7 @@ impl FnCx<'_> {
     fn show(&self, p: &Pat, t: &Type) -> String {
         match p {
             Pat::Any(_) => "_".into(),
+            Pat::Or(alts) => alts.iter().map(|a| self.show(a, t)).collect::<Vec<_>>().join(" | "),
             Pat::Ctor(Ctor::Bool(b), _) => b.to_string(),
             Pat::Ctor(Ctor::Int(n), _) => n.to_string(),
             Pat::Ctor(Ctor::Ref, args) => {
@@ -435,6 +488,31 @@ impl FnCx<'_> {
                 let r = self.emit_to(t.clone(), |dst| Inst::Copy { dst, src: v });
                 binds.push((n.clone(), r));
             }
+            // Try each alternative in turn; the names they bind go to registers
+            // they share, made for the first one.
+            Pat::Or(alts) => {
+                let join = self.new_block();
+                let mut shared: Vec<(String, Reg)> = Vec::new();
+                for (k, alt) in alts.iter().enumerate() {
+                    let last = k + 1 == alts.len();
+                    let next = if last { fail } else { self.new_block() };
+                    let mut these = Vec::new();
+                    self.test(alt, t, v, next, &mut these);
+                    if k == 0 {
+                        shared = these.iter().map(|(n, r)| (n.clone(), self.new_reg(self.ty(*r).clone()))).collect();
+                    }
+                    for (n, r) in these {
+                        let dst = shared.iter().find(|(m, _)| *m == n).unwrap().1;
+                        self.emit(Inst::Copy { dst, src: r });
+                    }
+                    self.terminate(Terminator::Jump(join));
+                    if !last {
+                        self.switch_to(next);
+                    }
+                }
+                self.switch_to(join);
+                binds.extend(shared);
+            }
             Pat::Ctor(c, args) => {
                 let k = match c {
                     Ctor::Bool(b) => Some(self.konst(Type::Bool, *b as i64)),
@@ -470,13 +548,32 @@ impl FnCx<'_> {
     }
 }
 
+/// The rows, with every row whose first pattern is `p | q | ...` replaced by a
+/// row for each alternative.
+fn expand(rows: &[Vec<Pat>]) -> Vec<Vec<Pat>> {
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        match &r[0] {
+            Pat::Or(alts) => {
+                let alt_rows: Vec<Vec<Pat>> =
+                    alts.iter().map(|a| std::iter::once(a.clone()).chain(r[1..].iter().cloned()).collect()).collect();
+                out.extend(expand(&alt_rows));
+            }
+            _ => out.push(r.clone()),
+        }
+    }
+    out
+}
+
 /// Row `row` for values built with `c` (which has `n` parts) in the first
 /// column: the parts replace it. `None` if the row cannot match such a value.
+/// The row must not start with `|` (see [`expand`]).
 fn specialize(row: &[Pat], c: Ctor, n: usize) -> Option<Vec<Pat>> {
     let parts = match &row[0] {
         Pat::Ctor(d, parts) if *d == c => parts.clone(),
         Pat::Ctor(..) => return None,
         Pat::Any(_) => vec![ANY; n],
+        Pat::Or(_) => unreachable!("rows are expanded first"),
     };
     Some(parts.into_iter().chain(row[1..].iter().cloned()).collect())
 }

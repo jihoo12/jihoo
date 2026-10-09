@@ -571,6 +571,19 @@ fn patterns_read_through_refs() {
 }
 
 #[test]
+fn or_patterns() {
+    let shapes = "enum S { A(i64), B(i64), C(bool), D }\n";
+    let m = |arms: &str| err(&format!("{shapes}fn f(s: S) -> i64 {{ return match s {{ {arms} }} }}\nfn main() {{}}"));
+    assert!(m("A(x) | B(y) => 1, _ => 0").contains("`x` is bound in some alternatives of this `|` pattern but not in others"));
+    assert!(m("A(x) | C(x) => 1, _ => 0").contains("`x` is i64 in one alternative of this `|` pattern and bool in another"));
+    assert!(m("A(_) | D => 1, D | B(_) => 2, _ => 0").contains("unreachable alternative: `D` is already matched above"));
+    assert!(m("A(_) | B(_) => 1, C(true) => 2").contains("does not cover `C(false)`, `D`"));
+    assert!(m("A(1 | 2) => 1, A(_) | B(_) | C(_) | D => 2, A(3) => 3").contains("unreachable arm"));
+    let m = check(&format!("{shapes}fn f(s: S) -> i64 {{ return match s {{ A(n) | B(n) => n, C(true | false) | D => 0 }} }}\nfn main() {{}}")).unwrap();
+    assert!(m.to_string().contains("fn @f($S) -> i64"), "{m}");
+}
+
+#[test]
 fn match_expressions() {
     let m = check(&format!(
         "{NESTED}fn f(o: O(i64)) -> u8 {{ return match o {{ Some(n) if n > 0 => 1, Some(_) => 2, None => 3 }} }}\nfn main() {{ let k = match 3 > 2 {{ true => \"y\", false => \"n\" }}\n print(k) }}"

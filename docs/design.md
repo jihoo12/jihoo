@@ -395,6 +395,7 @@ return Option.Some(i)                // ... or from the payload, or the return t
   | `Empty`, `Rect(p, q)` | a variant of the matched enum, and its payload |
   | `Point { x, y: 0, .. }` | a struct; `x` alone is `x: x`, `..` ignores the other fields |
   | `0`, `-1`, `true` | that value |
+  | `Circle(_) \| Empty`, `Some(1 \| 2)` | either pattern; every alternative binds the same names, with the same types |
 
   Variants are written without the enum, whose type is known. A name is a
   variant if the matched enum has one by that name, and else a new variable;
@@ -406,7 +407,8 @@ return Option.Some(i)                // ... or from the payload, or the return t
   arms above it miss; both are checked with Maranget's usefulness algorithm, so
   nested patterns are handled exactly. An error names a value that is missed,
   as a pattern (`` `match` does not cover `Some(Rect(_, _))` ``); arms with a
-  guard do not count towards covering. Since an exhaustive `match` has no
+  guard do not count towards covering, and an alternative of a `|` pattern that
+  can never match is an error too. Since an exhaustive `match` has no
   fall-through, a function whose arms all `return` needs no `return` after it.
 - `match` is also an expression, with a value after each `=>`:
 
@@ -424,9 +426,8 @@ return Option.Some(i)                // ... or from the payload, or the return t
   `variant`, `tag` and `payload` instructions. Natively it has the C layout of
   a `u32` tag followed by a union of the payloads (`size_of(Shape)` is 24); on
   the VM it is a GC object.
-- Not yet: `|` patterns, and equality on enums. A type cannot contain itself
-  by value; recursive data goes through a `ref` (hosted) or a pointer
-  (freestanding).
+- Not yet: equality on enums. A type cannot contain itself by value; recursive
+  data goes through a `ref` (hosted) or a pointer (freestanding).
 
 ## References
 
@@ -680,7 +681,7 @@ free of LLVM.
 6. ~~GC hardening (one root set, generation-checked references, stress mode);
    function values.~~
 7. ~~Sum types and `match`; `ref T` for recursive data; nested patterns,
-   guards and `match` expressions.~~ `|` patterns.
+   guards, `|` patterns and `match` expressions.~~
 8. ~~Closures, captured by value and lifted into functions.~~
 9. ~~Tasks and channels on the VM: one OS thread, a deterministic scheduler;
    `select`.~~

@@ -1,0 +1,43 @@
+// `|` patterns: alternatives at the top and nested, binding the same names.
+
+struct Point {
+    x: u8
+    y: u8
+}
+
+enum Shape {
+    Circle(Point, u8)
+    Square(Point, u8)
+    Rect(Point, u8, u8)
+    Empty
+}
+
+fn size(s: Shape) -> i64 {
+    return match s {
+        Empty => 0
+        Circle(p, 0) | Square(p, 0) | Rect(p, 0, _) => p.x as i64
+        Circle(_, n) | Square(_, n) | Rect(_, n, 1 | 2) => n as i64 * 10
+        Rect(Point { x: 1 | 3, y }, _, h) => (y + h) as i64
+        Rect(_, w, h) => (w as i64) * (h as i64)
+    }
+}
+
+fn entry() -> i64 {
+    let o = Point { x: 3, y: 4 }
+    let shapes = [
+        Shape.Circle(o, 0),          // 3
+        Shape.Square(o, 5),          // 50
+        Shape.Rect(o, 0, 9),         // 3
+        Shape.Rect(o, 7, 2),         // 70
+        Shape.Rect(o, 7, 9),         // 13
+        Shape.Rect(Point { x: 2, y: 4 }, 7, 9),   // 63
+        Shape.Empty,                 // 0
+    ]
+    let total = 0
+    let i = 0
+    while i < len(shapes) {
+        total = total + size(shapes[i])
+        i = i + 1
+    }
+    return total   // 202
+}

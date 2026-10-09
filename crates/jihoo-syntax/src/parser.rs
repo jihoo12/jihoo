@@ -605,7 +605,21 @@ impl Parser {
         Ok(SelectArm { pos, op, body })
     }
 
+    /// A pattern, possibly with alternatives: `p | q | ...`.
     fn pattern(&mut self) -> PResult<Pattern> {
+        let first = self.single_pattern()?;
+        if *self.peek() != Tok::Pipe {
+            return Ok(first);
+        }
+        let pos = first.pos;
+        let mut alts = vec![first];
+        while self.eat(&Tok::Pipe) {
+            alts.push(self.single_pattern()?);
+        }
+        Ok(Pattern { pos, kind: PatternKind::Or(alts) })
+    }
+
+    fn single_pattern(&mut self) -> PResult<Pattern> {
         let pos = self.pos();
         let negative = self.eat(&Tok::Minus);
         let kind = match self.peek().clone() {
@@ -1483,6 +1497,10 @@ mod tests {
         assert!(matches!(&fields[0].2.kind, PatternKind::Name(x) if x == "x"));
         assert!(matches!(fields[1].2.kind, PatternKind::Int(0)));
         assert!(parse("fn f() { match p { P { .., x } => {} } }").unwrap_err().msg.contains("`}` after `..`"));
+        let s = body("match s {\n A(1 | 2) | B => {}\n}");
+        let Stmt::Match { arms, .. } = &s[0] else { panic!() };
+        let PatternKind::Or(alts) = &arms[0].pattern.kind else { panic!() };
+        assert!(alts.len() == 2 && matches!(&alts[0].kind, PatternKind::Variant(_, a) if matches!(a[0].kind, PatternKind::Or(_))));
     }
 
     #[test]
