@@ -39,9 +39,23 @@ pub struct Channel {
     pub cap: usize,
     pub buf: VecDeque<Value>,
     /// Tasks waiting to send, with their values.
-    pub senders: VecDeque<(usize, Value)>,
-    /// Tasks waiting to receive, with the register the value goes to.
-    pub receivers: VecDeque<(usize, Reg)>,
+    pub senders: VecDeque<(Waiter, Value)>,
+    /// Tasks waiting to receive.
+    pub receivers: VecDeque<Waiter>,
+}
+
+/// A task waiting on a channel. A task in a `select` waits on several channels
+/// at once, with one waiter in each; they share its `token`, so the others can
+/// be removed when one goes ahead.
+#[derive(Debug, Clone, Copy)]
+pub struct Waiter {
+    pub task: usize,
+    pub token: u64,
+    /// For a receiver: the register the value goes to.
+    pub dst: Option<Reg>,
+    /// For a `select`: the register that gets the index of the case that went
+    /// ahead, and that index.
+    pub choice: Option<(Reg, i64)>,
 }
 
 impl Obj {

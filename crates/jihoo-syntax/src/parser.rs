@@ -498,6 +498,11 @@ impl Parser {
                 }
                 Ok(Stmt::Go { pos, call })
             }
+            Tok::Select => {
+                let pos = self.bump().pos;
+                let arms = self.braced_list(|p| p.select_arm())?;
+                Ok(Stmt::Select { pos, arms })
+            }
             Tok::Match => {
                 let pos = self.bump().pos;
                 let value = self.cond()?;
@@ -533,14 +538,51 @@ impl Parser {
     fn match_arm(&mut self) -> PResult<MatchArm> {
         let pos = self.pos();
         let pattern = self.pattern()?;
-        self.expect(&Tok::FatArrow, "`=>`")?;
-        let body = if *self.peek() == Tok::LBrace {
-            self.block()?
-        } else {
-            let s = self.stmt()?;
-            Block { stmts: vec![s], end: self.toks[self.i - 1].pos }
-        };
+        let body = self.arm_body()?;
         Ok(MatchArm { pos, pattern, body })
+    }
+
+    /// `=> { ... }` or `=> statement`, after the head of an arm.
+    fn arm_body(&mut self) -> PResult<Block> {
+        self.expect(&Tok::FatArrow, "`=>`")?;
+        if *self.peek() == Tok::LBrace {
+            return self.block();
+        }
+        let s = self.stmt()?;
+        Ok(Block { stmts: vec![s], end: self.toks[self.i - 1].pos })
+    }
+
+    /// `let v = recv(c) => ...`, `recv(c) => ...`, `send(c, x) => ...` or `_ => ...`.
+    fn select_arm(&mut self) -> PResult<SelectArm> {
+        let pos = self.pos();
+        let op = if matches!(self.peek(), Tok::Ident(n) if n == "_") {
+            self.bump();
+            SelectOp::Default
+        } else {
+            let bind = if self.eat(&Tok::Let) {
+                let (_, name) = self.ident("a variable name")?;
+                self.expect(&Tok::Assign, "`=`")?;
+                Some(name)
+            } else {
+                None
+            };
+            let e = self.expr()?;
+            match (e.kind, bind) {
+                (ExprKind::Call(f, mut args), bind) if f == "recv" && args.len() == 1 => {
+                    SelectOp::Recv { bind, chan: args.remove(0) }
+                }
+                (ExprKind::Call(f, mut args), None) if f == "send" && args.len() == 2 => {
+                    let value = args.pop().unwrap();
+                    SelectOp::Send { chan: args.pop().unwrap(), value }
+                }
+                _ => {
+                    let msg = "a `select` arm starts with `let x = recv(c)`, `recv(c)`, `send(c, v)` or `_`";
+                    return Err(Error::new(e.pos, msg));
+                }
+            }
+        };
+        let body = self.arm_body()?;
+        Ok(SelectArm { pos, op, body })
     }
 
     fn pattern(&mut self) -> PResult<Pattern> {
@@ -1026,6 +1068,7 @@ fn punct(t: &Tok) -> &'static str {
         Tok::Ref => "ref",
         Tok::Go => "go",
         Tok::Chan => "chan",
+        Tok::Select => "select",
         Tok::FatArrow => "=>",
         Tok::As => "as",
         Tok::Const => "const",
@@ -1359,6 +1402,16 @@ mod tests {
         assert!(matches!(&s[1], Stmt::Go { call, .. } if matches!(call.kind, ExprKind::Call(..))));
         assert!(matches!(&s[2], Stmt::Go { call, .. } if matches!(call.kind, ExprKind::CallExpr(..))));
         assert!(matches!(&s[3], Stmt::Let { value, .. } if matches!(&value.kind, ExprKind::Call(_, a) if matches!(a[0].kind, ExprKind::Type(_)))));
+    }
+
+    #[test]
+    fn select_arms() {
+        let s = body("select {\n let v = recv(c) => f(v)\n recv(d) => {}\n send(e, 1) => {}\n _ => {}\n}");
+        let Stmt::Select { arms, .. } = &s[0] else { panic!() };
+        assert!(matches!(&arms[0].op, SelectOp::Recv { bind: Some(v), .. } if v == "v"));
+        assert!(matches!(&arms[1].op, SelectOp::Recv { bind: None, .. }));
+        assert!(matches!(&arms[2].op, SelectOp::Send { .. }));
+        assert!(matches!(&arms[3].op, SelectOp::Default));
     }
 
     #[test]

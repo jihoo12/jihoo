@@ -694,6 +694,7 @@ impl<'a> FnCx<'a> {
             }
             Stmt::Match { pos, value, arms } => self.match_stmt(*pos, value, arms)?,
             Stmt::Go { pos, call } => self.go_stmt(*pos, call)?,
+            Stmt::Select { pos, arms } => self.select_stmt(*pos, arms)?,
             Stmt::While { cond, body } => {
                 let cond_bb = self.new_block();
                 let body_bb = self.new_block();

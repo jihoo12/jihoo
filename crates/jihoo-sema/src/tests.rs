@@ -594,6 +594,28 @@ fn closures_in_freestanding_code() {
     assert!(m.to_string().contains("call @fn.0(") && m.to_string().contains("funcref @fn.1"), "{m}");
 }
 
+// ---- select ----
+
+#[test]
+fn select() {
+    let m = check(
+        "fn main() { let a = chan(i64)\n let b = chan(str, 1)\n select {\n let x = recv(a) => print(x)\n send(b, \"s\") => {}\n _ => {}\n }\n}",
+    )
+    .unwrap();
+    assert!(m.to_string().contains("= select [recv %") && m.to_string().contains("; send %"), "{m}");
+    assert!(m.to_string().contains("; default]"), "{m}");
+
+    let s = |arms: &str| err(&format!("fn main() {{ let a = chan(i64)\n select {{\n{arms}\n}}\n}}"));
+    assert!(s("let x = recv(a) => {}\n_ => {}\n_ => {}").contains("at most one `_` arm"));
+    assert!(s("send(a, \"no\") => {}").contains("the value sent must be i64, found str"));
+    assert!(s("recv(1) => {}").contains("`recv` needs a channel, found i64"));
+    assert!(s("print(1) => {}").contains("a `select` arm starts with"));
+    assert!(s("let x = send(a, 1) => {}").contains("a `select` arm starts with"));
+    assert!(s("let x = recv(a) => {}\nrecv(a) => print(x)").contains("unknown variable `x`"));
+    assert!(err("fn main() { select {} }").contains("needs at least one arm"));
+    assert!(err(&fs("fn f() { select { _ => {} } }")).contains("only available in hosted mode"));
+}
+
 // ---- comptime closures ----
 
 #[test]

@@ -171,6 +171,11 @@ pub enum Stmt {
         pos: Pos,
         call: Expr,
     },
+    /// `select { let v = recv(c) => ..., send(c, x) => ..., _ => ... }`
+    Select {
+        pos: Pos,
+        arms: Vec<SelectArm>,
+    },
     /// `match value { pattern => body ... }`
     Match {
         pos: Pos,
@@ -178,6 +183,23 @@ pub enum Stmt {
         arms: Vec<MatchArm>,
     },
     Expr(Expr),
+}
+
+#[derive(Debug, Clone)]
+pub struct SelectArm {
+    pub pos: Pos,
+    pub op: SelectOp,
+    pub body: Block,
+}
+
+#[derive(Debug, Clone)]
+pub enum SelectOp {
+    /// `recv(chan)`, or `let name = recv(chan)` to keep the value.
+    Recv { bind: Option<String>, chan: Expr },
+    /// `send(chan, value)`
+    Send { chan: Expr, value: Expr },
+    /// `_`: when no other arm can go ahead right away.
+    Default,
 }
 
 #[derive(Debug, Clone)]
@@ -479,6 +501,21 @@ pub fn set_stmt_pos(s: &mut Stmt, pos: Pos) {
         Stmt::Go { pos: p, call } => {
             *p = pos;
             set_pos(call, pos);
+        }
+        Stmt::Select { pos: p, arms } => {
+            *p = pos;
+            for arm in arms {
+                arm.pos = pos;
+                match &mut arm.op {
+                    SelectOp::Recv { chan, .. } => set_pos(chan, pos),
+                    SelectOp::Send { chan, value } => {
+                        set_pos(chan, pos);
+                        set_pos(value, pos);
+                    }
+                    SelectOp::Default => {}
+                }
+                set_block_pos(&mut arm.body, pos);
+            }
         }
         Stmt::Match { pos: p, value, arms } => {
             *p = pos;

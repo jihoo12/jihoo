@@ -1,0 +1,53 @@
+// `select` waits on several channels at once and runs the arm of the first one
+// that can go ahead. If several can, the first in source order wins, so runs
+// are reproducible; `_` runs when none can go ahead right away.
+//   jihoo run examples/select.jh
+
+fn count(out: chan i64, n: i64) {
+    let i = 1
+    while i <= n {
+        send(out, i)
+        i = i + 1
+    }
+}
+
+fn main() {
+    // Merge two streams until both have said they are done.
+    let small = chan(i64)
+    let big = chan(i64)
+    let done = chan(str)
+    go fn() {
+        count(small, 3)
+        send(done, "small")
+    }()
+    go fn() {
+        count(big, 2)
+        send(done, "big")
+    }()
+    let finished = 0
+    let total = 0
+    while finished < 2 {
+        select {
+            let n = recv(small) => total = total + n
+            let n = recv(big) => total = total + n * 100
+            let who = recv(done) => {
+                print(who + " is done")
+                finished = finished + 1
+            }
+        }
+    }
+    print(total)                      // 1 + 2 + 3 + 100 + 200 = 306
+
+    // Sending without waiting: drop values when the buffer is full.
+    let queue = chan(i64, 2)
+    let dropped = 0
+    let i = 0
+    while i < 5 {
+        select {
+            send(queue, i) => {}
+            _ => dropped = dropped + 1
+        }
+        i = i + 1
+    }
+    print("kept " + to_str(recv(queue)) + " and " + to_str(recv(queue)) + ", dropped " + to_str(dropped))
+}

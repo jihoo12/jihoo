@@ -234,6 +234,10 @@ pub enum Inst {
     /// Hosted only: starts a task that calls the function value `callee` with
     /// `args`. Its result is dropped.
     Spawn { callee: Reg, args: Vec<Reg> },
+    /// Hosted only: does the first of `cases` that can go ahead, waiting until
+    /// one can, and sets `dst` (an `i64`) to its index. With `default`, it does
+    /// not wait: if none can go ahead, `dst` is `cases.len()`.
+    Select { dst: Reg, cases: Vec<SelectCase>, default: bool },
     /// Builds an array from all of its elements.
     Array { dst: Reg, items: Vec<Reg> },
     /// An array with every element set to `value`.
@@ -263,6 +267,15 @@ pub enum Inst {
     /// type of `dst`) from template text and holes, with
     /// `pieces.len() == holes.len() + 1`. `kinds` says where each hole sits.
     Quote { dst: Reg, pieces: Vec<String>, holes: Vec<Reg>, kinds: Vec<HoleKind> },
+}
+
+/// One way a `select` can go ahead.
+#[derive(Debug, Clone)]
+pub enum SelectCase {
+    /// Receive from `chan` into `dst`.
+    Recv { dst: Reg, chan: Reg },
+    /// Send `value` on `chan`.
+    Send { chan: Reg, value: Reg },
 }
 
 /// Where a hole of a `quote` sits, which decides how its value is inserted.
@@ -345,6 +358,12 @@ impl Inst {
             SetElem { dst, src, index, value } => vec![dst, src, index, value],
             Store { ptr, value } | Send { chan: ptr, value } => vec![ptr, value],
             Spawn { callee, args } => std::iter::once(callee).chain(args).collect(),
+            Select { dst, cases, .. } => std::iter::once(dst)
+                .chain(cases.iter_mut().flat_map(|c| match c {
+                    SelectCase::Recv { dst, chan } => [dst, chan],
+                    SelectCase::Send { chan, value } => [chan, value],
+                }))
+                .collect(),
             Print { src } => vec![src],
             Call { dst, args, .. }
             | Struct { dst, fields: args, .. }

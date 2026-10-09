@@ -216,6 +216,7 @@ Types containing a `ref` have no fixed layout, like those containing `str`.
 | `send %c, %v`                       | `chan T, T`           |        | send `%v`, waiting while the channel is full |
 | `%d = recv %c`                      | `chan T`              | `T`    | receive a value, waiting until there is one |
 | `spawn %f(%a, ...)`                 | `%f: fn(P...) -> R`, then `P...` | | call `%f` in a new task; the result is dropped |
+| `%d = select [case; ...]`           | each case `recv %c -> %v` (`%v: T`) or `send %c, %v`, optionally a last `default` | `i64` | do the first case that can go ahead, waiting until one can; `%d` is its index. With `default` it does not wait: `%d` is the number of cases if none can go ahead |
 
 The VM runs tasks on one thread with a deterministic round-robin scheduler; the
 run ends when the entry function returns.

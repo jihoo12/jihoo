@@ -273,6 +273,23 @@ impl Cx<'_> {
                         Type::Chan(t) => expect(dst, t),
                         t => Err(format!("`recv` needs a channel, found {}", t.jir())),
                     },
+                    Inst::Select { dst, cases, .. } => {
+                        if profile != Profile::Hosted {
+                            return Err(at("`select` needs the VM's scheduler; hosted only".into()));
+                        }
+                        for c in cases {
+                            let (SelectCase::Recv { chan, .. } | SelectCase::Send { chan, .. }) = c;
+                            let Type::Chan(t) = ty(chan)? else {
+                                return Err(at(format!("`select` needs channels, found {}", ty(chan)?.jir())));
+                            };
+                            match c {
+                                SelectCase::Recv { dst, .. } => expect(dst, t),
+                                SelectCase::Send { value, .. } => expect(value, t),
+                            }
+                            .map_err(at)?;
+                        }
+                        expect(dst, &Type::I64)
+                    }
                     Inst::Spawn { callee, args } => {
                         if profile != Profile::Hosted {
                             return Err(at("`spawn` needs the VM's scheduler; hosted only".into()));

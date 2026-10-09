@@ -109,6 +109,19 @@ impl Display for Inst {
             Inst::Send { chan, value } => write!(f, "send {chan}, {value}"),
             Inst::Recv { dst, chan } => write!(f, "{dst} = recv {chan}"),
             Inst::Spawn { callee, args } => write!(f, "spawn {callee}({})", list(args)),
+            Inst::Select { dst, cases, default } => {
+                let mut parts: Vec<String> = cases
+                    .iter()
+                    .map(|c| match c {
+                        SelectCase::Recv { dst, chan } => format!("recv {chan} -> {dst}"),
+                        SelectCase::Send { chan, value } => format!("send {chan}, {value}"),
+                    })
+                    .collect();
+                if *default {
+                    parts.push("default".into());
+                }
+                write!(f, "{dst} = select [{}]", parts.join("; "))
+            }
             Inst::Deref { dst, src } => write!(f, "{dst} = deref {src}"),
             Inst::Payload { dst, src, variant, index } => write!(f, "{dst} = payload {src}, {variant}, {index}"),
             Inst::Array { dst, items } => write!(f, "{dst} = array({})", list(items)),

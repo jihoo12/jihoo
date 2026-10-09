@@ -464,6 +464,23 @@ match recv(c) { ... }
   value, and refs are immutable. So there are no data races to worry about.
 - There is no `close`: to say "no more values", send a value that says so, as
   `Msg.Done` above; `match` then handles both cases.
+- `select` waits on several channels at once (`examples/select.jh`):
+
+  ```jihoo
+  select {
+      let n = recv(numbers) => total = total + n
+      recv(quit) => running = false
+      send(log, line) => {}
+      _ => print("nothing ready")     // optional: do not wait
+  }
+  ```
+
+  The channels and the values to send are evaluated first, in order. Then the
+  first case that can go ahead without waiting does, and its arm runs; if
+  several can, the first in source order wins (Go picks at random; jihoo stays
+  reproducible). With `_` and no case ready, the `_` arm runs. Otherwise the
+  task waits on all the channels, and the first case another task makes
+  possible goes ahead; its waits on the other channels are cancelled.
 - Tasks run on one OS thread. The VM's scheduler is round-robin and
   deterministic: a task runs until it waits on a channel, finishes, or has run
   1000 instructions, then the next ready task gets its turn. The same program
@@ -472,8 +489,8 @@ match recv(c) { ... }
   or waiting (as in Go). If every task waits on a channel, the run stops with
   `deadlock: every task is waiting on a channel`. An error in any task stops
   the whole run.
-- Hosted only: tasks need the VM's scheduler. In JIR, `chan`, `send`, `recv`
-  and `spawn`.
+- Hosted only: tasks need the VM's scheduler. In JIR, `chan`, `send`, `recv`,
+  `select` and `spawn`.
 
 ## Macros
 
@@ -638,8 +655,8 @@ free of LLVM.
 7. ~~Sum types and `match`; `ref T` for recursive data.~~ Nested patterns and
    `match` expressions.
 8. ~~Closures, captured by value and lifted into functions.~~
-9. ~~Tasks and channels on the VM: one OS thread, a deterministic scheduler.~~
-   `select` over several channels.
+9. ~~Tasks and channels on the VM: one OS thread, a deterministic scheduler;
+   `select`.~~
 10. ~~Comptime closures: closures passed to `comptime` parameters, one
     instance per closure, captured values as hidden arguments.~~
 11. Coroutines for freestanding code, as a library on top of function values

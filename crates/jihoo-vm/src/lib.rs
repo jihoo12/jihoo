@@ -12,8 +12,8 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::Write;
 
-use gc::{GcRef, Heap};
-use jihoo_ir::{BinOp, Function, Inst, Module, Profile, Reg, Terminator, Type, UnOp};
+use gc::{GcRef, Heap, Waiter};
+use jihoo_ir::{BinOp, Function, Inst, Module, Profile, Reg, SelectCase, Terminator, Type, UnOp};
 
 const MAX_CALL_DEPTH: usize = 10_000;
 /// Instructions a task runs before the next ready task gets its turn.
@@ -70,8 +70,14 @@ struct Frame {
 #[derive(Default)]
 struct Task {
     stack: Vec<Frame>,
-    /// The channel the task waits on, if it does.
-    waiting_on: Option<GcRef>,
+    /// What the task waits for, if it does.
+    waiting: Option<Wait>,
+}
+
+/// A task waiting on channels: its waiters there carry `token`.
+struct Wait {
+    token: u64,
+    chans: Vec<GcRef>,
 }
 
 pub struct Vm<'m> {
@@ -89,6 +95,8 @@ pub struct Vm<'m> {
     slice: u32,
     /// Set when the running task starts waiting on a channel.
     blocked: bool,
+    /// The token of the next wait.
+    next_token: u64,
     /// Values handed out to the embedder (`alloc_string`), kept alive for as long
     /// as the VM lives: between allocating an argument and passing it to
     /// `call_named`, no frame holds it.
@@ -117,6 +125,7 @@ impl<'m> Vm<'m> {
             ready: VecDeque::new(),
             slice: TIME_SLICE,
             blocked: false,
+            next_token: 0,
             pinned: Vec::new(),
             fuel: None,
             uniques: 0,
@@ -273,16 +282,84 @@ impl<'m> Vm<'m> {
         Ok(())
     }
 
-    /// Makes the running task wait on channel `chan`.
-    fn wait(&mut self, chan: GcRef) {
-        self.tasks[self.current].waiting_on = Some(chan);
+    /// Makes the running task wait: as a receiver on each channel in `recvs`
+    /// (with the register the value goes to) and as a sender on each one in
+    /// `sends` (with the value). `choice` is the register that gets the index
+    /// of the case that goes ahead, for a `select`; recvs come first, then sends.
+    fn wait(&mut self, recvs: &[(GcRef, Reg, i64)], sends: &[(GcRef, Value, i64)], choice: Option<Reg>) {
+        let token = self.next_token;
+        self.next_token += 1;
+        let task = self.current;
+        let waiter = |dst, i| Waiter { task, token, dst, choice: choice.map(|r| (r, i)) };
+        for &(c, dst, i) in recvs {
+            self.heap.chan_mut(c).receivers.push_back(waiter(Some(dst), i));
+        }
+        for &(c, v, i) in sends {
+            self.heap.chan_mut(c).senders.push_back((waiter(None, i), v));
+        }
+        let chans = recvs.iter().map(|r| r.0).chain(sends.iter().map(|s| s.0)).collect();
+        self.tasks[task].waiting = Some(Wait { token, chans });
         self.blocked = true;
     }
 
-    /// Makes waiting task `task` ready to run again.
-    fn wake(&mut self, task: usize) {
-        self.tasks[task].waiting_on = None;
-        self.ready.push_back(task);
+    /// Lets waiter `w` go ahead (with the value it receives, if any) and makes
+    /// its task ready to run again. Its waiters on other channels are removed.
+    fn complete(&mut self, w: Waiter, value: Option<Value>) {
+        let frame = self.tasks[w.task].stack.last_mut().unwrap();
+        if let (Some(dst), Some(v)) = (w.dst, value) {
+            frame.regs[dst.0 as usize] = v;
+        }
+        if let Some((r, i)) = w.choice {
+            frame.regs[r.0 as usize] = Value::Int(i);
+        }
+        if let Some(wait) = self.tasks[w.task].waiting.take() {
+            for c in wait.chans {
+                let ch = self.heap.chan_mut(c);
+                ch.receivers.retain(|r| r.token != wait.token);
+                ch.senders.retain(|(s, _)| s.token != wait.token);
+            }
+        }
+        self.ready.push_back(w.task);
+    }
+
+    /// Sends `v` on `c` if that needs no waiting.
+    fn try_send(&mut self, c: GcRef, v: Value) -> bool {
+        let ch = self.heap.chan_mut(c);
+        if let Some(w) = ch.receivers.pop_front() {
+            // A receiver is waiting: hand the value over.
+            self.complete(w, Some(v));
+        } else if ch.buf.len() < ch.cap {
+            ch.buf.push_back(v);
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// Receives from `c` if that needs no waiting.
+    fn try_recv(&mut self, c: GcRef) -> Option<Value> {
+        let ch = self.heap.chan_mut(c);
+        if let Some(v) = ch.buf.pop_front() {
+            // Room in the buffer: the first waiting sender puts its value in.
+            if let Some((w, sv)) = ch.senders.pop_front() {
+                ch.buf.push_back(sv);
+                self.complete(w, None);
+            }
+            Some(v)
+        } else if let Some((w, v)) = ch.senders.pop_front() {
+            // No buffer: take the value straight from a waiting sender.
+            self.complete(w, None);
+            Some(v)
+        } else {
+            None
+        }
+    }
+
+    fn chan(&self, r: Reg, what: &str) -> Result<GcRef, VmError> {
+        match self.get(r) {
+            Value::Chan(c) => Ok(c),
+            _ => Err(self.error(&format!("`{what}` needs a channel"))),
+        }
     }
 
     fn frame(&self, func: usize, args: &[Value], ret_dst: Option<Reg>) -> Frame {
@@ -461,7 +538,7 @@ impl<'m> Vm<'m> {
                 let (callee, mut all) = self.callee(*callee)?;
                 all.extend(args.iter().map(|r| self.get(*r)));
                 let frame = self.frame(callee, &all, None);
-                self.tasks.push(Task { stack: vec![frame], waiting_on: None });
+                self.tasks.push(Task { stack: vec![frame], waiting: None });
                 self.ready.push_back(self.tasks.len() - 1);
             }
             Inst::NewChan { dst, cap } => {
@@ -471,42 +548,51 @@ impl<'m> Vm<'m> {
                 self.set(*dst, Value::Chan(r));
             }
             Inst::Send { chan, value } => {
-                let Value::Chan(c) = self.get(*chan) else { return Err(self.error("`send` needs a channel")) };
+                let c = self.chan(*chan, "send")?;
                 let v = self.get(*value);
-                let current = self.current;
-                let ch = self.heap.chan_mut(c);
-                if let Some((task, dst)) = ch.receivers.pop_front() {
-                    // A receiver is waiting: hand the value over.
-                    self.tasks[task].stack.last_mut().unwrap().regs[dst.0 as usize] = v;
-                    self.wake(task);
-                } else if ch.buf.len() < ch.cap {
-                    ch.buf.push_back(v);
-                } else {
-                    ch.senders.push_back((current, v));
-                    self.wait(c);
+                if !self.try_send(c, v) {
+                    self.wait(&[], &[(c, v, 0)], None);
                 }
             }
             Inst::Recv { dst, chan } => {
-                let Value::Chan(c) = self.get(*chan) else { return Err(self.error("`recv` needs a channel")) };
-                let current = self.current;
-                let ch = self.heap.chan_mut(c);
-                if let Some(v) = ch.buf.pop_front() {
-                    // Room in the buffer: the first waiting sender puts its value in.
-                    let sender = ch.senders.pop_front().map(|(task, sv)| {
-                        ch.buf.push_back(sv);
-                        task
-                    });
-                    self.set(*dst, v);
-                    if let Some(task) = sender {
-                        self.wake(task);
+                let c = self.chan(*chan, "recv")?;
+                match self.try_recv(c) {
+                    Some(v) => self.set(*dst, v),
+                    None => self.wait(&[(c, *dst, 0)], &[], None),
+                }
+            }
+            Inst::Select { dst, cases, default } => {
+                // The first case that can go ahead now does, in source order.
+                let mut recvs = Vec::new();
+                let mut sends = Vec::new();
+                for (i, case) in cases.iter().enumerate() {
+                    let i = i as i64;
+                    match case {
+                        SelectCase::Recv { dst: to, chan } => {
+                            let c = self.chan(*chan, "select")?;
+                            if let Some(v) = self.try_recv(c) {
+                                self.set(*to, v);
+                                self.set(*dst, Value::Int(i));
+                                return Ok(());
+                            }
+                            recvs.push((c, *to, i));
+                        }
+                        SelectCase::Send { chan, value } => {
+                            let c = self.chan(*chan, "select")?;
+                            let v = self.get(*value);
+                            if self.try_send(c, v) {
+                                self.set(*dst, Value::Int(i));
+                                return Ok(());
+                            }
+                            sends.push((c, v, i));
+                        }
                     }
-                } else if let Some((task, v)) = ch.senders.pop_front() {
-                    // No buffer: take the value straight from a waiting sender.
-                    self.set(*dst, v);
-                    self.wake(task);
+                }
+                if *default {
+                    self.set(*dst, Value::Int(cases.len() as i64));
                 } else {
-                    ch.receivers.push_back((current, *dst));
-                    self.wait(c);
+                    // With no cases, this waits forever, like Go's `select {}`.
+                    self.wait(&recvs, &sends, Some(*dst));
                 }
             }
             Inst::ToStr { dst, src } => {
@@ -658,7 +744,8 @@ impl<'m> Vm<'m> {
 
     fn maybe_collect(&mut self) {
         if self.heap.should_collect() {
-            let waiting: Vec<Value> = self.tasks.iter().filter_map(|t| t.waiting_on.map(Value::Chan)).collect();
+            let waiting: Vec<Value> =
+                self.tasks.iter().filter_map(|t| t.waiting.as_ref()).flat_map(|w| w.chans.iter().map(|c| Value::Chan(*c))).collect();
             let roots = roots(&self.stack, &self.tasks, &self.pinned, &waiting);
             self.heap.collect(roots);
         }
@@ -1032,6 +1119,66 @@ fn main() {
         assert!(r.unwrap_err().msg.contains("deadlock"));
         let (r, _) = run_limited("fn main() { let c = chan(i64, 0 - 1) }", false);
         assert!(r.unwrap_err().msg.contains("capacity -1 is negative"));
+    }
+
+    #[test]
+    fn select() {
+        // The first ready case wins, in source order; `_` runs when none is ready.
+        let src = "
+fn main() {
+    let a = chan(i64, 1)
+    let b = chan(i64, 1)
+    send(a, 1)
+    send(b, 2)
+    select {
+        let x = recv(b) => print(\"b \" + to_str(x))
+        let y = recv(a) => print(\"a \" + to_str(y))
+    }
+    select {
+        recv(b) => print(\"b again\")
+        send(b, 3) => print(\"sent 3\")
+        _ => print(\"none\")
+    }
+    select {
+        recv(b) => print(\"b now\")
+        _ => print(\"none\")
+    }
+}";
+        let (r, out) = run_limited(src, false);
+        r.unwrap();
+        assert_eq!(out, "b 2\nsent 3\nb now\n");
+
+        // A select in a loop waits on `never` every time. Its waiter there is
+        // removed whenever `tick` goes ahead instead, so the final send on
+        // `never` reaches the final receive, not a stale select.
+        let src = "
+fn main() {
+    let tick = chan(i64)
+    let never = chan(i64)
+    go fn() {
+        let i = 0
+        while i < 200 {
+            send(tick, i)
+            i = i + 1
+        }
+    }()
+    let sum = 0
+    let i = 0
+    while i < 200 {
+        select {
+            let t = recv(tick) => sum = sum + t
+            recv(never) => print(\"wrong\")
+        }
+        i = i + 1
+    }
+    go fn() { send(never, 7) }()
+    print(sum + recv(never))
+}";
+        let (r, out) = run_limited(src, true);
+        r.unwrap();
+        assert_eq!(out, "19907\n");
+        let (r, _) = run_limited("fn main() { let c = chan(i64)\n select { recv(c) => {} } }", false);
+        assert!(r.unwrap_err().msg.contains("deadlock"));
     }
 
     #[test]
