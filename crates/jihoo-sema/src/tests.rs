@@ -146,13 +146,15 @@ fn struct_literals_and_fields() {
 }
 
 #[test]
-fn nested_field_assignment_rebuilds_the_struct() {
-    let m = check(&format!("{POINT}fn main() {{\n let l = Line {{ a: Point {{ x: 0, y: 0 }}, b: Point {{ x: 0, y: 0 }} }}\n l.b.y = 5\n}}"))
+fn nested_field_assignment_is_one_setpath() {
+    let m = check(&format!("{POINT}fn main() {{\n let l = Line {{ a: Point {{ x: 0, y: 0 }}, b: Point {{ x: 0, y: 0 }} }}\n l.b.y = 5\n print(l.b.y)\n l.a = l.b\n}}"))
         .unwrap();
     let text = m.funcs[0].to_string();
-    // l.b.y = 5  =>  t = field l, 1; t2 = setfield t, 1, 5; l = setfield l, 1, t2
-    assert!(text.contains("= field %"), "{text}");
-    assert_eq!(text.matches("setfield").count(), 2, "{text}");
+    // l.b.y = 5  =>  l = setpath l, (field 1, field 1), 5; one level is a setfield.
+    assert!(text.contains(" = setpath %"), "{text}");
+    assert!(text.contains("(field 1, field 1)"), "{text}");
+    assert!(text.contains(" = getpath %"), "{text}");
+    assert_eq!(text.matches("setfield").count(), 1, "{text}");
     assert!(err(&format!("{POINT}fn p() -> Point {{ return Point {{ x: 0, y: 0 }} }}\nfn main() {{ p().x = 1 }}"))
         .contains("cannot assign"));
 }
@@ -236,8 +238,8 @@ fn array_element_assignment() {
     )
     .unwrap();
     let text = m.funcs[0].to_string();
-    // s.xs[i] = v  =>  t = field s, 0; t2 = setelem t, i, v; s = setfield s, 0, t2
-    assert!(text.contains("setelem"), "{text}");
+    // s.xs[i] = v  =>  s = setpath s, (field 0, elem i), v
+    assert!(text.contains("(field 0, elem %"), "{text}");
     assert!(text.contains("splat"), "{text}");
     assert!(err("fn main() { let a = [1, 2]\n a[true] = 3 }").contains("an index must be i64, found bool"));
     assert!(err("fn main() { let a = [1, 2]\n a[0] = \"x\" }").contains("must be i64, found str"));

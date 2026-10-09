@@ -13,7 +13,7 @@ use std::fmt;
 use std::io::Write;
 
 use gc::{GcRef, Heap, Waiter};
-use jihoo_ir::{BinOp, Function, Inst, Module, Profile, Reg, SelectCase, Terminator, Type, UnOp};
+use jihoo_ir::{BinOp, Function, Inst, Module, PathStep, Profile, Reg, SelectCase, Terminator, Type, UnOp};
 
 const MAX_CALL_DEPTH: usize = 10_000;
 /// Instructions a task runs before the next ready task gets its turn.
@@ -97,6 +97,9 @@ pub struct Vm<'m> {
     blocked: bool,
     /// The token of the next wait.
     next_token: u64,
+    /// Objects made in the middle of an instruction that are not in a register
+    /// yet; they are roots until the instruction ends.
+    temp_roots: Vec<Value>,
     /// Values handed out to the embedder (`alloc_string`), kept alive for as long
     /// as the VM lives: between allocating an argument and passing it to
     /// `call_named`, no frame holds it.
@@ -126,6 +129,7 @@ impl<'m> Vm<'m> {
             slice: TIME_SLICE,
             blocked: false,
             next_token: 0,
+            temp_roots: Vec::new(),
             pinned: Vec::new(),
             fuel: None,
             uniques: 0,
@@ -380,13 +384,18 @@ impl<'m> Vm<'m> {
 
     /// The function a function value calls, and the arguments it passes first
     /// (a closure's captured values).
-    fn callee(&self, callee: Reg) -> Result<(usize, Vec<Value>), VmError> {
+    fn callee(&mut self, callee: Reg) -> Result<(usize, Vec<Value>), VmError> {
         match self.get(callee) {
             Value::Func(i) => Ok((i as usize, Vec::new())),
             Value::Agg(r) => {
                 let items = self.heap.items(r);
                 let Value::Func(i) = items[0] else { return Err(self.error("malformed closure")) };
-                Ok((i as usize, items[1..].to_vec()))
+                // The closure keeps its captured values: the call gets copies.
+                let captured = items[1..].to_vec();
+                for v in &captured {
+                    self.share(*v);
+                }
+                Ok((i as usize, captured))
             }
             _ => Err(self.error("called a value that is not a function")),
         }
@@ -408,6 +417,9 @@ impl<'m> Vm<'m> {
             }
             Inst::Copy { dst, src } => {
                 let v = self.get(*src);
+                if dst != src {
+                    self.share(v);
+                }
                 self.set(*dst, v);
             }
             Inst::Unary { dst, op, src } => {
@@ -432,26 +444,75 @@ impl<'m> Vm<'m> {
                 self.set(*dst, v);
             }
             Inst::Struct { dst, fields, .. } => {
-                let values = fields.iter().map(|r| self.get(*r)).collect();
+                let values = fields.iter().map(|r| self.shared(*r)).collect();
                 let r = self.alloc_agg(values);
                 self.set(*dst, Value::Agg(r));
             }
             Inst::Field { dst, src, index } => {
                 let r = self.agg_ref(*src)?;
                 let v = self.heap.items(r)[*index as usize];
+                let v = self.share(v);
                 self.set(*dst, v);
             }
             Inst::SetField { dst, src, index, value } => {
                 let r = self.agg_ref(*src)?;
-                let mut values = self.heap.items(r).to_vec();
-                values[*index as usize] = self.get(*value);
-                // `src` and `value` are still in registers, so everything in
-                // `values` stays rooted if this allocation collects.
-                let new = self.alloc_agg(values);
-                self.set(*dst, Value::Agg(new));
+                let v = self.shared(*value);
+                self.update(*dst, *src, r, *index as usize, v);
+            }
+            Inst::GetPath { dst, src, path } => {
+                let mut v = self.get(*src);
+                for step in path {
+                    let r = self.agg_of(v)?;
+                    let i = self.step_index(r, *step)?;
+                    v = self.heap.items(r)[i];
+                }
+                // Only the part read gets a second reference, not the ones on the way.
+                let v = self.share(v);
+                self.set(*dst, v);
+            }
+            Inst::SetPath { dst, src, path, value } => {
+                let v = self.shared(*value);
+                // The objects along the path, outside in, and the index taken in each.
+                let mut objs = Vec::with_capacity(path.len());
+                let mut at = Vec::with_capacity(path.len());
+                let mut cur = self.get(*src);
+                for step in path {
+                    let r = self.agg_of(cur)?;
+                    let i = self.step_index(r, *step)?;
+                    objs.push(r);
+                    at.push(i);
+                    cur = self.heap.items(r)[i];
+                }
+                // An object may be updated in place if the result replaces the
+                // only reference to the root and no object on the way to it is
+                // shared. Deeper objects are copied once one is not.
+                let mut in_place = dst == src;
+                let places: Vec<bool> = objs
+                    .iter()
+                    .map(|r| {
+                        in_place = in_place && !self.heap.is_shared(*r);
+                        in_place
+                    })
+                    .collect();
+                // Rebuild inside out. Nothing is changed in place before every
+                // copy is made, so the old objects stay reachable from `src`.
+                let mut new = v;
+                for k in (0..objs.len()).rev() {
+                    if places[k] {
+                        self.heap.items_mut(objs[k])[at[k]] = new;
+                        new = Value::Agg(objs[k]);
+                    } else {
+                        let mut values = self.heap.items(objs[k]).to_vec();
+                        values[at[k]] = new;
+                        self.temp_roots.push(new);
+                        new = Value::Agg(self.alloc_agg(values));
+                    }
+                }
+                self.temp_roots.clear();
+                self.set(*dst, new);
             }
             Inst::Array { dst, items } => {
-                let values = items.iter().map(|r| self.get(*r)).collect();
+                let values = items.iter().map(|r| self.shared(*r)).collect();
                 let r = self.alloc_agg(values);
                 self.set(*dst, Value::Agg(r));
             }
@@ -459,24 +520,27 @@ impl<'m> Vm<'m> {
                 let Type::Array(_, n) = f.reg_type(*dst) else {
                     return Err(self.error("`splat` needs an array register"));
                 };
-                let r = self.alloc_agg(vec![self.get(*value); *n as usize]);
+                let v = self.shared(*value);
+                let r = self.alloc_agg(vec![v; *n as usize]);
                 self.set(*dst, Value::Agg(r));
             }
             // An enum is an aggregate of its tag followed by the variant's payload.
             Inst::Variant { dst, index, fields } => {
                 let mut values = Vec::with_capacity(fields.len() + 1);
                 values.push(Value::Int(*index as i64));
-                values.extend(fields.iter().map(|r| self.get(*r)));
+                values.extend(fields.iter().map(|r| self.shared(*r)));
                 let r = self.alloc_agg(values);
                 self.set(*dst, Value::Agg(r));
             }
             // A ref is a one-element aggregate: immutable, like every heap object.
             Inst::Ref { dst, src } => {
-                let r = self.alloc_agg(vec![self.get(*src)]);
+                let v = self.shared(*src);
+                let r = self.alloc_agg(vec![v]);
                 self.set(*dst, Value::Agg(r));
             }
             Inst::Deref { dst, src } => {
                 let v = self.heap.items(self.agg_ref(*src)?)[0];
+                let v = self.share(v);
                 self.set(*dst, v);
             }
             Inst::Tag { dst, src } => {
@@ -489,21 +553,21 @@ impl<'m> Vm<'m> {
                     return Err(self.error(&format!("read the payload of variant {variant} from another variant")));
                 }
                 let v = items[1 + *index as usize];
+                let v = self.share(v);
                 self.set(*dst, v);
             }
             Inst::Elem { dst, src, index } => {
                 let r = self.agg_ref(*src)?;
                 let i = self.bounds_check(r, *index)?;
                 let v = self.heap.items(r)[i];
+                let v = self.share(v);
                 self.set(*dst, v);
             }
             Inst::SetElem { dst, src, index, value } => {
                 let r = self.agg_ref(*src)?;
                 let i = self.bounds_check(r, *index)?;
-                let mut values = self.heap.items(r).to_vec();
-                values[i] = self.get(*value);
-                let new = self.alloc_agg(values);
-                self.set(*dst, Value::Agg(new));
+                let v = self.shared(*value);
+                self.update(*dst, *src, r, i, v);
             }
             Inst::Load { .. }
             | Inst::Store { .. }
@@ -514,7 +578,7 @@ impl<'m> Vm<'m> {
             }
             Inst::Call { dst, func, args } => {
                 let callee = self.fn_index[func.as_str()];
-                let args: Vec<Value> = args.iter().map(|r| self.get(*r)).collect();
+                let args: Vec<Value> = args.iter().map(|r| self.shared(*r)).collect();
                 self.push_frame(callee, &args, Some(*dst))?;
             }
             Inst::FuncRef { dst, func } => {
@@ -525,18 +589,18 @@ impl<'m> Vm<'m> {
             // which become its first arguments.
             Inst::Closure { dst, func, captures } => {
                 let mut values = vec![Value::Func(self.fn_index[func.as_str()] as u32)];
-                values.extend(captures.iter().map(|r| self.get(*r)));
+                values.extend(captures.iter().map(|r| self.shared(*r)));
                 let r = self.alloc_agg(values);
                 self.set(*dst, Value::Agg(r));
             }
             Inst::CallIndirect { dst, callee, args } => {
                 let (callee, mut all) = self.callee(*callee)?;
-                all.extend(args.iter().map(|r| self.get(*r)));
+                all.extend(args.iter().map(|r| self.shared(*r)));
                 self.push_frame(callee, &all, Some(*dst))?;
             }
             Inst::Spawn { callee, args } => {
                 let (callee, mut all) = self.callee(*callee)?;
-                all.extend(args.iter().map(|r| self.get(*r)));
+                all.extend(args.iter().map(|r| self.shared(*r)));
                 let frame = self.frame(callee, &all, None);
                 self.tasks.push(Task { stack: vec![frame], waiting: None });
                 self.ready.push_back(self.tasks.len() - 1);
@@ -549,7 +613,7 @@ impl<'m> Vm<'m> {
             }
             Inst::Send { chan, value } => {
                 let c = self.chan(*chan, "send")?;
-                let v = self.get(*value);
+                let v = self.shared(*value);
                 if !self.try_send(c, v) {
                     self.wait(&[], &[(c, v, 0)], None);
                 }
@@ -579,7 +643,7 @@ impl<'m> Vm<'m> {
                         }
                         SelectCase::Send { chan, value } => {
                             let c = self.chan(*chan, "select")?;
-                            let v = self.get(*value);
+                            let v = self.shared(*value);
                             if self.try_send(c, v) {
                                 self.set(*dst, Value::Int(i));
                                 return Ok(());
@@ -744,8 +808,9 @@ impl<'m> Vm<'m> {
 
     fn maybe_collect(&mut self) {
         if self.heap.should_collect() {
-            let waiting: Vec<Value> =
+            let mut waiting: Vec<Value> =
                 self.tasks.iter().filter_map(|t| t.waiting.as_ref()).flat_map(|w| w.chans.iter().map(|c| Value::Chan(*c))).collect();
+            waiting.extend(&self.temp_roots);
             let roots = roots(&self.stack, &self.tasks, &self.pinned, &waiting);
             self.heap.collect(roots);
         }
@@ -765,6 +830,52 @@ impl<'m> Vm<'m> {
             Value::Agg(s) => Ok(s),
             v => Err(self.error(&format!("expected a struct or array, found {}", type_name(v)))),
         }
+    }
+
+    /// Notes that `v`, if it is an object, may now have another reference, so
+    /// it must not be updated in place any more.
+    fn share(&mut self, v: Value) -> Value {
+        if let Value::Agg(r) = v {
+            self.heap.mark_shared(r);
+        }
+        v
+    }
+
+    /// The value of `r`, which is about to be copied somewhere while `r` keeps it.
+    fn shared(&mut self, r: Reg) -> Value {
+        let v = self.get(r);
+        self.share(v)
+    }
+
+    fn agg_of(&self, v: Value) -> Result<GcRef, VmError> {
+        match v {
+            Value::Agg(r) => Ok(r),
+            v => Err(self.error(&format!("expected a struct or array, found {}", type_name(v)))),
+        }
+    }
+
+    /// The index of the part of `obj` that `step` takes; bounds-checked.
+    fn step_index(&self, obj: GcRef, step: PathStep) -> Result<usize, VmError> {
+        match step {
+            PathStep::Field(i) => Ok(i as usize),
+            PathStep::Elem(r) => self.bounds_check(obj, r),
+        }
+    }
+
+    /// `dst = src` with part `i` of aggregate `obj` (the value of `src`) set to
+    /// `v`. When the result replaces the only reference to `obj`, `obj` is
+    /// updated in place; otherwise it is copied.
+    fn update(&mut self, dst: Reg, src: Reg, obj: GcRef, i: usize, v: Value) {
+        if dst == src && !self.heap.is_shared(obj) {
+            self.heap.items_mut(obj)[i] = v;
+            return;
+        }
+        let mut values = self.heap.items(obj).to_vec();
+        values[i] = v;
+        // `src` and `v`'s register still hold their values, so everything in
+        // `values` stays rooted if this allocation collects.
+        let new = self.alloc_agg(values);
+        self.set(dst, Value::Agg(new));
     }
 
     fn get(&self, r: Reg) -> Value {
@@ -824,16 +935,17 @@ fn string_literal(s: &str) -> String {
 
 /// Every value the program can still reach without going through the heap: the
 /// registers of the running task (`stack`) and of every other task, values
-/// handed to the embedder (`pinned`), and the channels tasks wait on
-/// (`waiting`). Values in a channel are reached through the channel.
+/// handed to the embedder (`pinned`), and `extra`: the channels tasks wait on
+/// and the objects an instruction is still building. Values in a channel are
+/// reached through the channel.
 fn roots<'a>(
     stack: &'a [Frame],
     tasks: &'a [Task],
     pinned: &'a [Value],
-    waiting: &'a [Value],
+    extra: &'a [Value],
 ) -> impl Iterator<Item = &'a Value> {
     let stacks = std::iter::once(stack).chain(tasks.iter().map(|t| t.stack.as_slice()));
-    stacks.flatten().flat_map(|f| f.regs.iter()).chain(pinned).chain(waiting)
+    stacks.flatten().flat_map(|f| f.regs.iter()).chain(pinned).chain(extra)
 }
 
 fn type_name(v: Value) -> &'static str {
@@ -1223,6 +1335,84 @@ fn main() {
         let mut out = Vec::new();
         vm.run_main(&mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "44850\n");
+    }
+
+    #[test]
+    fn in_place_updates_keep_value_semantics() {
+        // Updates may happen in place, but never where another copy can see it.
+        let src = "
+struct S { arr: [i64; 3], n: i64 }
+const T = [1, 2, 3]
+fn modify(a: [i64; 3]) -> i64 {
+    a[0] = 100
+    return a[0]
+}
+fn main() {
+    let a = [1, 2, 3]
+    let b = a
+    a[0] = 9
+    print(b[0])                         // 1: a copy
+    print(modify(a) + a[0])             // 109: the callee has its own
+    let s = S { arr: a, n: 0 }
+    a[1] = 8
+    print(s.arr[1])                     // 2
+    s.arr[2] = 7
+    print(a[2])                         // 3
+    let row = s.arr
+    s.arr[0] = 5
+    print(row[0])                       // 9
+    let grid = [[0; 3]; 2]
+    let r = grid[0]
+    grid[0][0] = 4
+    print(r[0] + grid[1][0])            // 0: rows were one shared value
+    let f = fn() -> i64 { return a[0] }
+    a[0] = 50
+    print(f())                          // 9: captured when made
+    let c = chan([i64; 3], 1)
+    send(c, a)
+    a[0] = 60
+    print(recv(c)[0])                   // 50
+    let rf = ref a
+    a[0] = 70
+    print((*rf)[0])                     // 60
+    let i = 0
+    while i < 2 {
+        let t = T
+        print(t[0])                     // 1, 1: the constant never changes
+        t[0] = 99
+        i = i + 1
+    }
+    let ss = [s; 2]
+    ss[0].arr[0] = 1
+    print(ss[1].arr[0])                 // 5
+    let e = Option.Some(a)
+    a[0] = 80
+    match e {
+        Some(x) => print(x[0])          // 70
+        None => {}
+    }
+}
+enum Option(T: type) { Some(T), None }";
+        let expected = "1\n109\n2\n3\n9\n0\n9\n50\n60\n1\n1\n5\n70\n";
+        let (r, out) = run_limited(src, false);
+        r.unwrap();
+        assert_eq!(out, expected);
+        let (r, out) = run_limited(src, true);
+        r.unwrap();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn updates_in_a_loop_are_in_place() {
+        // Without in-place updates this allocates a 10000-element array per step.
+        let src = "fn main() {\n let a = [0; 10000]\n let i = 0\n while i < 10000 {\n a[i] = i\n i = i + 1\n }\n print(a[9999]) }";
+        let m = compile(src);
+        let mut vm = Vm::new(&m);
+        vm.heap_mut().set_stress(false); // this counts collections
+        let mut out = Vec::new();
+        vm.run_main(&mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "9999\n");
+        assert!(vm.heap().stats().collections <= 1, "{:?}", vm.heap().stats());
     }
 
     #[test]

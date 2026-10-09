@@ -9,11 +9,18 @@
 //! - What a `ref` refers to (`*r`, `r.x`, `r[i]`) is a register place holding
 //!   the value read through the ref. It cannot be written: refs are immutable.
 
-use jihoo_ir::{BinOp, Inst, Reg, Type};
+use jihoo_ir::{BinOp, Inst, PathStep, Reg, Type};
 use jihoo_syntax::ast::{Expr, ExprKind};
 use jihoo_syntax::{Error, Pos};
 
 use crate::FnCx;
+
+fn path_step(s: Step) -> PathStep {
+    match s {
+        Step::Field(i) => PathStep::Field(i),
+        Step::Elem(r) => PathStep::Elem(r),
+    }
+}
 
 const BEHIND_REF: &str = "a value behind a `ref` (refs are immutable; build a new value and a new ref instead)";
 
@@ -202,6 +209,12 @@ impl FnCx<'_> {
 
     pub(crate) fn read(&mut self, place: Place) -> Reg {
         match place {
+            // A nested part is read in one go, so the parts on the way never sit
+            // in registers (which would keep the VM from updating them in place).
+            Place::Reg { root, path, ty, .. } if path.len() >= 2 => {
+                let path = path.into_iter().map(path_step).collect();
+                self.emit_to(ty, |dst| Inst::GetPath { dst, src: root, path })
+            }
             Place::Reg { root, path, .. } => path.into_iter().fold(root, |cur, step| self.read_step(cur, step)),
             Place::Mem { ptr, ty } => self.emit_to(ty, |dst| Inst::Load { dst, ptr }),
         }
@@ -211,6 +224,11 @@ impl FnCx<'_> {
     pub(crate) fn write(&mut self, pos: Pos, place: Place, value: Reg) -> Result<(), Error> {
         match place {
             Place::Reg { readonly: Some(what), .. } => Err(Error::new(pos, format!("cannot assign to {what}"))),
+            Place::Reg { root, path, .. } if path.len() >= 2 => {
+                let path = path.into_iter().map(path_step).collect();
+                self.emit(Inst::SetPath { dst: root, src: root, path, value });
+                Ok(())
+            }
             Place::Reg { root, path, .. } => {
                 // The aggregates along the path: root, root.a, root.a[i], ...
                 let mut along = vec![root];

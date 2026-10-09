@@ -103,8 +103,14 @@ enum class Op {
   Const, Unit, Str, Copy, Neg, Not,
   Add, Sub, Mul, Div, Rem, Eq, Ne, Lt, Le, Gt, Ge, And, Or, Xor, Shl, Shr,
   Cast, Call, FuncRef, CallIndirect, Struct, Field, SetField, Load, Store, Addr, FieldPtr,
-  Array, Splat, Elem, SetElem, ElemPtr, Variant, Tag, Payload,
+  Array, Splat, Elem, SetElem, ElemPtr, Variant, Tag, Payload, GetPath, SetPath,
   Syscall, Print, Asm,
+};
+
+// One step of a `getpath`/`setpath` path.
+struct PathStep {
+  bool elem;       // an array element (else a struct field)
+  uint32_t value;  // the index register for an element, the field number for a field
 };
 
 struct Inst {
@@ -115,6 +121,7 @@ struct Inst {
   int64_t imm2 = 0;            // Payload: index of the value in the variant
   std::string text;            // Str bytes, Call/FuncRef function, Struct name, or Asm template
   std::string constraints;     // Asm only: LLVM constraint string
+  std::vector<PathStep> path;  // GetPath / SetPath: the steps, outside in
 };
 
 enum class TermKind { Jump, Branch, Ret, Unreachable };

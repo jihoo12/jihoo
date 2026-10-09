@@ -98,8 +98,9 @@ fn sum(list: *Node) -> i64 {
 - Structs are values, in both profiles: assignment and argument passing copy them,
   and `p.x = 1` changes only `p`. Nested updates (`line.a.x = 1`) rebuild the outer
   struct with `setfield`.
-- On the VM, a struct is an immutable GC object; a field update allocates a new
-  one. Natively, structs are plain LLVM aggregates.
+- On the VM, a struct is a GC object, updated in place when nothing else can
+  see it (see [GC](#gc)), else copied. Natively, structs are plain LLVM
+  aggregates.
 - Pointer arithmetic counts in elements (`p + 1` on `*i64` moves 8 bytes);
   `p[i]` is `*(p + i)`.
 - `&x` takes the address of a local variable or a field of one; the pointer is
@@ -122,8 +123,10 @@ let n = len(buf)              // 64, a constant
   Indexing a raw pointer (`p[i]` with `p: *T`) is not checked.
 - `p[i]` and `len(p)` with `p: *[T; N]` work on the array `p` points to, and
   `&a[i]` is a pointer to an element, so `&buf[0]` is how a buffer becomes a `*u8`.
-- On the VM an array is an immutable GC object, like a struct, so an element write
-  copies the array: O(N). Natively, writes happen in place.
+- On the VM an array is a GC object, like a struct. An element write is O(1)
+  when only one variable holds the array, as in a loop filling it; the first
+  write after the array was copied somewhere (`let b = a`, an argument, a
+  field) copies it once. Natively, writes happen in place.
 
 `size_of(T)` and `align_of(T)` are `i64` constants, computed with C layout rules for
 64-bit targets (`crates/jihoo-ir/src/layout.rs`). JIR records each struct's layout
@@ -703,7 +706,18 @@ last collection (1 MiB minimum).
   values handed out to the embedder (`Vm::alloc_string`, used for comptime
   arguments), which stay alive as long as the VM. Values in a channel's buffer
   and the values of tasks waiting to send are reached through the channel.
-- Every object is immutable except channels.
+- Values have value semantics, but the VM shares objects between copies and
+  updates them in place when it can. Each object has a *shared* bit, set when a
+  second reference to it may appear: a `copy` to another register, an argument,
+  a field or element of another object, a captured or sent value, or a part read
+  out of a parent. `setfield`/`setelem`/`setpath` whose result replaces their
+  source register update an unshared object in place, and copy a shared one; the
+  copy is unshared again. So in `while i < n { a[i] = f(i) }` only the first
+  write copies. Nested updates (`b.cells[r][c].v = x`) are one `setpath`, which
+  updates in place down to the first shared object and copies from there; nested
+  reads are one `getpath`, so the objects on the way never get shared by being
+  read. Filling and sorting a 20000-element array went from 9.9 s to 0.6 s.
+- Channels are mutable too: tasks share them to communicate.
 - The invariant: whatever an instruction allocates from must already be reachable
   from the roots. Values read from registers are; values held only in Rust locals
   are not.

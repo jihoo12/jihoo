@@ -189,6 +189,12 @@ The result type is what the destination register must be declared as.
 | `%d = struct $S(%a, %b, ...)`       | every field, in order | `$S`   | build a struct |
 | `%d = field %s, N`                  | `$S`                  | type of field N | read a field |
 | `%d = setfield %s, N, %v`           | `$S`, type of field N | `$S`   | copy of `%s` with field N replaced |
+| `%d = getpath %s, (step, ...)`      | a struct or array; each step `field N` or `elem %i` (`%i: i64`) | type at the end of the path | read a nested part; elements are bounds-checked |
+| `%d = setpath %s, (step, ...), %v`  | as `getpath`, then the type at the end of the path | type of `%s` | copy of `%s` with the nested part replaced |
+
+`setfield`, `setelem` and `setpath` describe values: natively and on the VM they
+update in place when `%d` is `%s` (on the VM, only if no other reference to the
+object exists).
 
 ### Enums
 

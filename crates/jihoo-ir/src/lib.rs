@@ -238,6 +238,12 @@ pub enum Inst {
     /// one can, and sets `dst` (an `i64`) to its index. With `default`, it does
     /// not wait: if none can go ahead, `dst` is `cases.len()`.
     Select { dst: Reg, cases: Vec<SelectCase>, default: bool },
+    /// Reads the part of aggregate `src` at `path` (fields and elements, outside
+    /// in). Elements are bounds-checked.
+    GetPath { dst: Reg, src: Reg, path: Vec<PathStep> },
+    /// A copy of aggregate `src` with the part at `path` replaced by `value`.
+    /// Elements are bounds-checked.
+    SetPath { dst: Reg, src: Reg, path: Vec<PathStep>, value: Reg },
     /// Builds an array from all of its elements.
     Array { dst: Reg, items: Vec<Reg> },
     /// An array with every element set to `value`.
@@ -269,6 +275,15 @@ pub enum Inst {
     Quote { dst: Reg, pieces: Vec<String>, holes: Vec<Reg>, kinds: Vec<HoleKind> },
 }
 
+/// One step into an aggregate, for `getpath` and `setpath`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathStep {
+    /// Field `N` of a struct.
+    Field(u32),
+    /// The element of an array at the index in this `i64` register.
+    Elem(Reg),
+}
+
 /// One way a `select` can go ahead.
 #[derive(Debug, Clone)]
 pub enum SelectCase {
@@ -276,6 +291,13 @@ pub enum SelectCase {
     Recv { dst: Reg, chan: Reg },
     /// Send `value` on `chan`.
     Send { chan: Reg, value: Reg },
+}
+
+fn path_regs(path: &mut [PathStep]) -> impl Iterator<Item = &mut Reg> {
+    path.iter_mut().filter_map(|s| match s {
+        PathStep::Elem(r) => Some(r),
+        PathStep::Field(_) => None,
+    })
 }
 
 /// Where a hole of a `quote` sits, which decides how its value is inserted.
@@ -358,6 +380,8 @@ impl Inst {
             SetElem { dst, src, index, value } => vec![dst, src, index, value],
             Store { ptr, value } | Send { chan: ptr, value } => vec![ptr, value],
             Spawn { callee, args } => std::iter::once(callee).chain(args).collect(),
+            GetPath { dst, src, path } => [dst, src].into_iter().chain(path_regs(path)).collect(),
+            SetPath { dst, src, path, value } => [dst, src, value].into_iter().chain(path_regs(path)).collect(),
             Select { dst, cases, .. } => std::iter::once(dst)
                 .chain(cases.iter_mut().flat_map(|c| match c {
                     SelectCase::Recv { dst, chan } => [dst, chan],

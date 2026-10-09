@@ -1,0 +1,39 @@
+// Reading and updating nested parts (`getpath` / `setpath`), with copies that
+// stay independent.
+
+struct Cell {
+    v: u8
+    hits: [i64; 2]
+}
+
+struct Board {
+    cells: [[Cell; 3]; 3]
+    moves: i64
+}
+
+fn bump(b: Board, r: i64, c: i64) -> Board {
+    b.cells[r][c].v = b.cells[r][c].v + 1
+    b.cells[r][c].hits[1] = b.cells[r][c].hits[1] + r * 10 + c
+    b.moves = b.moves + 1
+    return b
+}
+
+fn entry() -> i64 {
+    let empty = Cell { v: 0, hits: [0, 0] }
+    let b = Board { cells: [[empty; 3]; 3], moves: 0 }
+    let before = b
+    let i = 0
+    while i < 9 {
+        b = bump(b, i % 3, (i * 2) % 3)
+        i = i + 1
+    }
+    b = bump(b, 2, 2)
+    let copy = b.cells[2]
+    b.cells[2][2].hits[0] = 77
+    let total = b.moves * 100                                  // 1000
+    total = total + (b.cells[2][2].v as i64) * 10               // visited once (the loop never hits 2, 2): 10
+    total = total + b.cells[2][2].hits[1]                       // 22
+    total = total + b.cells[2][2].hits[0] + copy[2].hits[0]     // 77 + 0
+    total = total + before.moves + (before.cells[2][2].v as i64)   // 0
+    return total % 256     // 1109 % 256 = 85
+}

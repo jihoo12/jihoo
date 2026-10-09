@@ -5,6 +5,12 @@
 //! allocating a new object on every field or element update. Channels are the
 //! one mutable kind of object: tasks share them to communicate.
 //!
+//! As an optimization, an aggregate that only one register refers to may be
+//! updated in place: the result of an update replaces that register's value,
+//! and nothing else can see the difference. The VM marks an object *shared*
+//! as soon as a second reference to it may exist (see `Vm::share`), and only
+//! updates unshared objects in place.
+//!
 //! Setting `JIHOO_GC_STRESS=1` collects before every allocation, so a value that
 //! is live but not reachable from the roots is freed at the first chance instead
 //! of once in a blue moon. Run the test suite this way after touching rooting.
@@ -86,6 +92,8 @@ struct Slot {
     obj: Option<Obj>,
     gen: u32,
     marked: bool,
+    /// More than one reference to the object may exist.
+    shared: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -150,10 +158,11 @@ impl Heap {
             Some(index) => {
                 let slot = &mut self.slots[index as usize];
                 slot.obj = Some(obj);
+                slot.shared = false;
                 GcRef { index, gen: slot.gen }
             }
             None => {
-                self.slots.push(Slot { obj: Some(obj), gen: 0, marked: false });
+                self.slots.push(Slot { obj: Some(obj), gen: 0, marked: false, shared: false });
                 GcRef { index: self.slots.len() as u32 - 1, gen: 0 }
             }
         }
@@ -173,6 +182,25 @@ impl Heap {
         match self.obj(r) {
             Obj::Str(s) => s,
             _ => panic!("{r:?} is not a string"),
+        }
+    }
+
+    /// Notes that another reference to `r` may now exist.
+    pub fn mark_shared(&mut self, r: GcRef) {
+        self.slots[r.index as usize].shared = true;
+    }
+
+    pub fn is_shared(&self, r: GcRef) -> bool {
+        self.slots[r.index as usize].shared
+    }
+
+    /// The parts of aggregate `r`, to update in place. Only for an unshared
+    /// object, whose one reference is about to be replaced by itself.
+    pub fn items_mut(&mut self, r: GcRef) -> &mut [Value] {
+        let slot = &mut self.slots[r.index as usize];
+        match &mut slot.obj {
+            Some(Obj::Agg(f)) if slot.gen == r.gen => f,
+            _ => panic!("{r:?} is not a live aggregate"),
         }
     }
 

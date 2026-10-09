@@ -334,6 +334,30 @@ Inst parse_assign(Line &l) {
     uint32_t i = l.reg();
     l.punct(",");
     inst.args = {a, i, l.reg()};
+  } else if (w == "getpath" || w == "setpath") {
+    // `getpath %s, (field N, elem %i, ...)` / `setpath %s, (...), %v`
+    inst.op = w == "getpath" ? Op::GetPath : Op::SetPath;
+    inst.args = {l.reg()};
+    l.punct(",");
+    l.punct("(");
+    while (true) {
+      const Tok &kind = l.next("`field` or `elem`");
+      if (kind.kind == TokKind::Word && kind.text == "field") {
+        inst.path.push_back({false, l.index()});
+      } else if (kind.kind == TokKind::Word && kind.text == "elem") {
+        inst.path.push_back({true, l.reg()});
+      } else {
+        fail(l.no, "expected `field N` or `elem %r`");
+      }
+      if (!l.peek_punct(",")) break;
+      l.i++;
+    }
+    l.punct(")");
+    if (inst.path.empty()) fail(l.no, "empty path");
+    if (inst.op == Op::SetPath) {
+      l.punct(",");
+      inst.args.push_back(l.reg());
+    }
   } else if (w == "variant") {
     inst.op = Op::Variant;
     inst.imm = l.index();

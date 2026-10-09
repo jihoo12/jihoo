@@ -338,6 +338,27 @@ class FnGen {
     return *t;
   }
 
+  // Address and JIR type of the part at `path` inside the aggregate of type `t`
+  // at `base`. Elements are bounds-checked.
+  std::pair<Value *, const jir::Type *> path_addr(const jir::Type &t, Value *base,
+                                                  const std::vector<jir::PathStep> &path) {
+    const jir::Type *cur = &t;
+    Value *addr = base;
+    for (const auto &step : path) {
+      if (step.elem) {
+        if (cur->kind != jir::Type::Array) fail(f_.name, cur->str() + " is not an array");
+        if (type(step.value) != jir::Type::integer(64, true)) fail(f_.name, "path index must be i64");
+        addr = elem_addr(*cur, addr, load(step.value));
+        cur = cur->pointee.get();
+      } else {
+        const jir::Type &field = types_.field(*cur, step.value);
+        addr = b_.CreateStructGEP(types_.lower(*cur), addr, step.value);
+        cur = &field;
+      }
+    }
+    return {addr, cur};
+  }
+
   // Address of element `index` of the array at `base`, after a bounds check.
   Value *elem_addr(const jir::Type &arr, Value *base, Value *index) {
     bounds_check(index, arr.count);
@@ -597,6 +618,20 @@ class FnGen {
         Value *index = arg(1);
         copy_reg(inst.dst, arg_reg(0));
         write_mem(elem_addr(arr, slot(inst.dst), index), arg_reg(2));
+        return;
+      }
+      case Op::GetPath: {
+        auto [addr, t] = path_addr(type(arg_reg(0)), slot(arg_reg(0)), inst.path);
+        if (*t != type(inst.dst)) fail(f_.name, "`getpath` result has the wrong type");
+        read_mem(inst.dst, addr);
+        return;
+      }
+      case Op::SetPath: {
+        if (type(inst.dst) != type(arg_reg(0))) fail(f_.name, "`setpath` result has the wrong type");
+        copy_reg(inst.dst, arg_reg(0));
+        auto [addr, t] = path_addr(type(inst.dst), slot(inst.dst), inst.path);
+        if (*t != type(arg_reg(1))) fail(f_.name, "`setpath` value has the wrong type");
+        write_mem(addr, arg_reg(1));
         return;
       }
       case Op::ElemPtr: {

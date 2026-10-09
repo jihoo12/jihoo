@@ -106,6 +106,28 @@ impl Cx<'_> {
         Ok(())
     }
 
+    /// The type of the part of a `t` at `path`.
+    /// `regs` are the function's register types.
+    fn walk(&self, t: &Type, path: &[PathStep], regs: &[Type]) -> Result<Type, String> {
+        if path.is_empty() {
+            return Err("empty path".into());
+        }
+        let mut t = t.clone();
+        for step in path {
+            t = match (step, &t) {
+                (PathStep::Field(i), _) => self.field(&t, *i)?.clone(),
+                (PathStep::Elem(r), Type::Array(elem, _)) => {
+                    if regs.get(r.0 as usize) != Some(&Type::I64) {
+                        return Err(format!("index {r} is not an i64 register"));
+                    }
+                    (**elem).clone()
+                }
+                (PathStep::Elem(_), t) => return Err(format!("{} is not an array", t.jir())),
+            };
+        }
+        Ok(t)
+    }
+
     fn variant<'a>(&'a self, t: &Type, index: u32) -> Result<&'a [Type], String> {
         let Type::Enum(name) = t else { return Err(format!("{} is not an enum", t.jir())) };
         let def = self.enums.get(name.as_str()).ok_or_else(|| format!("unknown enum `${name}`"))?;
@@ -340,6 +362,15 @@ impl Cx<'_> {
                         freestanding("fieldptr")?;
                         let pointee = ty(ptr)?.pointee().ok_or_else(|| format!("{ptr} is not a pointer"))?;
                         expect(dst, &Type::ptr(self.field(pointee, *index)?.clone()))
+                    }
+                    Inst::GetPath { dst, src, path } => {
+                        let t = self.walk(ty(src)?, path, &f.regs)?;
+                        expect(dst, &t)
+                    }
+                    Inst::SetPath { dst, src, path, value } => {
+                        let t = self.walk(ty(src)?, path, &f.regs)?;
+                        expect(value, &t)?;
+                        expect(dst, ty(src)?)
                     }
                     Inst::Array { dst, items } => {
                         let Type::Array(elem, n) = ty(dst)? else {

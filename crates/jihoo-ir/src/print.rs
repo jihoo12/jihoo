@@ -124,6 +124,8 @@ impl Display for Inst {
             }
             Inst::Deref { dst, src } => write!(f, "{dst} = deref {src}"),
             Inst::Payload { dst, src, variant, index } => write!(f, "{dst} = payload {src}, {variant}, {index}"),
+            Inst::GetPath { dst, src, path } => write!(f, "{dst} = getpath {src}, ({})", steps(path)),
+            Inst::SetPath { dst, src, path, value } => write!(f, "{dst} = setpath {src}, ({}), {value}", steps(path)),
             Inst::Array { dst, items } => write!(f, "{dst} = array({})", list(items)),
             Inst::Splat { dst, value } => write!(f, "{dst} = splat {value}"),
             Inst::Elem { dst, src, index } => write!(f, "{dst} = elem {src}, {index}"),
@@ -154,6 +156,17 @@ impl Display for Terminator {
             Terminator::Unreachable => write!(f, "unreachable"),
         }
     }
+}
+
+fn steps(path: &[PathStep]) -> String {
+    let parts: Vec<String> = path
+        .iter()
+        .map(|s| match s {
+            PathStep::Field(i) => format!("field {i}"),
+            PathStep::Elem(r) => format!("elem {r}"),
+        })
+        .collect();
+    parts.join(", ")
 }
 
 fn list(regs: &[Reg]) -> String {
