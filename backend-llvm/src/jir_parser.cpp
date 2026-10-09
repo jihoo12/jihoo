@@ -79,7 +79,8 @@ std::vector<Tok> tokenize(int line, const std::string &src) {
       out.push_back({TokKind::Str, s});
     } else if (c == '%' || c == '@' || c == '$') {
       size_t j = ++i;
-      while (i < src.size() && ident_char(src[i])) i++;
+      // Instance names of generic functions contain a dot: `@max.0`.
+      while (i < src.size() && (ident_char(src[i]) || src[i] == '.')) i++;
       std::string name = src.substr(j, i - j);
       if (name.empty()) fail(line, std::string("expected a name after `") + c + "`");
       if (c == '%') {

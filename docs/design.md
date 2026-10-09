@@ -174,7 +174,37 @@ first use and memoized. Items can refer to each other in any order; a query that
 needs its own result (`const A = A`, or `comptime f()` inside `f`) is reported as
 a cycle. This is the same approach as Zig's lazy analysis.
 
-Planned next: AST macros on the same machinery, and compile-time type parameters.
+## Generics
+
+```jihoo
+fn max(comptime T: type, a: T, b: T) -> T {
+    if a > b { return a }
+    return b
+}
+fn ramp(comptime N: i64) -> [i64; N] { ... }
+
+max(u8, x, 200)      // instance `max.0` with T = u8
+max(i64, -3, -7)     // instance `max.1` with T = i64
+ramp(5)              // returns [i64; 5]
+```
+
+- A `comptime` parameter makes a function generic. `comptime T: type` takes a
+  type; any other `comptime x: U` takes a value computed on the VM. The function
+  is compiled once per distinct set of comptime arguments (monomorphization), as
+  `name.N` in JIR (`crates/jihoo-sema/src/generic.rs`).
+- Type arguments are written in expression position and read back as types:
+  `u8`, `*u8` and `[u8; 4]` already parse as expressions.
+- Inside an instance, `T` resolves to its type and `N` to a constant, also in
+  array lengths and `size_of`. Comptime parameters cannot be assigned.
+- The body is checked per instance, like C++ templates and Zig, and errors name
+  the instance: `cannot apply `>` to str and str (in `max` with T = str)`.
+- Callers only need an instance's signature, so instances can recurse. Runaway
+  instantiation (`f(n + 1)` inside `f`) stops after 1000 instances.
+- Instances needed only at compile time (`comptime ramp(3)`) still appear in the
+  module; natively they are internal and dropped by LLVM.
+
+Planned next: AST macros on the same machinery, and generic structs (functions
+that return types).
 
 ## GC
 
@@ -188,5 +218,5 @@ grows past twice the size that survived the last collection (1 MiB minimum).
 2. ~~Differential tests across both backends.~~ Rust-side JIR parser.
 3. ~~Sized integers, pointers with loads/stores, structs, arrays, `size_of`.~~
    Inline `asm` blocks.
-4. ~~`comptime` on the VM.~~
+4. ~~`comptime` on the VM, generic functions.~~
 5. `alloc` layer; AST macros.

@@ -1,0 +1,60 @@
+// Generic functions with `comptime` parameters. Each distinct set of comptime
+// arguments gets its own compiled instance (see `jihoo emit-ir`: `max.0`, ...).
+//   jihoo run examples/generics.jh
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+fn max(comptime T: type, a: T, b: T) -> T {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+// Both the element type and the length are compile-time parameters.
+fn map_add(comptime T: type, comptime N: i64, xs: [T; N], d: T) -> [T; N] {
+    let i = 0
+    while i < N {
+        xs[i] = xs[i] + d
+        i = i + 1
+    }
+    return xs
+}
+
+fn sum(comptime N: i64, xs: [i64; N]) -> i64 {
+    let s = 0
+    let i = 0
+    while i < N {
+        s = s + xs[i]
+        i = i + 1
+    }
+    return s
+}
+
+// A comptime value can shape types: this returns a different array type per N.
+fn ramp(comptime N: i64) -> [i64; N] {
+    let out = [0; N]
+    let i = 0
+    while i < N {
+        out[i] = i
+        i = i + 1
+    }
+    return out
+}
+
+fn first(comptime T: type, comptime N: i64, xs: [T; N]) -> T {
+    return xs[0]
+}
+
+fn main() {
+    let small: u8 = 200
+    print(max(u8, small, 100))                       // 200
+    print(max(i64, -3, -7))                          // -3
+    print(sum(5, map_add(i64, 5, ramp(5), 10)))      // 60
+    let p = first(Point, 2, [Point { x: 4, y: 2 }, Point { x: 0, y: 0 }])
+    print(p.x * p.y)                                 // 8
+    print(sum(3, comptime ramp(3)))                  // 3, with the array built while compiling
+}

@@ -14,6 +14,7 @@
 
 mod comptime;
 mod env;
+mod generic;
 mod place;
 
 use std::collections::{HashMap, VecDeque};
@@ -26,6 +27,7 @@ use jihoo_syntax::ast::*;
 use jihoo_syntax::{Error, Pos};
 
 use env::{Env, Sig};
+use generic::{Binding, Bindings};
 
 pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
     let mut errors = Vec::new();
@@ -57,7 +59,8 @@ pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
             errors.push(e);
         }
     }
-    for f in &prog.funcs {
+    let plain: Vec<&FnDecl> = prog.funcs.iter().filter(|f| env.generic(&f.name).is_none()).collect();
+    for f in &plain {
         if let Some(Err(e)) = env.signature(&f.name) {
             errors.push(e);
         }
@@ -66,12 +69,19 @@ pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
         errors.push(e);
     }
     let mut funcs = Vec::new();
-    for f in &prog.funcs {
+    for f in &plain {
         if let Some(Ok(_)) = env.signature(&f.name) {
             match env.function(&f.name) {
                 Ok(func) => funcs.push((*func).clone()),
                 Err(e) => errors.push(e),
             }
+        }
+    }
+    // Compiling functions asks for generic instances, which may ask for more.
+    while let Some(name) = env.next_pending() {
+        match env.function(&name) {
+            Ok(func) => funcs.push((*func).clone()),
+            Err(e) => errors.push(e),
         }
     }
 
@@ -97,6 +107,8 @@ struct BlockBuf {
 struct FnCx<'a> {
     env: &'a Env<'a>,
     sig: Rc<Sig>,
+    /// Comptime parameters of the instance being compiled.
+    bindings: Rc<Bindings>,
     /// Lowering a `comptime` helper: there are no local variables to refer to.
     in_comptime: bool,
     /// Registers holding constants already built at the start of the function.
@@ -119,10 +131,11 @@ fn is_int_literal(e: &Expr) -> bool {
 }
 
 impl<'a> FnCx<'a> {
-    fn new(env: &'a Env<'a>, sig: Rc<Sig>) -> Self {
+    fn new(env: &'a Env<'a>, sig: Rc<Sig>, bindings: Rc<Bindings>) -> Self {
         FnCx {
             env,
             sig,
+            bindings,
             in_comptime: false,
             const_regs: HashMap::new(),
             hoisted: 0,
@@ -137,9 +150,11 @@ impl<'a> FnCx<'a> {
         self.env.profile
     }
 
-    fn lower_fn(mut self, f: &FnDecl) -> Result<ir::Function, Error> {
+    /// Lowers `f` as the JIR function `name` (an instance name for generics).
+    fn lower_fn(mut self, f: &FnDecl, name: &str) -> Result<ir::Function, Error> {
         let sig = self.sig.clone();
-        for (p, ty) in f.params.iter().zip(&sig.params) {
+        // Comptime parameters are bindings, not registers.
+        for (p, ty) in f.params.iter().filter(|p| !p.comptime).zip(&sig.params) {
             let r = self.new_reg(ty.clone());
             if self.scopes[0].insert(p.name.clone(), r).is_some() {
                 return Err(Error::new(p.pos, format!("duplicate parameter `{}`", p.name)));
@@ -147,7 +162,7 @@ impl<'a> FnCx<'a> {
         }
 
         self.block(&f.body)?;
-        self.finish(&f.name, sig.ret.clone(), f.body.end)
+        self.finish(name, sig.ret.clone(), f.body.end)
     }
 
     /// Closes open blocks, drops unreachable ones, and builds the function.
@@ -275,13 +290,25 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    /// A variable: a local, or else a top-level constant spliced in as a value.
+    /// A variable: a local, a comptime parameter, or a top-level constant. The
+    /// last two are spliced in as constants.
     fn var(&mut self, pos: Pos, name: &str) -> Result<Reg, Error> {
         if let Some(r) = self.local(name) {
             return Ok(r);
         }
         if let Some(&r) = self.const_regs.get(name) {
             return Ok(r);
+        }
+        match self.bindings.get(name).cloned() {
+            Some(Binding::Value(ty, v)) => {
+                let r = self.hoist(|cx| cx.splice(&ty, &v));
+                self.const_regs.insert(name.to_string(), r);
+                return Ok(r);
+            }
+            Some(Binding::Type(t)) => {
+                return Err(Error::new(pos, format!("`{name}` is a type ({t}), not a value")));
+            }
+            None => {}
         }
         match self.env.constant(name) {
             Some(c) => {
@@ -331,7 +358,7 @@ impl<'a> FnCx<'a> {
     fn stmt(&mut self, s: &Stmt) -> Result<(), Error> {
         match s {
             Stmt::Let { pos, name, ty, value } => {
-                let want = ty.as_ref().map(|t| self.env.resolve(t)).transpose()?;
+                let want = ty.as_ref().map(|t| self.env.resolve(t, &self.bindings)).transpose()?;
                 let v = self.expr(value, want.as_ref())?;
                 if let Some(want) = &want {
                     self.expect(value.pos, v, want, &format!("the value of `{name}`"))?;
@@ -345,8 +372,13 @@ impl<'a> FnCx<'a> {
             }
             Stmt::Assign { target, value } => {
                 if let ExprKind::Var(name) = &target.kind {
-                    if self.local(name).is_none() && self.env.constant(name).is_some() {
-                        return Err(Error::new(target.pos, format!("cannot assign to constant `{name}`")));
+                    if self.local(name).is_none() {
+                        if self.bindings.get(name).is_some() {
+                            return Err(Error::new(target.pos, format!("cannot assign to comptime parameter `{name}`")));
+                        }
+                        if self.env.constant(name).is_some() {
+                            return Err(Error::new(target.pos, format!("cannot assign to constant `{name}`")));
+                        }
                     }
                 }
                 let place = self.place(target)?;
@@ -432,7 +464,7 @@ impl<'a> FnCx<'a> {
             }
             ExprKind::Var(name) => self.var(e.pos, name)?,
             ExprKind::Comptime(inner) => {
-                let (ty, v) = self.env.comptime(inner, expected)?;
+                let (ty, v) = self.env.comptime(inner, expected, &self.bindings)?;
                 self.hoist(|cx| cx.splice(&ty, &v))
             }
             ExprKind::Unary(op, inner) => {
@@ -457,13 +489,13 @@ impl<'a> FnCx<'a> {
                     Some(Type::Array(elem, _)) => Some(&**elem),
                     _ => None,
                 };
-                let n = self.env.array_len(n)?;
+                let n = self.env.array_len(n, &self.bindings)?;
                 let v = self.expr(value, hint)?;
                 let ty = Type::array(self.ty(v).clone(), n);
                 self.emit_to(ty, |dst| Inst::Splat { dst, value: v })
             }
             ExprKind::SizeOf(t) | ExprKind::AlignOf(t) => {
-                let ty = self.env.resolve(t)?;
+                let ty = self.env.resolve(t, &self.bindings)?;
                 let l = self.env.layout(t.pos, &ty)?;
                 let n = if matches!(e.kind, ExprKind::SizeOf(_)) { l.size } else { l.align };
                 let n = i64::try_from(n).map_err(|_| Error::new(e.pos, format!("{ty} is too large")))?;
@@ -481,7 +513,7 @@ impl<'a> FnCx<'a> {
                 self.addr_of(e.pos, place)?
             }
             ExprKind::Cast(inner, ty) => {
-                let to = self.env.resolve(ty)?;
+                let to = self.env.resolve(ty, &self.bindings)?;
                 let src = self.expr(inner, None)?;
                 let from = self.ty(src).clone();
                 if !types::can_cast(&from, &to) {
@@ -677,6 +709,9 @@ impl<'a> FnCx<'a> {
                 Ok(self.emit_to(Type::I64, |dst| Inst::Syscall { dst, args: regs }))
             }
             _ => {
+                if let Some(decl) = self.env.generic(name) {
+                    return self.call_generic(pos, decl, args);
+                }
                 let sig = self
                     .env
                     .signature(name)

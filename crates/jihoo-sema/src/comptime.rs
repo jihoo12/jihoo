@@ -9,6 +9,7 @@
 //! `print` works and writes to the compiler's stderr.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use jihoo_ir::{Inst, Reg, Terminator, Type};
 use jihoo_syntax::ast::Expr;
@@ -17,6 +18,7 @@ use jihoo_vm::gc::Heap;
 use jihoo_vm::{Value, Vm};
 
 use crate::env::{Env, Sig};
+use crate::generic::Bindings;
 use crate::FnCx;
 
 /// Instruction budget for one compile-time evaluation.
@@ -35,13 +37,14 @@ pub(crate) enum ConstValue {
 
 impl Env<'_> {
     /// Evaluates `e` at compile time.
-    pub fn comptime(&self, e: &Expr, expected: Option<&Type>) -> Result<(Type, ConstValue), Error> {
+    /// `b` gives the comptime parameters in scope, which the expression may use.
+    pub fn comptime(&self, e: &Expr, expected: Option<&Type>, b: &Rc<Bindings>) -> Result<(Type, ConstValue), Error> {
         let id = self.comptime_ids.get();
         self.comptime_ids.set(id + 1);
         let name = format!("comptime.{id}"); // `.` keeps it apart from user functions
 
         // Lower `e` into `fn comptime.N() -> T { return e }`.
-        let mut cx = FnCx::new(self, std::rc::Rc::new(Sig { params: vec![], ret: Type::Unit }));
+        let mut cx = FnCx::new(self, Rc::new(Sig { params: vec![], ret: Type::Unit }), b.clone());
         cx.in_comptime = true;
         let r = cx.expr(e, expected)?;
         let ty = cx.ty(r).clone();

@@ -365,3 +365,78 @@ fn comptime_errors() {
     let errs = analyze(&prog).unwrap_err();
     assert_eq!(errs.len(), 2, "{errs:?}");
 }
+
+// ---- generics (comptime parameters) ----
+
+const MAX: &str = "fn max(comptime T: type, a: T, b: T) -> T {\n  if a > b { return a }\n  return b\n}\n";
+
+#[test]
+fn one_instance_per_type() {
+    let m = check(&format!(
+        "{MAX}fn main() {{\n  let a: u8 = 3\n  print(max(u8, a, 200))\n  print(max(i64, -1, 2))\n  print(max(u8, 1, 2))\n}}"
+    ))
+    .unwrap();
+    let names: Vec<&str> = m.funcs.iter().map(|f| f.name.as_str()).collect();
+    // `max` itself is not compiled; `u8` is instantiated once, `i64` once.
+    assert_eq!(names, ["main", "max.0", "max.1"], "{m}");
+    assert_eq!(m.func("max.0").unwrap().params, [Type::U8, Type::U8]);
+    assert_eq!(m.func("max.1").unwrap().params, [Type::I64, Type::I64]);
+}
+
+#[test]
+fn comptime_value_parameters() {
+    let m = check(
+        "fn zeros(comptime N: i64) -> [i64; N] { return [0; N] }\n\
+         fn sum(comptime N: i64, xs: [i64; N]) -> i64 {\n  let s = 0\n  let i = 0\n  while i < N {\n    s = s + xs[i]\n    i = i + 1\n  }\n  return s\n}\n\
+         const K = 3\n\
+         fn main() { print(sum(4, zeros(4)) + sum(K, [1, 2, 3]) + len(zeros(K * 2))) }",
+    )
+    .unwrap();
+    let text = m.to_string();
+    // `sum`'s comptime argument is handled before its runtime argument `zeros(4)`.
+    assert!(text.contains("fn @sum.0([4 x i64]) -> i64"), "{text}");
+    assert!(text.contains("fn @zeros.1() -> [4 x i64]"), "{text}");
+    assert!(text.contains("fn @sum.2([3 x i64]) -> i64"), "{text}");
+    assert!(err("fn zeros(comptime N: i64) -> [i64; N] { return [0; N] }\nfn main() { let x = 1\n let z = zeros(x) }")
+        .contains("not known at compile time"));
+    assert!(err("fn f(comptime N: u8) -> u8 { return N }\nfn main() { print(f(true)) }")
+        .contains("comptime argument `N` of `f` must be u8, found bool"));
+}
+
+#[test]
+fn generic_types_in_bodies() {
+    check(&fs(
+        "fn swap(comptime T: type, a: *T, b: *T) {\n  let t = *a\n  *a = *b\n  *b = t\n}\n\
+         fn fill(comptime T: type, comptime N: i64, buf: *[T; N], v: T) {\n  let i = 0\n  while i < N {\n    buf[i] = v\n    i = i + 1\n  }\n}\n\
+         fn bytes(comptime T: type) -> i64 { return size_of(T) * 8 }\n\
+         fn f() -> i64 {\n  let x = 1\n  let y = 2\n  swap(i64, &x, &y)\n  let b = [0 as u8; 8]\n  fill(u8, 8, &b, 7)\n  let p = [0 as *u8; 2]\n  fill(*u8, 2, &p, &b[0])\n  return x + bytes([u8; 3]) + bytes(*u8)\n}",
+    ))
+    .unwrap();
+}
+
+#[test]
+fn generic_recursion_and_comptime() {
+    // An instance may call itself: callers only need its signature.
+    let src = "fn pow(comptime T: type, x: T, n: i64) -> T {\n  if n == 0 { return 1 }\n  return x * pow(T, x, n - 1)\n}\n\
+               const P = pow(u32, 3, 4)\nfn main() { print(P + pow(u32, 2, 3)) }";
+    let m = check(src).unwrap();
+    assert!(main_ir(&m).contains("= const 81"), "{m}");
+    assert_eq!(m.funcs.iter().filter(|f| f.name.starts_with("pow.")).count(), 1);
+    // Different comptime values recursing forever do not hang the compiler.
+    let e = err("fn f(comptime n: i64) -> i64 { return f(n + 1) }\nfn main() { print(f(0)) }");
+    assert!(e.contains("too many instances"), "{e}");
+}
+
+#[test]
+fn generic_errors() {
+    // The body is checked per instance, and errors say which one.
+    let e = err(&format!("{MAX}fn main() {{ print(max(str, \"a\", \"b\")) }}"));
+    assert!(e.contains("cannot apply `>` to str and str (in `max` with T = str)"), "{e}");
+    assert!(err(&format!("{MAX}fn main() {{ print(max(i64, 1)) }}")).contains("takes 3 arguments, 2 given"));
+    assert!(err(&format!("{MAX}fn main() {{ print(max(5, 1, 2)) }}")).contains("expected a type"));
+    assert!(err(&format!("{MAX}fn main() {{ print(max(u8, 1, true)) }}")).contains("argument `b` of `max` must be u8"));
+    assert!(err("fn f(comptime T: type) -> i64 { return T }\nfn main() { print(f(i64)) }").contains("is a type (i64), not a value"));
+    assert!(err("fn f(comptime N: i64) { N = 1 }\nfn main() { f(1) }").contains("cannot assign to comptime parameter"));
+    assert!(err("fn f(x: type) {}\nfn main() {}").contains("`type` can only be the type of a `comptime` parameter"));
+    assert!(err("fn main(comptime T: type) {}").contains("comptime parameters"));
+}

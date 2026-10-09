@@ -45,6 +45,7 @@ bb3:
 - The format is line-oriented: one header, label, instruction or terminator per line.
 - `;` starts a comment that runs to the end of the line (outside string literals).
 - `%N` is a register, `@name` a function, `$Name` a struct, `bbN` a block.
+  Function names may contain `.`: instances of generic functions are `@max.0`, ...
 - Integers are signed 64-bit decimals (`-5`, `42`).
 - Strings are double-quoted. Escapes: `\n`, `\t`, `\\`, `\"`, `\xHH` (any byte).
 

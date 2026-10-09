@@ -6,7 +6,7 @@
 //! that (directly or indirectly) asks for itself is a cycle and becomes an error.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use jihoo_ir as ir;
@@ -15,6 +15,7 @@ use jihoo_syntax::ast::*;
 use jihoo_syntax::{Error, Pos};
 
 use crate::comptime::ConstValue;
+use crate::generic::{is_type_param, Binding, Bindings};
 use crate::{is_builtin, FnCx};
 
 #[derive(Debug, Clone)]
@@ -24,6 +25,14 @@ pub(crate) struct Sig {
 }
 
 pub(crate) type Fields = Rc<Vec<(String, Type)>>;
+
+/// An instance of a generic function.
+struct Instance {
+    name: String,
+    fn_name: String,
+    bindings: Rc<Bindings>,
+    sig: Result<Rc<Sig>, Error>,
+}
 
 /// Memoized results; `None` marks a query that is still being computed.
 struct Memo<T> {
@@ -70,6 +79,12 @@ pub(crate) struct Env<'p> {
     funcs: Memo<Rc<ir::Function>>,
     /// Numbers the helper functions made for `comptime` expressions.
     pub comptime_ids: Cell<u32>,
+    /// Bindings outside of generic functions.
+    pub empty: Rc<Bindings>,
+    /// Generic instances by key, their keys by name, and the ones not compiled yet.
+    instances: RefCell<HashMap<String, Instance>>,
+    instance_keys: RefCell<HashMap<String, String>>,
+    pending: RefCell<VecDeque<String>>,
 }
 
 impl<'p> Env<'p> {
@@ -86,6 +101,10 @@ impl<'p> Env<'p> {
             consts: Memo::new(),
             funcs: Memo::new(),
             comptime_ids: Cell::new(0),
+            empty: Rc::new(Bindings::default()),
+            instances: RefCell::new(HashMap::new()),
+            instance_keys: RefCell::new(HashMap::new()),
+            pending: RefCell::new(VecDeque::new()),
         };
         for s in &prog.structs {
             if Type::from_name(&s.name).is_some() {
@@ -111,16 +130,27 @@ impl<'p> Env<'p> {
 
     // ---- types ----
 
-    pub fn resolve(&self, t: &TypeExpr) -> Result<Type, Error> {
+    /// Resolves a type expression. `b` gives the comptime parameters in scope.
+    pub fn resolve(&self, t: &TypeExpr, b: &Rc<Bindings>) -> Result<Type, Error> {
         match &t.kind {
             TypeExprKind::Ptr(inner) => {
                 if self.profile != Profile::Freestanding {
                     return Err(Error::new(t.pos, "pointer types are only available in freestanding mode"));
                 }
-                Ok(Type::ptr(self.resolve(inner)?))
+                Ok(Type::ptr(self.resolve(inner, b)?))
             }
-            TypeExprKind::Array(elem, n) => Ok(Type::array(self.resolve(elem)?, self.array_len(n)?)),
+            TypeExprKind::Array(elem, n) => Ok(Type::array(self.resolve(elem, b)?, self.array_len(n, b)?)),
             TypeExprKind::Named(name) => {
+                match b.get(name) {
+                    Some(Binding::Type(t)) => return Ok(t.clone()),
+                    Some(Binding::Value(..)) => {
+                        return Err(Error::new(t.pos, format!("`{name}` is a value, not a type")))
+                    }
+                    None => {}
+                }
+                if name == "type" {
+                    return Err(Error::new(t.pos, "`type` can only be the type of a `comptime` parameter"));
+                }
                 if let Some(ty) = Type::from_name(name) {
                     if ty == Type::Str && self.profile == Profile::Freestanding {
                         return Err(Error::new(
@@ -141,11 +171,11 @@ impl<'p> Env<'p> {
     }
 
     /// An array length: any integer expression, evaluated at compile time.
-    pub fn array_len(&self, e: &Expr) -> Result<u64, Error> {
+    pub fn array_len(&self, e: &Expr, b: &Rc<Bindings>) -> Result<u64, Error> {
         if let ExprKind::Int(n) = e.kind {
             return Ok(n as u64); // the lexer only produces non-negative literals
         }
-        let (ty, v) = self.comptime(e, Some(&Type::I64))?;
+        let (ty, v) = self.comptime(e, Some(&Type::I64), b)?;
         match (ty, v) {
             (Type::Int(_), ConstValue::Int(n)) if n >= 0 => Ok(n as u64),
             // Negative, or a u64 above i64::MAX (stored as a negative bit pattern).
@@ -170,7 +200,7 @@ impl<'p> Env<'p> {
                     if fields.iter().any(|(n, _)| *n == f.name) {
                         return Err(Error::new(f.pos, format!("field `{}` is declared twice", f.name)));
                     }
-                    fields.push((f.name.clone(), self.resolve(&f.ty)?));
+                    fields.push((f.name.clone(), self.resolve(&f.ty, &self.empty)?));
                 }
                 Ok(Rc::new(fields))
             },
@@ -236,16 +266,31 @@ impl<'p> Env<'p> {
         self.fn_decls.contains_key(name)
     }
 
+    /// The declaration of `name` if it is a generic function.
+    pub fn generic(&self, name: &str) -> Option<&'p FnDecl> {
+        self.fn_decls.get(name).copied().filter(|d| d.params.iter().any(|p| p.comptime))
+    }
+
     /// The signature of function `name`, or `None` if there is no such function.
+    /// Generic functions have no signature of their own, only their instances.
     pub fn signature(&self, name: &str) -> Option<Result<Rc<Sig>, Error>> {
         let decl = *self.fn_decls.get(name)?;
+        if self.generic(name).is_some() {
+            return Some(Err(Error::new(decl.pos, format!("`{name}` has comptime parameters, so it cannot be used here"))));
+        }
         Some(self.sigs.get(
             name,
             || Error::new(decl.pos, format!("the signature of `{name}` depends on itself")),
             || {
-                let params = decl.params.iter().map(|p| self.resolve(&p.ty)).collect::<Result<_, _>>()?;
+                for p in &decl.params {
+                    if is_type_param(p) {
+                        return Err(Error::new(p.ty.pos, "`type` can only be the type of a `comptime` parameter"));
+                    }
+                }
+                let params =
+                    decl.params.iter().map(|p| self.resolve(&p.ty, &self.empty)).collect::<Result<_, _>>()?;
                 let ret = match &decl.ret {
-                    Some(t) => self.resolve(t)?,
+                    Some(t) => self.resolve(t, &self.empty)?,
                     None => Type::Unit,
                 };
                 Ok(Rc::new(Sig { params, ret }))
@@ -253,20 +298,64 @@ impl<'p> Env<'p> {
         ))
     }
 
+    pub(crate) fn find_instance(&self, key: &str) -> Option<(String, Result<Rc<Sig>, Error>)> {
+        self.instances.borrow().get(key).map(|i| (i.name.clone(), i.sig.clone()))
+    }
+
+    pub(crate) fn instance_count(&self) -> u32 {
+        self.instances.borrow().len() as u32
+    }
+
+    pub(crate) fn add_instance(
+        &self,
+        key: String,
+        name: String,
+        fn_name: String,
+        bindings: Rc<Bindings>,
+        sig: Result<Rc<Sig>, Error>,
+    ) {
+        if sig.is_ok() {
+            self.pending.borrow_mut().push_back(name.clone());
+        }
+        self.instance_keys.borrow_mut().insert(name.clone(), key.clone());
+        self.instances.borrow_mut().insert(key, Instance { name, fn_name, bindings, sig });
+    }
+
+    /// An instance that was asked for but not compiled yet.
+    pub fn next_pending(&self) -> Option<String> {
+        self.pending.borrow_mut().pop_front()
+    }
+
     /// True while `name` is being lowered (so it cannot run at compile time yet).
     pub fn function_in_progress(&self, name: &str) -> bool {
         self.funcs.in_progress(name)
     }
 
-    /// The JIR of function `name`, which must exist.
+    /// The JIR of function `name` (a plain function or an instance), which must exist.
     pub fn function(&self, name: &str) -> Result<Rc<ir::Function>, Error> {
-        let decl = self.fn_decls[name];
+        let instance = self.instance_keys.borrow().get(name).map(|key| {
+            let inst = &self.instances.borrow()[key];
+            (inst.fn_name.clone(), inst.bindings.clone(), inst.sig.clone())
+        });
+        let (decl, bindings, sig) = match instance {
+            Some((fn_name, b, sig)) => (self.fn_decls[fn_name.as_str()], b, Some(sig)),
+            None => (self.fn_decls[name], self.empty.clone(), None),
+        };
         self.funcs.get(
             name,
             || Error::new(decl.pos, format!("`{name}` is needed at compile time while it is being compiled")),
             || {
-                let sig = self.signature(name).unwrap()?;
-                Ok(Rc::new(FnCx::new(self, sig).lower_fn(decl)?))
+                let sig = match sig {
+                    Some(sig) => sig?,
+                    None => self.signature(name).unwrap()?,
+                };
+                let cx = FnCx::new(self, sig, bindings.clone());
+                cx.lower_fn(decl, name).map(Rc::new).map_err(|mut e| {
+                    if !bindings.describe().is_empty() {
+                        e.msg = format!("{} (in `{}` with {})", e.msg, decl.name, bindings.describe());
+                    }
+                    e
+                })
             },
         )
     }
@@ -278,8 +367,8 @@ impl<'p> Env<'p> {
             name,
             || Error::new(decl.pos, format!("constant `{name}` depends on itself")),
             || {
-                let want = decl.ty.as_ref().map(|t| self.resolve(t)).transpose()?;
-                let (ty, v) = self.comptime(&decl.value, want.as_ref())?;
+                let want = decl.ty.as_ref().map(|t| self.resolve(t, &self.empty)).transpose()?;
+                let (ty, v) = self.comptime(&decl.value, want.as_ref(), &self.empty)?;
                 if let Some(want) = want {
                     if want != ty {
                         let msg = format!("the value of `{name}` must be {want}, found {ty}");

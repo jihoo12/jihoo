@@ -44,6 +44,10 @@ pub struct FnDecl {
 #[derive(Debug, Clone)]
 pub struct Param {
     pub pos: Pos,
+    /// `comptime x: T`: the argument is evaluated at compile time and the
+    /// function is instantiated once per distinct value (`comptime T: type` makes
+    /// it generic over a type).
+    pub comptime: bool,
     pub name: String,
     pub ty: TypeExpr,
 }

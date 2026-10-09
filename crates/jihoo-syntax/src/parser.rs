@@ -158,10 +158,11 @@ impl Parser {
         self.expect(&Tok::LParen, "`(`")?;
         let mut params = Vec::new();
         while *self.peek() != Tok::RParen {
+            let comptime = self.eat(&Tok::Comptime);
             let (ppos, pname) = self.ident("parameter name")?;
             self.expect(&Tok::Colon, "`:` and a parameter type")?;
             let ty = self.type_expr()?;
-            params.push(Param { pos: ppos, name: pname, ty });
+            params.push(Param { pos: ppos, comptime, name: pname, ty });
             if !self.eat(&Tok::Comma) {
                 break;
             }
@@ -599,6 +600,14 @@ mod tests {
         let s = body("let x = comptime f(2) + 1");
         let Stmt::Let { value, .. } = &s[0] else { panic!() };
         assert!(matches!(&value.kind, ExprKind::Binary(_, l, _) if matches!(l.kind, ExprKind::Comptime(_))));
+    }
+
+    #[test]
+    fn comptime_params() {
+        let p = parse("fn max(comptime T: type, a: T, b: T) -> T { return a }").unwrap();
+        let params = &p.funcs[0].params;
+        assert!(params[0].comptime && !params[1].comptime);
+        assert!(matches!(&params[0].ty.kind, TypeExprKind::Named(n) if n == "type"));
     }
 
     #[test]
