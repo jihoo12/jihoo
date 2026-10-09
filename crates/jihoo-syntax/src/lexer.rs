@@ -24,6 +24,7 @@ pub enum Tok {
     Macro,
     Quote,
     Import,
+    Pub,
 
     LParen,
     RParen,
@@ -295,6 +296,7 @@ impl<'a> Lexer<'a> {
                     "macro" => Tok::Macro,
                     "quote" => Tok::Quote,
                     "import" => Tok::Import,
+                    "pub" => Tok::Pub,
                     _ => Tok::Ident(word.to_string()),
                 }
             }

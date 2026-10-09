@@ -197,6 +197,24 @@ impl<'p> Env<'p> {
         self.fn_decls[key].0
     }
 
+    /// Checks that code in `from` may use item `key`: its own module's items, or
+    /// `pub` items of other modules.
+    pub fn check_visible(&self, pos: Pos, from: usize, key: &str) -> Result<(), Error> {
+        let item = self
+            .fn_decls
+            .get(key)
+            .map(|&(m, d)| (m, d.is_pub))
+            .or_else(|| self.struct_decls.get(key).map(|&(m, d)| (m, d.is_pub)))
+            .or_else(|| self.const_decls.get(key).map(|&(m, d)| (m, d.is_pub)));
+        match item {
+            Some((m, false)) if m != from => {
+                let module = &self.modules[m].name;
+                Err(Error::new(pos, format!("`{key}` is private to module `{module}` (mark it `pub` to use it here)")))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// `name` as written in scope `b`, resolved to a key, or an error that says
     /// which module alias is unknown.
     pub fn key_or_err(&self, pos: Pos, b: &Bindings, name: &str) -> Result<String, Error> {
@@ -228,6 +246,7 @@ impl<'p> Env<'p> {
             }
             TypeExprKind::Generic(name, args) => {
                 let key = self.key_or_err(t.pos, b, name)?;
+                self.check_visible(t.pos, b.module, &key)?;
                 let Some((dm, decl)) = self.struct_decls.get(&key).copied() else {
                     return Err(Error::new(t.pos, format!("unknown type `{name}`")));
                 };
@@ -271,7 +290,9 @@ impl<'p> Env<'p> {
                     if !decl.params.is_empty() {
                         return Err(Error::new(t.pos, format!("struct `{name}` is generic; write `{name}(...)`")));
                     }
-                    Ok(Type::Struct(self.key(b.module, name).unwrap()))
+                    let key = self.key(b.module, name).unwrap();
+                    self.check_visible(t.pos, b.module, &key)?;
+                    Ok(Type::Struct(key))
                 } else if name.contains('.') && self.key(b.module, name).is_none() {
                     Err(self.key_or_err(t.pos, b, name).unwrap_err())
                 } else if name == "ptr" {

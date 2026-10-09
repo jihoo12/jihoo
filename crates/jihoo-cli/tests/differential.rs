@@ -126,13 +126,13 @@ fn errors_in_imported_modules_name_their_file() {
     let dir = std::env::temp_dir().join(format!("jihoo-mods-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("lib")).unwrap();
     std::fs::write(dir.join("main.jh"), "import lib.util\nfn main() { print(util.twice(2)) }\n").unwrap();
-    std::fs::write(dir.join("lib/util.jh"), "fn twice(x: i64) -> i64 {\n  return x * true\n}\n").unwrap();
+    std::fs::write(dir.join("lib/util.jh"), "pub fn twice(x: i64) -> i64 {\n  return x * true\n}\n").unwrap();
     let out = Command::new(JIHOO).arg("run").arg(dir.join("main.jh")).output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     let expected = format!("{}:2:12: cannot apply `*` to i64 and bool", dir.join("lib/util.jh").display());
     assert!(stderr.contains(&expected), "{stderr}");
 
-    std::fs::write(dir.join("lib/util.jh"), "fn twice(x: i64) -> i64 { return x * 2 }\n").unwrap();
+    std::fs::write(dir.join("lib/util.jh"), "pub fn twice(x: i64) -> i64 { return x * 2 }\n").unwrap();
     let out = Command::new(JIHOO).arg("run").arg(dir.join("main.jh")).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "4\n");
     std::fs::remove_dir_all(&dir).unwrap();

@@ -39,6 +39,7 @@ impl FnCx<'_> {
     /// Runs macro `name` on `args` and parses the code it returns.
     pub(crate) fn expand(&mut self, pos: Pos, name: &str, args: &[MacroArg]) -> Result<Expr, Error> {
         let key = self.env.key_or_err(pos, &self.bindings, name)?;
+        self.env.check_visible(pos, self.bindings.module, &key)?;
         let Some(decl) = self.env.macro_decl(&key) else {
             return Err(Error::new(pos, format!("`{name}` is not a macro")));
         };

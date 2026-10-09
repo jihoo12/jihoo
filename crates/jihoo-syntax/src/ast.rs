@@ -22,6 +22,8 @@ pub struct Import {
 #[derive(Debug, Clone)]
 pub struct ConstDecl {
     pub pos: Pos,
+    /// `pub`: usable from other modules.
+    pub is_pub: bool,
     pub name: String,
     pub ty: Option<TypeExpr>,
     pub value: Expr,
@@ -30,6 +32,8 @@ pub struct ConstDecl {
 #[derive(Debug, Clone)]
 pub struct StructDecl {
     pub pos: Pos,
+    /// `pub`: usable from other modules, fields included.
+    pub is_pub: bool,
     pub name: String,
     /// `struct Pair(T: type)`: compile-time parameters, which make the struct
     /// generic. Each distinct set of arguments is its own struct type.
@@ -47,6 +51,8 @@ pub struct FieldDecl {
 #[derive(Debug, Clone)]
 pub struct FnDecl {
     pub pos: Pos,
+    /// `pub`: usable from other modules.
+    pub is_pub: bool,
     /// `macro name(...) -> expr { ... }`: run at compile time by `name!(...)`.
     pub is_macro: bool,
     pub name: String,

@@ -384,6 +384,7 @@ impl<'a> FnCx<'a> {
         let key = self.env.key_or_err(pos, &self.bindings, name)?;
         match self.env.constant(&key) {
             Some(c) => {
+                self.env.check_visible(pos, self.bindings.module, &key)?;
                 let c = c?;
                 let r = self.hoist(|cx| cx.splice(&c.0, &c.1));
                 self.const_regs.insert(name.to_string(), r);
@@ -799,6 +800,7 @@ impl<'a> FnCx<'a> {
             }
             _ => {
                 let key = self.env.key_or_err(pos, &self.bindings, name)?;
+                self.env.check_visible(pos, self.bindings.module, &key)?;
                 if let Some(decl) = self.env.generic(&key) {
                     return self.call_generic(pos, &key, decl, args);
                 }

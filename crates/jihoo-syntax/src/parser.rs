@@ -149,9 +149,18 @@ impl Parser {
         while *self.peek() != Tok::Eof {
             match self.peek() {
                 Tok::Import => imports.push(self.import()?),
-                Tok::Fn | Tok::Macro => funcs.push(self.fn_decl()?),
-                Tok::Struct => structs.push(self.struct_decl()?),
-                Tok::Const => consts.push(self.const_decl()?),
+                Tok::Fn | Tok::Macro => funcs.push(self.fn_decl(false)?),
+                Tok::Struct => structs.push(self.struct_decl(false)?),
+                Tok::Const => consts.push(self.const_decl(false)?),
+                Tok::Pub => {
+                    self.bump();
+                    match self.peek() {
+                        Tok::Fn | Tok::Macro => funcs.push(self.fn_decl(true)?),
+                        Tok::Struct => structs.push(self.struct_decl(true)?),
+                        Tok::Const => consts.push(self.const_decl(true)?),
+                        _ => return Err(self.unexpected("`fn`, `macro`, `struct` or `const` after `pub`")),
+                    }
+                }
                 Tok::InnerAttr(_) => {
                     return Err(Error::new(self.pos(), "`#![...]` must come before any item"))
                 }
@@ -185,16 +194,16 @@ impl Parser {
             || (same_line(2, &Tok::LBrace) && !self.no_struct_lit)
     }
 
-    fn const_decl(&mut self) -> PResult<ConstDecl> {
+    fn const_decl(&mut self, is_pub: bool) -> PResult<ConstDecl> {
         let pos = self.expect(&Tok::Const, "`const`")?.pos;
         let (_, name) = self.ident("constant name")?;
         let ty = if self.eat(&Tok::Colon) { Some(self.type_expr()?) } else { None };
         self.expect(&Tok::Assign, "`=`")?;
         let value = self.expr()?;
-        Ok(ConstDecl { pos, name, ty, value })
+        Ok(ConstDecl { pos, is_pub, name, ty, value })
     }
 
-    fn struct_decl(&mut self) -> PResult<StructDecl> {
+    fn struct_decl(&mut self, is_pub: bool) -> PResult<StructDecl> {
         let pos = self.expect(&Tok::Struct, "`struct`")?.pos;
         let (_, name) = self.ident("struct name")?;
         let mut params = Vec::new();
@@ -218,10 +227,10 @@ impl Parser {
             let ty = p.type_expr()?;
             Ok(FieldDecl { pos, name, ty })
         })?;
-        Ok(StructDecl { pos, name, params, fields })
+        Ok(StructDecl { pos, is_pub, name, params, fields })
     }
 
-    fn fn_decl(&mut self) -> PResult<FnDecl> {
+    fn fn_decl(&mut self, is_pub: bool) -> PResult<FnDecl> {
         let is_macro = *self.peek() == Tok::Macro;
         let pos = self.bump().pos; // `fn` or `macro`
         let (_, name) = self.ident("function name")?;
@@ -240,7 +249,7 @@ impl Parser {
         self.expect(&Tok::RParen, "`)`")?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
         let body = self.block()?;
-        Ok(FnDecl { pos, is_macro, name, params, ret, body })
+        Ok(FnDecl { pos, is_pub, is_macro, name, params, ret, body })
     }
 
     fn type_expr(&mut self) -> PResult<TypeExpr> {
@@ -744,6 +753,7 @@ fn punct(t: &Tok) -> &'static str {
         Tok::Macro => "macro",
         Tok::Quote => "quote",
         Tok::Import => "import",
+        Tok::Pub => "pub",
         Tok::Dollar => "$",
         Tok::LParen => "(",
         Tok::RParen => ")",
@@ -890,6 +900,14 @@ mod tests {
         assert!(parse("fn f() { let x = 0x1_0000_0000_0000_0000 }").unwrap_err().msg.contains("too large"));
         assert!(parse("fn f() { let x = 0xg }").unwrap_err().msg.contains("not a valid number"));
         assert!(parse("fn f() { let x = 12ab }").unwrap_err().msg.contains("not a valid number"));
+    }
+
+    #[test]
+    fn visibility() {
+        let p = parse("pub fn a() {}\nfn b() {}\npub struct S { x: i64 }\npub const C = 1\npub macro m() -> expr { return quote(1) }").unwrap();
+        assert!(p.funcs[0].is_pub && !p.funcs[1].is_pub && p.funcs[2].is_pub && p.funcs[2].is_macro);
+        assert!(p.structs[0].is_pub && p.consts[0].is_pub);
+        assert!(parse("pub import x").is_err());
     }
 
     #[test]

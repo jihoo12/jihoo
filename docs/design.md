@@ -177,8 +177,11 @@ fn _start() -> i64 {
 
 - Every file is a module with its own namespace. Items of another module are
   always written `alias.item`: functions, macros (`alias.m!(...)`), types
-  (`alias.T`, `alias.Vec(i64)`), struct literals and constants. Everything is
-  public for now.
+  (`alias.T`, `alias.Vec(i64)`), struct literals and constants.
+- Items are private to their module unless marked `pub` (`pub fn`, `pub struct`,
+  `pub const`, `pub macro`). A `pub` struct's fields are all public. Using a
+  private item from another module is an error that names it:
+  `` `alloc.helper` is private to module `alloc` ``.
 - `import a.b` loads `a/b.jh` and names it `b` (`import a.b as c` to rename). The
   loader (`crates/jihoo-syntax/src/loader.rs`) looks next to the importing file,
   then in the `-I` directories, `JIHOO_PATH`, and the standard library in `lib/`.
@@ -351,4 +354,4 @@ grows past twice the size that survived the last collection (1 MiB minimum).
    inline asm.~~
 4. ~~`comptime` on the VM, generic functions.~~
 5. ~~Expression macros, generic structs, bitwise operators, modules and an
-   `alloc` library.~~ Statement and item macros; visibility (`pub`).
+   `alloc` library, `pub`.~~ Statement and item macros.

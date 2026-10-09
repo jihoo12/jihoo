@@ -614,9 +614,9 @@ fn modules_have_their_own_namespaces() {
     let m = check_files(&[
         ("main.jh", "import shapes\nimport util as u\nfn area() -> i64 { return 1 }\n\
                      fn main() {\n  let s = shapes.Square { side: u.SIDE }\n  print(shapes.area(s) + area() + u.area())\n}"),
-        ("shapes.jh", "struct Square { side: i64 }\nfn area(s: Square) -> i64 { return s.side * s.side }"),
+        ("shapes.jh", "pub struct Square { side: i64 }\npub fn area(s: Square) -> i64 { return s.side * s.side }"),
         // The same names in another module do not clash.
-        ("lib/util.jh", "const SIDE = 3\nfn area() -> i64 { return 100 }"),
+        ("lib/util.jh", "pub const SIDE = 3\npub fn area() -> i64 { return 100 }"),
     ])
     .unwrap();
     let names: Vec<&str> = m.funcs.iter().map(|f| f.name.as_str()).collect();
@@ -633,9 +633,9 @@ fn generics_and_macros_across_modules() {
         ("main.jh", "import box\nstruct P { x: i64 }\n\
                      fn main() {\n  let b = box.wrap(P, P { x: 7 })\n  let c = box.Box(i64) { item: box.twice!(21) }\n  print(b.item.x + c.item)\n}"),
         // Inside `box`, its own names need no prefix; `T` may be a type of the caller.
-        ("box.jh", "struct Box(T: type) { item: T }\n\
-                    fn wrap(comptime T: type, x: T) -> Box(T) { return Box(T) { item: x } }\n\
-                    macro twice(e: expr) -> expr { return quote($e * 2) }"),
+        ("box.jh", "pub struct Box(T: type) { item: T }\n\
+                    pub fn wrap(comptime T: type, x: T) -> Box(T) { return Box(T) { item: x } }\n\
+                    pub macro twice(e: expr) -> expr { return quote($e * 2) }"),
     ])
     .unwrap();
     assert!(m.structs.iter().any(|s| s.name == "box.Box(P)"), "{m}");
@@ -648,8 +648,8 @@ fn generics_and_macros_across_modules() {
 fn modules_may_import_each_other() {
     check_files(&[
         ("main.jh", "import even\nfn main() { print(even.is_even(10)) }"),
-        ("even.jh", "import odd\nfn is_even(n: i64) -> bool {\n  if n == 0 { return true }\n  return odd.is_odd(n - 1)\n}"),
-        ("odd.jh", "import even\nfn is_odd(n: i64) -> bool {\n  if n == 0 { return false }\n  return even.is_even(n - 1)\n}"),
+        ("even.jh", "import odd\npub fn is_even(n: i64) -> bool {\n  if n == 0 { return true }\n  return odd.is_odd(n - 1)\n}"),
+        ("odd.jh", "import even\npub fn is_odd(n: i64) -> bool {\n  if n == 0 { return false }\n  return even.is_even(n - 1)\n}"),
     ])
     .unwrap();
 }
@@ -657,7 +657,7 @@ fn modules_may_import_each_other() {
 #[test]
 fn module_errors() {
     // Other modules' items need the prefix, and only imported modules exist.
-    let e = check_files(&[("main.jh", "import util\nfn main() { print(twice(1)) }"), ("util.jh", "fn twice(x: i64) -> i64 { return x }")])
+    let e = check_files(&[("main.jh", "import util\nfn main() { print(twice(1)) }"), ("util.jh", "pub fn twice(x: i64) -> i64 { return x }")])
         .unwrap_err();
     assert!(e.contains("unknown function `twice`"), "{e}");
     let e = check_files(&[("main.jh", "fn main() { print(nope.f(1)) }")]).unwrap_err();
@@ -672,4 +672,24 @@ fn module_errors() {
     let e = check_files(&[("main.jh", "import io\nfn main() {}"), ("lib/io.jh", "#![freestanding]\nfn f() {}")])
         .unwrap_err();
     assert!(e.contains("module `io` is freestanding-only"), "{e}");
+}
+
+#[test]
+fn private_items_stay_in_their_module() {
+    let lib = "fn helper() -> i64 { return 1 }\nstruct Inner { x: i64 }\nconst K = 2\nmacro m() -> expr { return quote(3) }\n\
+               pub struct Outer { x: i64 }\n\
+               pub fn api() -> i64 { let i = Inner { x: K }\n return helper() + i.x + m!() }";
+    // Inside the module, private items are fine; outside, only `pub` ones.
+    let ok = check_files(&[("main.jh", "import lib\nfn main() { let o = lib.Outer { x: 1 }\n print(lib.api() + o.x) }"), ("lib.jh", lib)]);
+    assert!(ok.is_ok(), "{}", ok.unwrap_err());
+    for (use_, what) in [
+        ("print(lib.helper())", "`lib.helper` is private to module `lib`"),
+        ("let i = lib.Inner { x: 1 }", "`lib.Inner` is private"),
+        ("let i: lib.Inner = lib.make()", "`lib.Inner` is private"),
+        ("print(lib.K)", "`lib.K` is private"),
+        ("print(lib.m!())", "`lib.m` is private"),
+    ] {
+        let e = check_files(&[("main.jh", &format!("import lib\nfn main() {{ {use_} }}")), ("lib.jh", lib)]).unwrap_err();
+        assert!(e.contains(what), "{use_}: {e}");
+    }
 }
