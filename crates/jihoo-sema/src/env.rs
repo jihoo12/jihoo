@@ -258,6 +258,12 @@ impl<'p> Env<'p> {
             TypeExprKind::Array(elem, n) => {
                 Ok(Type::array(self.resolve_in(elem, b, in_macro)?, self.array_len(n, b)?))
             }
+            TypeExprKind::Chan(inner) => {
+                if self.profile != Profile::Hosted && !in_macro {
+                    return Err(Error::new(t.pos, "channels need the VM's scheduler and are only available in hosted mode"));
+                }
+                Ok(Type::Chan(Box::new(self.resolve_in(inner, b, in_macro)?)))
+            }
             TypeExprKind::Ref(inner) => {
                 if self.profile != Profile::Hosted && !in_macro {
                     return Err(Error::new(

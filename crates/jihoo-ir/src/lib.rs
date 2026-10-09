@@ -224,6 +224,16 @@ pub enum Inst {
     Ref { dst: Reg, src: Reg },
     /// Hosted only: the value `ref T` `src` refers to.
     Deref { dst: Reg, src: Reg },
+    /// Hosted only: a new channel of the type of `dst`, buffering up to `cap`
+    /// (an `i64`) values; 0 makes sender and receiver meet.
+    NewChan { dst: Reg, cap: Reg },
+    /// Hosted only: sends `value` on channel `chan`, waiting while it is full.
+    Send { chan: Reg, value: Reg },
+    /// Hosted only: receives a value from channel `chan`, waiting until there is one.
+    Recv { dst: Reg, chan: Reg },
+    /// Hosted only: starts a task that calls the function value `callee` with
+    /// `args`. Its result is dropped.
+    Spawn { callee: Reg, args: Vec<Reg> },
     /// Builds an array from all of its elements.
     Array { dst: Reg, items: Vec<Reg> },
     /// An array with every element set to `value`.
@@ -320,6 +330,8 @@ impl Inst {
             | Payload { dst, src, .. }
             | Ref { dst, src }
             | Deref { dst, src }
+            | NewChan { dst, cap: src }
+            | Recv { dst, chan: src }
             | ToStr { dst, src }
             | Addr { dst, src }
             | Unique { dst, prefix: src }
@@ -331,7 +343,8 @@ impl Inst {
             | SetField { dst, src: lhs, value: rhs, .. }
             | ElemPtr { dst, ptr: lhs, index: rhs } => vec![dst, lhs, rhs],
             SetElem { dst, src, index, value } => vec![dst, src, index, value],
-            Store { ptr, value } => vec![ptr, value],
+            Store { ptr, value } | Send { chan: ptr, value } => vec![ptr, value],
+            Spawn { callee, args } => std::iter::once(callee).chain(args).collect(),
             Print { src } => vec![src],
             Call { dst, args, .. }
             | Struct { dst, fields: args, .. }

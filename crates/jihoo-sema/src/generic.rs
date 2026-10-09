@@ -109,7 +109,7 @@ fn expr_to_type(e: &Expr) -> Result<TypeExpr, Error> {
         ExprKind::ArrayRepeat(elem, n) => TypeExprKind::Array(Box::new(expr_to_type(elem)?), n.clone()),
         // `Pair(u8)` parses as a call.
         ExprKind::Call(name, args) => TypeExprKind::Generic(name.clone(), args.clone()),
-        ExprKind::FnType(t) => return Ok(t.clone()),
+        ExprKind::Type(t) => return Ok(t.clone()),
         _ => return Err(Error::new(e.pos, "expected a type")),
     };
     Ok(TypeExpr { pos: e.pos, kind })

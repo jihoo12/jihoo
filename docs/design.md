@@ -54,9 +54,9 @@ fn area(w: i64, h: i64) -> i64 {   // signatures are written out
 ```
 
 - Types: `unit`, `bool`, `i8`…`i64`, `u8`…`u64`, structs, enums, arrays, function types
-  `fn(A, B) -> R`, plus `str` and `ref T` (hosted only, garbage collected) and
-  `*T` (freestanding only, raw pointer). A string literal is a `str` when hosted
-  and a `*u8` to constant bytes when freestanding.
+  `fn(A, B) -> R`, plus `str`, `ref T` and `chan T` (hosted only, garbage
+  collected) and `*T` (freestanding only, raw pointer). A string literal is a
+  `str` when hosted and a `*u8` to constant bytes when freestanding.
 - Bitwise operators `&`, `|`, `^`, `<<`, `>>` work on integers, and `!` flips
   every bit of an integer. `>>` is arithmetic for signed types and logical for
   unsigned ones; shift amounts are taken modulo the bit width, so `x << 64` on an
@@ -410,6 +410,48 @@ print(p.x)                     // fields and elements read through a ref
   pointers. On the VM a ref is a one-element heap object; in JIR it is `ref T`,
   with `ref` and `deref` instructions.
 
+## Tasks and channels
+
+```jihoo
+enum Msg { Item(i64), Done }
+
+fn numbers(out: chan Msg, n: i64) {
+    let i = 0
+    while i < n {
+        send(out, Msg.Item(i))
+        i = i + 1
+    }
+    send(out, Msg.Done)
+}
+
+let c = chan(Msg)            // unbuffered; `chan(Msg, 8)` buffers 8 values
+go numbers(c, 5)
+go fn() { send(results, work(id)) }()
+match recv(c) { ... }
+```
+
+- `go f(x)` runs a call in a new task, like a goroutine. The function and its
+  arguments are evaluated first, in the task that says `go`; any function value
+  works, closures included. The result of the call is dropped.
+- `chan(T)` makes a channel of `T` values, and `chan(T, n)` one that buffers up
+  to `n`. `send(c, v)` waits while the channel is full (an unbuffered one is
+  full until a receiver comes), and `recv(c)` waits until there is a value.
+  The type is `chan T`.
+- Tasks share nothing but channels: arguments are copies, closures capture by
+  value, and refs are immutable. So there are no data races to worry about.
+- There is no `close`: to say "no more values", send a value that says so, as
+  `Msg.Done` above; `match` then handles both cases.
+- Tasks run on one OS thread. The VM's scheduler is round-robin and
+  deterministic: a task runs until it waits on a channel, finishes, or has run
+  1000 instructions, then the next ready task gets its turn. The same program
+  prints the same output on every run, which keeps tests reliable.
+- The program ends when `main` returns, even if other tasks are still running
+  or waiting (as in Go). If every task waits on a channel, the run stops with
+  `deadlock: every task is waiting on a channel`. An error in any task stops
+  the whole run.
+- Hosted only: tasks need the VM's scheduler. In JIR, `chan`, `send`, `recv`
+  and `spawn`.
+
 ## Macros
 
 ```jihoo
@@ -528,10 +570,12 @@ most common use of asm.
 happen at any allocation once the heap grows past twice the size that survived the
 last collection (1 MiB minimum).
 
-- The roots are gathered in one place, `Vm::roots`: the registers of every VM frame,
-  plus values handed out to the embedder (`Vm::alloc_string`, used for comptime
-  arguments), which stay alive as long as the VM. Future roots, such as the stacks
-  of other tasks or values waiting in a channel, go there too.
+- The roots are gathered in one place, `roots` in `crates/jihoo-vm/src/lib.rs`:
+  the registers of every frame of every task, the channels tasks wait on, and
+  values handed out to the embedder (`Vm::alloc_string`, used for comptime
+  arguments), which stay alive as long as the VM. Values in a channel's buffer
+  and the values of tasks waiting to send are reached through the channel.
+- Every object is immutable except channels.
 - The invariant: whatever an instruction allocates from must already be reachable
   from the roots. Values read from registers are; values held only in Rust locals
   are not.
@@ -571,6 +615,10 @@ free of LLVM.
 7. ~~Sum types and `match`; `ref T` for recursive data.~~ Nested patterns and
    `match` expressions.
 8. ~~Closures, captured by value and lifted into functions.~~
-9. Goroutine-like tasks and channels on the VM: one OS thread, a deterministic
-   scheduler, the stacks of all tasks as GC roots. Freestanding code gets
-   coroutines as a library on top of function values and `asm`.
+9. ~~Tasks and channels on the VM: one OS thread, a deterministic scheduler.~~
+   `select` over several channels.
+10. Comptime closures: closures passed as `comptime` arguments, specialized at
+    compile time, with their captures on the stack, so freestanding code can
+    use them without a GC.
+11. Coroutines for freestanding code, as a library on top of function values
+    and `asm`.

@@ -84,6 +84,7 @@ It takes no parameters and returns `unit` or `i64`.
 | `[N x T]`         | array of `N` `T`s, by value              | `[N x T]`     |
 | `fn(T, ...) -> R` | function value                           | `ptr`         |
 | `ref T`           | immutable GC reference to a `T`, hosted only | —         |
+| `chan T`          | channel of `T` values between tasks, hosted only | —     |
 
 `str` and `*T` are deliberately separate: GC references and raw pointers must never
 mix. That separation is what will later allow GC-enabled native builds.
@@ -206,6 +207,18 @@ The result type is what the destination register must be declared as.
 
 A `ref` field breaks the rule that a struct or enum may not contain itself.
 Types containing a `ref` have no fixed layout, like those containing `str`.
+
+### Tasks and channels (hosted only)
+
+| syntax                              | operands              | result | meaning |
+|-------------------------------------|-----------------------|--------|---------|
+| `%d = chan %n`                      | `i64`                 | `chan T` | a new channel buffering up to `%n` values (0: sender and receiver meet) |
+| `send %c, %v`                       | `chan T, T`           |        | send `%v`, waiting while the channel is full |
+| `%d = recv %c`                      | `chan T`              | `T`    | receive a value, waiting until there is one |
+| `spawn %f(%a, ...)`                 | `%f: fn(P...) -> R`, then `P...` | | call `%f` in a new task; the result is dropped |
+
+The VM runs tasks on one thread with a deterministic round-robin scheduler; the
+run ends when the entry function returns.
 
 ### Arrays
 

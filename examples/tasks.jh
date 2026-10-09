@@ -1,0 +1,91 @@
+// Tasks (`go`) and channels. Tasks run on one thread, taking turns: a task runs
+// until it waits on a channel or has used its time slice, so the output is the
+// same on every run. Tasks share nothing but channels.
+//   jihoo run examples/tasks.jh
+
+enum Msg {
+    Item(i64)
+    Done
+}
+
+// Sends `from..to`, then `Done`.
+fn numbers(out: chan Msg, from: i64, to: i64) {
+    let i = from
+    while i < to {
+        send(out, Msg.Item(i))
+        i = i + 1
+    }
+    send(out, Msg.Done)
+}
+
+// Applies `f` to every item until `Done`, which it passes on.
+fn stage(input: chan Msg, out: chan Msg, f: fn(i64) -> i64) {
+    let running = true
+    while running {
+        match recv(input) {
+            Item(x) => send(out, Msg.Item(f(x)))
+            Done => {
+                send(out, Msg.Done)
+                running = false
+            }
+        }
+    }
+}
+
+fn is_prime(n: i64) -> bool {
+    if n < 2 {
+        return false
+    }
+    let d = 2
+    while d * d <= n {
+        if n % d == 0 {
+            return false
+        }
+        d = d + 1
+    }
+    return true
+}
+
+fn main() {
+    // A pipeline: numbers -> square -> add one -> main.
+    let a = chan(Msg)
+    let b = chan(Msg)
+    let c = chan(Msg, 8)         // buffered: the last stage can run ahead
+    go numbers(a, 1, 6)
+    go stage(a, b, fn(x) { return x * x })
+    go stage(b, c, fn(x) { return x + 1 })
+    let running = true
+    while running {
+        match recv(c) {
+            Item(x) => print(x)          // 2 5 10 17 26
+            Done => running = false
+        }
+    }
+
+    // A worker pool: each worker counts the primes in its own range.
+    let results = chan(i64)
+    let workers = 4
+    let w = 0
+    while w < workers {
+        let lo = w * 2500
+        go fn() {
+            let count = 0
+            let n = lo
+            while n < lo + 2500 {
+                if is_prime(n) {
+                    count = count + 1
+                }
+                n = n + 1
+            }
+            send(results, count)
+        }()
+        w = w + 1
+    }
+    let total = 0
+    let k = 0
+    while k < workers {
+        total = total + recv(results)
+        k = k + 1
+    }
+    print("primes below 10000: " + to_str(total))   // 1229
+}

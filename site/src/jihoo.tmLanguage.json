@@ -64,9 +64,9 @@
     },
     "keywords": {
       "patterns": [
-        { "name": "keyword.control.jihoo", "match": "\\b(if|else|while|match|return)\\b" },
+        { "name": "keyword.control.jihoo", "match": "\\b(if|else|while|match|return|go)\\b" },
         { "name": "storage.type.jihoo", "match": "\\b(let|const|fn|macro|struct|enum)\\b" },
-        { "name": "storage.modifier.jihoo", "match": "\\b(pub|comptime|ref)\\b" },
+        { "name": "storage.modifier.jihoo", "match": "\\b(pub|comptime|ref|chan)\\b" },
         { "name": "keyword.other.jihoo", "match": "\\b(import|as|quote|asm|items)\\b" }
       ]
     },

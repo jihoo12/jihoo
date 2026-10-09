@@ -1,12 +1,17 @@
 //! VM-managed heap with a simple stop-the-world mark & sweep collector.
 //!
-//! Strings and aggregates (structs and arrays) live here. Aggregate objects are
-//! immutable: the VM implements value semantics by allocating a new object on every
-//! field or element update.
+//! Strings and aggregates (structs, arrays, enums, refs, closures) live here.
+//! Aggregate objects are immutable: the VM implements value semantics by
+//! allocating a new object on every field or element update. Channels are the
+//! one mutable kind of object: tasks share them to communicate.
 //!
 //! Setting `JIHOO_GC_STRESS=1` collects before every allocation, so a value that
 //! is live but not reachable from the roots is freed at the first chance instead
 //! of once in a blue moon. Run the test suite this way after touching rooting.
+
+use std::collections::VecDeque;
+
+use jihoo_ir::Reg;
 
 use crate::Value;
 
@@ -24,6 +29,19 @@ enum Obj {
     Str(Box<str>),
     /// Fields of a struct or elements of an array.
     Agg(Box<[Value]>),
+    Chan(Box<Channel>),
+}
+
+/// A channel between tasks. Tasks are numbered by the VM.
+#[derive(Debug, Default)]
+pub struct Channel {
+    /// How many values `buf` may hold; 0 means a sender waits for a receiver.
+    pub cap: usize,
+    pub buf: VecDeque<Value>,
+    /// Tasks waiting to send, with their values.
+    pub senders: VecDeque<(usize, Value)>,
+    /// Tasks waiting to receive, with the register the value goes to.
+    pub receivers: VecDeque<(usize, Reg)>,
 }
 
 impl Obj {
@@ -32,6 +50,8 @@ impl Obj {
             + match self {
                 Obj::Str(s) => s.len(),
                 Obj::Agg(fields) => std::mem::size_of_val(&**fields),
+                // The buffer grows later; this is only an estimate.
+                Obj::Chan(c) => std::mem::size_of::<Channel>() + c.cap * std::mem::size_of::<Value>(),
             }
     }
 
@@ -39,6 +59,10 @@ impl Obj {
         match self {
             Obj::Str(_) => {}
             Obj::Agg(fields) => out.extend(fields.iter().filter_map(Value::gc_ref)),
+            Obj::Chan(c) => {
+                out.extend(c.buf.iter().filter_map(Value::gc_ref));
+                out.extend(c.senders.iter().filter_map(|(_, v)| v.gc_ref()));
+            }
         }
     }
 }
@@ -102,6 +126,10 @@ impl Heap {
         self.alloc(Obj::Agg(fields.into()))
     }
 
+    pub fn alloc_chan(&mut self, cap: usize) -> GcRef {
+        self.alloc(Obj::Chan(Box::new(Channel { cap, ..Channel::default() })))
+    }
+
     fn alloc(&mut self, obj: Obj) -> GcRef {
         self.live_bytes += obj.size();
         match self.free.pop() {
@@ -131,6 +159,15 @@ impl Heap {
         match self.obj(r) {
             Obj::Str(s) => s,
             _ => panic!("{r:?} is not a string"),
+        }
+    }
+
+    pub fn chan_mut(&mut self, r: GcRef) -> &mut Channel {
+        let slot = &mut self.slots[r.index as usize];
+        match &mut slot.obj {
+            Some(Obj::Chan(c)) if slot.gen == r.gen => c,
+            Some(_) if slot.gen == r.gen => panic!("{r:?} is not a channel"),
+            _ => panic!("use of freed object {r:?}"),
         }
     }
 

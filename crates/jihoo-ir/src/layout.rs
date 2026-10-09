@@ -37,7 +37,7 @@ pub fn of(t: &Type, members: &Members<'_>) -> Option<Layout> {
             Layout { size: bytes, align: bytes }
         }
         Type::Ptr(_) | Type::Fn(..) => Layout { size: 8, align: 8 },
-        Type::Str | Type::Ref(_) | Type::Expr | Type::Stmts | Type::Items => return None,
+        Type::Str | Type::Ref(_) | Type::Chan(_) | Type::Expr | Type::Stmts | Type::Items => return None,
         Type::Array(elem, n) => {
             let e = of(elem, members)?;
             Layout { size: e.size.checked_mul(*n)?, align: e.align }

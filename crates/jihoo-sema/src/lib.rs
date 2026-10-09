@@ -20,6 +20,7 @@ mod env;
 mod generic;
 mod macros;
 mod place;
+mod tasks;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
@@ -243,7 +244,17 @@ fn expand_item_macros(profile: Profile, mods: &[Module]) -> Result<Vec<Module>, 
 fn is_builtin(name: &str) -> bool {
     matches!(
         name,
-        "print" | "syscall" | "len" | "size_of" | "align_of" | "stringify" | "to_str" | "unique" | "ident"
+        "print"
+            | "syscall"
+            | "len"
+            | "size_of"
+            | "align_of"
+            | "stringify"
+            | "to_str"
+            | "unique"
+            | "ident"
+            | "send"
+            | "recv"
     )
 }
 
@@ -660,6 +671,7 @@ impl<'a> FnCx<'a> {
                 self.switch_to(end_bb);
             }
             Stmt::Match { pos, value, arms } => self.match_stmt(*pos, value, arms)?,
+            Stmt::Go { pos, call } => self.go_stmt(*pos, call)?,
             Stmt::While { cond, body } => {
                 let cond_bb = self.new_block();
                 let body_bb = self.new_block();
@@ -743,7 +755,8 @@ impl<'a> FnCx<'a> {
                 self.call_value(e.pos, callee, "this function", args)?
             }
             ExprKind::Lambda(l) => self.lambda(e.pos, l, expected)?,
-            ExprKind::FnType(t) => {
+            ExprKind::NewChan(t, cap) => self.new_chan(e.pos, t, cap.as_deref())?,
+            ExprKind::Type(t) => {
                 return Err(Error::new(t.pos, "`fn(...)` is a type, not a value"));
             }
             ExprKind::StructLit(t, inits) => {
@@ -965,6 +978,29 @@ impl<'a> FnCx<'a> {
                 Ok(self.unit())
             }
             "stringify" => self.stringify(pos, args),
+            "send" => {
+                let [c, v] = args else {
+                    return Err(Error::new(pos, "`send` takes 2 arguments: a channel and a value"));
+                };
+                let chan = self.expr(c, None)?;
+                let Type::Chan(t) = self.ty(chan).clone() else {
+                    return Err(Error::new(c.pos, format!("`send` needs a channel, found {}", self.ty(chan))));
+                };
+                let value = self.expr(v, Some(&t))?;
+                self.expect(v.pos, value, &t, "the value sent")?;
+                self.emit(Inst::Send { chan, value });
+                Ok(self.unit())
+            }
+            "recv" => {
+                let [c] = args else {
+                    return Err(Error::new(pos, "`recv` takes 1 argument: a channel"));
+                };
+                let chan = self.expr(c, None)?;
+                let Type::Chan(t) = self.ty(chan).clone() else {
+                    return Err(Error::new(c.pos, format!("`recv` needs a channel, found {}", self.ty(chan))));
+                };
+                Ok(self.emit_to(*t, |dst| Inst::Recv { dst, chan }))
+            }
             "to_str" => {
                 if self.profile() != Profile::Hosted && !self.in_macro {
                     return Err(Error::new(pos, "`to_str` makes a `str`, so it is only available in hosted programs and macros"));

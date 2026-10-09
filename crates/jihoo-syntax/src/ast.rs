@@ -125,6 +125,8 @@ pub enum TypeExprKind {
     Generic(String, Vec<Expr>),
     /// `ref T`: an immutable GC reference.
     Ref(Box<TypeExpr>),
+    /// `chan T`: a channel between tasks.
+    Chan(Box<TypeExpr>),
     /// `fn(A, B) -> R`; without `-> R` the function returns unit.
     Fn(Vec<TypeExpr>, Option<Box<TypeExpr>>),
 }
@@ -163,6 +165,11 @@ pub enum Stmt {
     While {
         cond: Expr,
         body: Block,
+    },
+    /// `go f(x)`: runs the call in a new task.
+    Go {
+        pos: Pos,
+        call: Expr,
     },
     /// `match value { pattern => body ... }`
     Match {
@@ -210,9 +217,11 @@ pub enum ExprKind {
     /// A call of a function value that is not a plain name: `s.f(x)`,
     /// `fs[0](x)`, `make()(x)`.
     CallExpr(Box<Expr>, Vec<Expr>),
-    /// A function type where an expression is expected: a type argument, as in
-    /// `Vec(fn(i64) -> i64)`.
-    FnType(TypeExpr),
+    /// A type that does not parse as an expression, where an expression is
+    /// expected: a type argument, as in `Vec(fn(i64) -> i64)` or `Vec(chan u8)`.
+    Type(TypeExpr),
+    /// `chan(T)` or `chan(T, capacity)`: a new channel.
+    NewChan(TypeExpr, Option<Box<Expr>>),
     /// `fn(x: i64, y) -> R { ... }`: an anonymous function, which may capture
     /// local variables.
     Lambda(Box<Lambda>),
@@ -370,7 +379,13 @@ pub fn set_pos(e: &mut Expr, pos: Pos) {
             set_pos(f, pos);
             args.iter_mut().for_each(|a| set_pos(a, pos));
         }
-        ExprKind::FnType(t) => ty(t),
+        ExprKind::Type(t) => ty(t),
+        ExprKind::NewChan(t, cap) => {
+            ty(t);
+            if let Some(c) = cap {
+                set_pos(c, pos);
+            }
+        }
         ExprKind::Lambda(l) => {
             for (p, _, t) in &mut l.params {
                 *p = pos;
@@ -410,7 +425,7 @@ fn set_type_pos(t: &mut TypeExpr, pos: Pos) {
     t.pos = pos;
     match &mut t.kind {
         TypeExprKind::Named(_) => {}
-        TypeExprKind::Ptr(inner) | TypeExprKind::Ref(inner) => set_type_pos(inner, pos),
+        TypeExprKind::Ptr(inner) | TypeExprKind::Ref(inner) | TypeExprKind::Chan(inner) => set_type_pos(inner, pos),
         TypeExprKind::Array(elem, n) => {
             set_type_pos(elem, pos);
             set_pos(n, pos);
@@ -460,6 +475,10 @@ pub fn set_stmt_pos(s: &mut Stmt, pos: Pos) {
         Stmt::While { cond, body } => {
             set_pos(cond, pos);
             set_block_pos(body, pos);
+        }
+        Stmt::Go { pos: p, call } => {
+            *p = pos;
+            set_pos(call, pos);
         }
         Stmt::Match { pos: p, value, arms } => {
             *p = pos;

@@ -594,6 +594,32 @@ fn closures_in_freestanding_code() {
     assert!(m.to_string().contains("call @fn.0(") && m.to_string().contains("funcref @fn.1"), "{m}");
 }
 
+// ---- tasks and channels ----
+
+#[test]
+fn tasks_and_channels() {
+    let m = check(
+        "fn worker(c: chan i64, n: i64) { send(c, n * 2) }\n\
+         fn main() { let c: chan i64 = chan(i64, 2)\n go worker(c, 1)\n let k = 5\n go fn() { send(c, k) }()\n print(recv(c) + recv(c)) }",
+    )
+    .unwrap();
+    let text = m.to_string();
+    assert!(text.contains("= chan %") && text.contains("spawn %") && text.contains("send %") && text.contains("= recv %"), "{text}");
+
+    assert!(err("fn main() { let c = chan(i64)\n send(c, true) }").contains("the value sent must be i64, found bool"));
+    assert!(err("fn main() { print(recv(1)) }").contains("`recv` needs a channel, found i64"));
+    assert!(err("fn main() { let c = chan(i64, true) }").contains("capacity of a channel must be i64"));
+    assert!(err("fn main() { go print(1) }").contains("`print` is a builtin"));
+    assert!(err("fn main() { let x = 1\n go x(2) }").contains("`x` is not a function"));
+    assert!(err("fn f(a: i64) {}\nfn main() { go f() }").contains("`f` takes 1 arguments, 0 given"));
+    assert!(err("fn main() { go 1 + 2 }").contains("`go` needs a function call"));
+    assert!(err("fn main() { let c = chan(i64)\n print(c == c) }").contains("cannot apply `==`"));
+    assert!(err("const C = chan(i64)\nfn main() {}").contains("channel cannot be computed at compile time"));
+    assert!(err(&fs("fn f() { let c = chan(i64) }")).contains("only available in hosted mode"));
+    assert!(err(&fs("fn g() {}\nfn f() { go g() }")).contains("only available in hosted mode"));
+    assert!(err(&fs("fn f(c: chan u8) {}")).contains("only available in hosted mode"));
+}
+
 // ---- inline asm ----
 
 #[test]

@@ -75,7 +75,7 @@ impl Cx<'_> {
                 Err(format!("unknown struct `${name}`"))
             }
             Type::Enum(name) if !self.enums.contains_key(name.as_str()) => Err(format!("unknown enum `${name}`")),
-            Type::Ptr(inner) | Type::Array(inner, _) | Type::Ref(inner) => self.check_type(inner),
+            Type::Ptr(inner) | Type::Array(inner, _) | Type::Ref(inner) | Type::Chan(inner) => self.check_type(inner),
             Type::Fn(params, ret) => params.iter().chain([&**ret]).try_for_each(|t| self.check_type(t)),
             _ => Ok(()),
         }
@@ -258,6 +258,32 @@ impl Cx<'_> {
                             Err("`ref` needs the GC and is only available in hosted mode".into())
                         } else {
                             expect(dst, &Type::Ref(Box::new(ty(src)?.clone())))
+                        }
+                    }
+                    // Channel types are hosted only, so checking types checks the profile.
+                    Inst::NewChan { dst, cap } => match ty(dst)? {
+                        Type::Chan(_) => expect(cap, &Type::I64),
+                        t => Err(format!("`chan` cannot produce {}", t.jir())),
+                    },
+                    Inst::Send { chan, value } => match ty(chan)? {
+                        Type::Chan(t) => expect(value, t),
+                        t => Err(format!("`send` needs a channel, found {}", t.jir())),
+                    },
+                    Inst::Recv { dst, chan } => match ty(chan)? {
+                        Type::Chan(t) => expect(dst, t),
+                        t => Err(format!("`recv` needs a channel, found {}", t.jir())),
+                    },
+                    Inst::Spawn { callee, args } => {
+                        if profile != Profile::Hosted {
+                            return Err(at("`spawn` needs the VM's scheduler; hosted only".into()));
+                        }
+                        let Type::Fn(params, _) = ty(callee)? else {
+                            return Err(at(format!("{callee} is not a function")));
+                        };
+                        if params.len() != args.len() {
+                            Err(format!("{callee} takes {} arguments, {} given", params.len(), args.len()))
+                        } else {
+                            args.iter().zip(params).try_for_each(|(a, t)| expect(a, t))
                         }
                     }
                     Inst::Deref { dst, src } => match ty(src)? {

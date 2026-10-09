@@ -147,6 +147,9 @@ impl Env<'_> {
                 ConstValue::Agg(items.collect::<Result<_, _>>()?)
             }
             (Value::Func(i), Type::Fn(..)) => ConstValue::Func(vm.func_name(i).to_string()),
+            (Value::Chan(_), _) => {
+                return Err(Error::new(pos, "a channel cannot be computed at compile time"));
+            }
             (Value::Agg(_), Type::Fn(..)) => {
                 return Err(Error::new(
                     pos,

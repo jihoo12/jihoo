@@ -385,6 +385,10 @@ impl Parser {
             let inner = self.type_expr()?;
             return Ok(TypeExpr { pos, kind: TypeExprKind::Ref(Box::new(inner)) });
         }
+        if self.eat(&Tok::Chan) {
+            let inner = self.type_expr()?;
+            return Ok(TypeExpr { pos, kind: TypeExprKind::Chan(Box::new(inner)) });
+        }
         if self.eat(&Tok::LBracket) {
             let elem = self.type_expr()?;
             self.expect(&Tok::Semi, "`;` and an array length")?;
@@ -486,6 +490,14 @@ impl Parser {
                 Ok(Stmt::Return { pos, value })
             }
             Tok::If => self.if_stmt(),
+            Tok::Go => {
+                let pos = self.bump().pos;
+                let call = self.expr()?;
+                if !matches!(call.kind, ExprKind::Call(..) | ExprKind::CallExpr(..)) {
+                    return Err(Error::new(call.pos, "`go` needs a function call: `go f(x)`"));
+                }
+                Ok(Stmt::Go { pos, call })
+            }
             Tok::Match => {
                 let pos = self.bump().pos;
                 let value = self.cond()?;
@@ -741,6 +753,16 @@ impl Parser {
                 ExprKind::Asm(Box::new(self.asm_args()?))
             }
             Tok::Fn => return self.fn_expr(),
+            // `chan(T, n)` makes a channel; `chan T` is the type.
+            Tok::Chan if self.toks[self.i + 1].tok == Tok::LParen => {
+                self.bump();
+                self.bump();
+                let ty = self.type_expr()?;
+                let cap = if self.eat(&Tok::Comma) { Some(Box::new(self.with_struct_lit(true, |p| p.expr())?)) } else { None };
+                self.expect(&Tok::RParen, "`,` or `)`")?;
+                ExprKind::NewChan(ty, cap)
+            }
+            Tok::Chan => ExprKind::Type(self.type_expr()?),
             Tok::Quote => {
                 self.bump();
                 self.quote()?
@@ -795,7 +817,7 @@ impl Parser {
             }
             let params = params.into_iter().map(|(_, _, t)| t).collect();
             let ty = TypeExpr { pos, kind: TypeExprKind::Fn(params, ret.map(Box::new)) };
-            return Ok(Expr { pos, kind: ExprKind::FnType(ty) });
+            return Ok(Expr { pos, kind: ExprKind::Type(ty) });
         }
         let params = params
             .into_iter()
@@ -1002,6 +1024,8 @@ fn punct(t: &Tok) -> &'static str {
         Tok::Enum => "enum",
         Tok::Match => "match",
         Tok::Ref => "ref",
+        Tok::Go => "go",
+        Tok::Chan => "chan",
         Tok::FatArrow => "=>",
         Tok::As => "as",
         Tok::Const => "const",
@@ -1295,7 +1319,7 @@ mod tests {
         // A call never continues on the next line.
         assert_eq!(body("f\n(1)").len(), 2);
         assert!(matches!(&body("let t = Vec(fn(u8) -> u8)")[0], Stmt::Let { value, .. }
-            if matches!(&value.kind, ExprKind::Call(_, a) if matches!(a[0].kind, ExprKind::FnType(_)))));
+            if matches!(&value.kind, ExprKind::Call(_, a) if matches!(a[0].kind, ExprKind::Type(_)))));
     }
 
     #[test]
@@ -1322,9 +1346,19 @@ mod tests {
         assert!(l.params[0].1 == "x" && l.params[0].2.is_none() && l.params[1].2.is_some() && l.ret.is_some());
         // Without a body, `fn(x) -> u8` is a type: `x` names a type.
         let Stmt::Let { value, .. } = &s[1] else { panic!() };
-        assert!(matches!(&value.kind, ExprKind::Call(_, a) if matches!(a[0].kind, ExprKind::FnType(_))));
+        assert!(matches!(&value.kind, ExprKind::Call(_, a) if matches!(a[0].kind, ExprKind::Type(_))));
         let Stmt::Expr(call) = &s[2] else { panic!() };
         assert!(matches!(&call.kind, ExprKind::Call(_, a) if matches!(a[0].kind, ExprKind::Lambda(_))));
+    }
+
+    #[test]
+    fn tasks_and_channels() {
+        let s = body("let c: chan u8 = chan(u8, 4)\ngo f(c)\ngo fn() { g() }()\nlet t = V(chan u8)");
+        assert!(matches!(&s[0], Stmt::Let { ty: Some(t), value, .. }
+            if matches!(t.kind, TypeExprKind::Chan(_)) && matches!(value.kind, ExprKind::NewChan(_, Some(_)))));
+        assert!(matches!(&s[1], Stmt::Go { call, .. } if matches!(call.kind, ExprKind::Call(..))));
+        assert!(matches!(&s[2], Stmt::Go { call, .. } if matches!(call.kind, ExprKind::CallExpr(..))));
+        assert!(matches!(&s[3], Stmt::Let { value, .. } if matches!(&value.kind, ExprKind::Call(_, a) if matches!(a[0].kind, ExprKind::Type(_)))));
     }
 
     #[test]

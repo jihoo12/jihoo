@@ -1,8 +1,14 @@
 //! Register VM that executes JIR directly (the hosted profile).
+//!
+//! Tasks (`go f(x)`) run on one OS thread, interleaved by a deterministic
+//! round-robin scheduler: a task runs until it waits on a channel, finishes, or
+//! has run `TIME_SLICE` instructions. The same program always prints the same
+//! thing. When the first task (`main`) returns, the run ends, whatever the
+//! other tasks are doing; when every task waits on a channel, it is a deadlock.
 
 pub mod gc;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::Write;
 
@@ -10,6 +16,8 @@ use gc::{GcRef, Heap};
 use jihoo_ir::{BinOp, Function, Inst, Module, Profile, Reg, Terminator, Type, UnOp};
 
 const MAX_CALL_DEPTH: usize = 10_000;
+/// Instructions a task runs before the next ready task gets its turn.
+const TIME_SLICE: u32 = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Value {
@@ -22,13 +30,14 @@ pub enum Value {
     Agg(GcRef),
     /// A function value: an index into the module's functions.
     Func(u32),
+    Chan(GcRef),
 }
 
 impl Value {
     /// The heap object this value refers to, if any.
     pub fn gc_ref(&self) -> Option<GcRef> {
         match self {
-            Value::Str(r) | Value::Agg(r) => Some(*r),
+            Value::Str(r) | Value::Agg(r) | Value::Chan(r) => Some(*r),
             Value::Unit | Value::Int(_) | Value::Bool(_) | Value::Func(_) => None,
         }
     }
@@ -57,11 +66,29 @@ struct Frame {
     ret_dst: Option<Reg>,
 }
 
+/// A task that is not running. The running task's frames are in `Vm::stack`.
+#[derive(Default)]
+struct Task {
+    stack: Vec<Frame>,
+    /// The channel the task waits on, if it does.
+    waiting_on: Option<GcRef>,
+}
+
 pub struct Vm<'m> {
     module: &'m Module,
     fn_index: HashMap<&'m str, usize>,
     heap: Heap,
+    /// The frames of the running task.
     stack: Vec<Frame>,
+    /// Every task by number; the entry of the running one has an empty stack.
+    tasks: Vec<Task>,
+    current: usize,
+    /// Tasks ready to run, in the order they get their turn.
+    ready: VecDeque<usize>,
+    /// Instructions left in the running task's time slice.
+    slice: u32,
+    /// Set when the running task starts waiting on a channel.
+    blocked: bool,
     /// Values handed out to the embedder (`alloc_string`), kept alive for as long
     /// as the VM lives: between allocating an argument and passing it to
     /// `call_named`, no frame holds it.
@@ -85,6 +112,11 @@ impl<'m> Vm<'m> {
             fn_index,
             heap: Heap::default(),
             stack: Vec::new(),
+            tasks: Vec::new(),
+            current: 0,
+            ready: VecDeque::new(),
+            slice: TIME_SLICE,
+            blocked: false,
             pinned: Vec::new(),
             fuel: None,
             uniques: 0,
@@ -158,27 +190,44 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// Runs `func` as the first task until it returns. Tasks it starts run
+    /// interleaved with it and are dropped when it returns.
     fn call(&mut self, func: usize, args: &[Value], out: &mut dyn Write) -> Result<Value, VmError> {
+        self.stack.clear();
+        self.tasks = vec![Task::default()];
+        self.current = 0;
+        self.ready.clear();
+        self.slice = TIME_SLICE;
         self.push_frame(func, args, None)?;
-        let base = self.stack.len() - 1;
         let module = self.module;
 
         loop {
-            let frame = self.stack.last_mut().unwrap();
-            let f = &module.funcs[frame.func];
-            let block = &f.blocks[frame.block];
-
             if let Some(fuel) = &mut self.fuel {
                 if *fuel == 0 {
                     return Err(self.error("evaluation did not finish (step limit reached)"));
                 }
                 *fuel -= 1;
             }
+            if self.slice == 0 {
+                self.slice = TIME_SLICE;
+                if !self.ready.is_empty() {
+                    self.ready.push_back(self.current);
+                    self.switch_task()?;
+                }
+            }
+            self.slice -= 1;
+
             let frame = self.stack.last_mut().unwrap();
+            let f = &module.funcs[frame.func];
+            let block = &f.blocks[frame.block];
             if frame.ip < block.insts.len() {
                 let inst = &block.insts[frame.ip];
                 frame.ip += 1;
                 self.exec(f, inst, out)?;
+                if self.blocked {
+                    self.blocked = false;
+                    self.switch_task()?;
+                }
                 continue;
             }
 
@@ -197,25 +246,73 @@ impl<'m> Vm<'m> {
                 Terminator::Ret(r) => {
                     let v = frame.regs[r.0 as usize];
                     let done = self.stack.pop().unwrap();
-                    if self.stack.len() == base {
+                    if let Some(caller) = self.stack.last_mut() {
+                        caller.regs[done.ret_dst.unwrap().0 as usize] = v;
+                    } else if self.current == 0 {
+                        self.tasks.clear();
+                        self.ready.clear();
                         return Ok(v);
+                    } else {
+                        // A started task is done; its result is dropped.
+                        self.switch_task()?;
                     }
-                    let caller = self.stack.last_mut().unwrap();
-                    caller.regs[done.ret_dst.unwrap().0 as usize] = v;
                 }
             }
         }
+    }
+
+    /// Puts the running task aside and runs the next ready one.
+    fn switch_task(&mut self) -> Result<(), VmError> {
+        let Some(next) = self.ready.pop_front() else {
+            return Err(self.error("deadlock: every task is waiting on a channel"));
+        };
+        std::mem::swap(&mut self.stack, &mut self.tasks[self.current].stack);
+        self.current = next;
+        std::mem::swap(&mut self.stack, &mut self.tasks[next].stack);
+        self.slice = TIME_SLICE;
+        Ok(())
+    }
+
+    /// Makes the running task wait on channel `chan`.
+    fn wait(&mut self, chan: GcRef) {
+        self.tasks[self.current].waiting_on = Some(chan);
+        self.blocked = true;
+    }
+
+    /// Makes waiting task `task` ready to run again.
+    fn wake(&mut self, task: usize) {
+        self.tasks[task].waiting_on = None;
+        self.ready.push_back(task);
+    }
+
+    fn frame(&self, func: usize, args: &[Value], ret_dst: Option<Reg>) -> Frame {
+        let f = &self.module.funcs[func];
+        let mut regs = vec![Value::Unit; f.regs.len()];
+        regs[..args.len()].copy_from_slice(args);
+        Frame { func, block: 0, ip: 0, regs, ret_dst }
     }
 
     fn push_frame(&mut self, func: usize, args: &[Value], ret_dst: Option<Reg>) -> Result<(), VmError> {
         if self.stack.len() >= MAX_CALL_DEPTH {
             return Err(self.error("stack overflow"));
         }
-        let f = &self.module.funcs[func];
-        let mut regs = vec![Value::Unit; f.regs.len()];
-        regs[..args.len()].copy_from_slice(args);
-        self.stack.push(Frame { func, block: 0, ip: 0, regs, ret_dst });
+        let frame = self.frame(func, args, ret_dst);
+        self.stack.push(frame);
         Ok(())
+    }
+
+    /// The function a function value calls, and the arguments it passes first
+    /// (a closure's captured values).
+    fn callee(&self, callee: Reg) -> Result<(usize, Vec<Value>), VmError> {
+        match self.get(callee) {
+            Value::Func(i) => Ok((i as usize, Vec::new())),
+            Value::Agg(r) => {
+                let items = self.heap.items(r);
+                let Value::Func(i) = items[0] else { return Err(self.error("malformed closure")) };
+                Ok((i as usize, items[1..].to_vec()))
+            }
+            _ => Err(self.error("called a value that is not a function")),
+        }
     }
 
     fn exec(&mut self, f: &'m Function, inst: &'m Inst, out: &mut dyn Write) -> Result<(), VmError> {
@@ -356,17 +453,61 @@ impl<'m> Vm<'m> {
                 self.set(*dst, Value::Agg(r));
             }
             Inst::CallIndirect { dst, callee, args } => {
-                let (callee, mut all) = match self.get(*callee) {
-                    Value::Func(i) => (i, Vec::with_capacity(args.len())),
-                    Value::Agg(r) => {
-                        let items = self.heap.items(r);
-                        let Value::Func(i) = items[0] else { return Err(self.error("malformed closure")) };
-                        (i, items[1..].to_vec())
-                    }
-                    _ => return Err(self.error("called a value that is not a function")),
-                };
+                let (callee, mut all) = self.callee(*callee)?;
                 all.extend(args.iter().map(|r| self.get(*r)));
-                self.push_frame(callee as usize, &all, Some(*dst))?;
+                self.push_frame(callee, &all, Some(*dst))?;
+            }
+            Inst::Spawn { callee, args } => {
+                let (callee, mut all) = self.callee(*callee)?;
+                all.extend(args.iter().map(|r| self.get(*r)));
+                let frame = self.frame(callee, &all, None);
+                self.tasks.push(Task { stack: vec![frame], waiting_on: None });
+                self.ready.push_back(self.tasks.len() - 1);
+            }
+            Inst::NewChan { dst, cap } => {
+                let cap = self.int(*cap)?;
+                let cap = usize::try_from(cap).map_err(|_| self.error(&format!("channel capacity {cap} is negative")))?;
+                let r = self.alloc_chan(cap);
+                self.set(*dst, Value::Chan(r));
+            }
+            Inst::Send { chan, value } => {
+                let Value::Chan(c) = self.get(*chan) else { return Err(self.error("`send` needs a channel")) };
+                let v = self.get(*value);
+                let current = self.current;
+                let ch = self.heap.chan_mut(c);
+                if let Some((task, dst)) = ch.receivers.pop_front() {
+                    // A receiver is waiting: hand the value over.
+                    self.tasks[task].stack.last_mut().unwrap().regs[dst.0 as usize] = v;
+                    self.wake(task);
+                } else if ch.buf.len() < ch.cap {
+                    ch.buf.push_back(v);
+                } else {
+                    ch.senders.push_back((current, v));
+                    self.wait(c);
+                }
+            }
+            Inst::Recv { dst, chan } => {
+                let Value::Chan(c) = self.get(*chan) else { return Err(self.error("`recv` needs a channel")) };
+                let current = self.current;
+                let ch = self.heap.chan_mut(c);
+                if let Some(v) = ch.buf.pop_front() {
+                    // Room in the buffer: the first waiting sender puts its value in.
+                    let sender = ch.senders.pop_front().map(|(task, sv)| {
+                        ch.buf.push_back(sv);
+                        task
+                    });
+                    self.set(*dst, v);
+                    if let Some(task) = sender {
+                        self.wake(task);
+                    }
+                } else if let Some((task, v)) = ch.senders.pop_front() {
+                    // No buffer: take the value straight from a waiting sender.
+                    self.set(*dst, v);
+                    self.wake(task);
+                } else {
+                    ch.receivers.push_back((current, *dst));
+                    self.wait(c);
+                }
             }
             Inst::ToStr { dst, src } => {
                 let text = match (f.reg_type(*src), self.get(*src)) {
@@ -393,7 +534,7 @@ impl<'m> Vm<'m> {
                     Value::Int(n) => n.to_string(),
                     Value::Bool(b) => b.to_string(),
                     Value::Str(r) => self.heap.str(r).to_string(),
-                    v @ (Value::Unit | Value::Agg(_) | Value::Func(_)) => {
+                    v @ (Value::Unit | Value::Agg(_) | Value::Func(_) | Value::Chan(_)) => {
                         return Err(self.error(&format!("cannot print {}", type_name(v))))
                     }
                 };
@@ -510,17 +651,17 @@ impl<'m> Vm<'m> {
         self.heap.alloc_agg(fields)
     }
 
-    fn maybe_collect(&mut self) {
-        if self.heap.should_collect() {
-            let roots = Self::roots(&self.stack, &self.pinned);
-            self.heap.collect(roots);
-        }
+    fn alloc_chan(&mut self, cap: usize) -> GcRef {
+        self.maybe_collect();
+        self.heap.alloc_chan(cap)
     }
 
-    /// Every value the program can still reach without going through the heap.
-    /// New kinds of roots (more stacks, queued messages) belong here.
-    fn roots<'a>(stack: &'a [Frame], pinned: &'a [Value]) -> impl Iterator<Item = &'a Value> {
-        stack.iter().flat_map(|f| f.regs.iter()).chain(pinned)
+    fn maybe_collect(&mut self) {
+        if self.heap.should_collect() {
+            let waiting: Vec<Value> = self.tasks.iter().filter_map(|t| t.waiting_on.map(Value::Chan)).collect();
+            let roots = roots(&self.stack, &self.tasks, &self.pinned, &waiting);
+            self.heap.collect(roots);
+        }
     }
 
     fn bounds_check(&self, agg: GcRef, index: Reg) -> Result<usize, VmError> {
@@ -594,6 +735,20 @@ fn string_literal(s: &str) -> String {
     out
 }
 
+/// Every value the program can still reach without going through the heap: the
+/// registers of the running task (`stack`) and of every other task, values
+/// handed to the embedder (`pinned`), and the channels tasks wait on
+/// (`waiting`). Values in a channel are reached through the channel.
+fn roots<'a>(
+    stack: &'a [Frame],
+    tasks: &'a [Task],
+    pinned: &'a [Value],
+    waiting: &'a [Value],
+) -> impl Iterator<Item = &'a Value> {
+    let stacks = std::iter::once(stack).chain(tasks.iter().map(|t| t.stack.as_slice()));
+    stacks.flatten().flat_map(|f| f.regs.iter()).chain(pinned).chain(waiting)
+}
+
 fn type_name(v: Value) -> &'static str {
     match v {
         Value::Unit => "unit",
@@ -602,6 +757,7 @@ fn type_name(v: Value) -> &'static str {
         Value::Str(_) => "str",
         Value::Agg(_) => "aggregate",
         Value::Func(_) => "function",
+        Value::Chan(_) => "channel",
     }
 }
 
@@ -823,6 +979,70 @@ fn main() {
         let Value::Str(r) = vm.call_named("join", &[a, b], &mut Vec::new()).unwrap() else { panic!() };
         assert_eq!(vm.heap().str(r), "left right");
         assert!(vm.heap().stats().collections >= 2);
+    }
+
+    fn run_limited(src: &str, stress: bool) -> (Result<i64, VmError>, String) {
+        let m = compile(src);
+        let mut vm = Vm::new(&m).with_fuel(1_000_000);
+        vm.heap_mut().set_stress(stress);
+        let mut out = Vec::new();
+        let r = vm.run_main(&mut out);
+        (r, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn tasks_and_channels() {
+        // Unbuffered: every send waits for its receive, so the order is fixed.
+        let src = "
+fn ping(c: chan i64, back: chan i64) {
+    let i = 0
+    while i < 3 {
+        send(c, i)
+        print(\"ping \" + to_str(recv(back)))
+        i = i + 1
+    }
+}
+fn main() {
+    let c = chan(i64)
+    let back = chan(i64)
+    go ping(c, back)
+    let i = 0
+    while i < 3 {
+        let v = recv(c)
+        print(\"pong \" + to_str(v))
+        send(back, v * 10)
+        i = i + 1
+    }
+}";
+        let (r, out) = run_limited(src, false);
+        r.unwrap();
+        // After the last `send`, `main` keeps running and returns before `ping`
+        // gets its turn: the run ends with `main`, so "ping 20" never prints.
+        assert_eq!(out, "pong 0\nping 0\npong 1\nping 10\npong 2\n");
+        // The same under a collection at every allocation: queued values are roots.
+        assert_eq!(run_limited(src, true).1, out);
+    }
+
+    #[test]
+    fn buffered_channels_and_deadlock() {
+        let (r, out) = run_limited("fn main() { let c = chan(str, 2)\n send(c, \"a\")\n send(c, \"b\")\n print(recv(c) + recv(c)) }", true);
+        r.unwrap();
+        assert_eq!(out, "ab\n");
+        let (r, _) = run_limited("fn main() { let c = chan(i64, 1)\n send(c, 1)\n send(c, 2) }", false);
+        assert!(r.unwrap_err().msg.contains("deadlock"));
+        let (r, _) = run_limited("fn main() { let c = chan(i64, 0 - 1) }", false);
+        assert!(r.unwrap_err().msg.contains("capacity -1 is negative"));
+    }
+
+    #[test]
+    fn tasks_are_preempted_and_dropped_with_main() {
+        // A task that never stops does not keep `main` from running or ending.
+        let (r, out) = run_limited("fn spin() { while true {} }\nfn main() { go spin()\n go spin()\n let i = 0\n while i < 5000 { i = i + 1 }\n print(i) }", false);
+        r.unwrap();
+        assert_eq!(out, "5000\n");
+        // An error in any task stops the run.
+        let (r, _) = run_limited("fn bad(x: i64) -> i64 { return 1 / x }\nfn main() { go bad(0)\n let c = chan(i64)\n print(recv(c)) }", false);
+        assert!(r.unwrap_err().msg.contains("division by zero"));
     }
 
     #[test]
