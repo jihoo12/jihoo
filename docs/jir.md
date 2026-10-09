@@ -171,7 +171,7 @@ The result type is what the destination register must be declared as.
 | `%d = shl\|shr %a, %b`          | `T, T` (int)          | `T`    | shift by `%b` modulo the bit width; `shr` is arithmetic for signed types, logical for unsigned |
 | `%d = add %a, %b`               | `str, str`            | `str`  | concatenation |
 | `%d = add\|sub %a, %b`          | `*T, i64`             | `*T`   | pointer offset in elements of `T` |
-| `%d = eq\|ne %a, %b`            | `T, T`: `bool`, int, `str`, `*U` | `bool` | equality (`str` compares contents) |
+| `%d = eq\|ne %a, %b`            | `T, T`: `bool`, int, `str`, `*U` | `bool` | equality (`str` compares contents); the frontend compares structs, enums, arrays and refs with helper functions `@fn.eq.N` |
 | `%d = lt\|le\|gt\|ge %a, %b`    | `T, T`: int or `*U`   | `bool` | ordered comparison, signed or unsigned by type; pointers unsigned |
 | `%d = cast %a`                  | see below             | dst type | conversion |
 | `%d = call @f(%a, ...)`         | parameter types of `@f` | return type of `@f` | call |

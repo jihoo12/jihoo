@@ -100,6 +100,11 @@ pub(crate) struct Env<'p> {
     /// Those functions, and whether each is part of the program (the ones made
     /// inside macros only exist while compiling).
     lambdas: RefCell<Vec<(Rc<ir::Function>, bool)>>,
+    /// The equality helpers made so far (`fn.eq.N`), by the JIR spelling of
+    /// the type they compare.
+    pub(crate) eq_helpers: RefCell<HashMap<String, String>>,
+    /// The types whose comparability is being checked, to stop at recursion.
+    pub(crate) eq_checking: RefCell<Vec<String>>,
     /// The next number `unique` hands out, across every compile-time run.
     pub uniques: Cell<u64>,
     /// Generic instances by key, their keys by name, and the ones not compiled yet.
@@ -140,6 +145,8 @@ impl<'p> Env<'p> {
             comptime_ids: Cell::new(0),
             lambda_ids: Cell::new(0),
             lambdas: RefCell::new(Vec::new()),
+            eq_helpers: RefCell::new(HashMap::new()),
+            eq_checking: RefCell::new(Vec::new()),
             uniques: Cell::new(0),
             instances: RefCell::new(HashMap::new()),
             struct_keys: RefCell::new(HashMap::new()),

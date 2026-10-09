@@ -427,8 +427,31 @@ return Option.Some(i)                // ... or from the payload, or the return t
   `variant`, `tag` and `payload` instructions. Natively it has the C layout of
   a `u32` tag followed by a union of the payloads (`size_of(Shape)` is 24); on
   the VM it is a GC object.
-- Not yet: equality on enums. A type cannot contain itself by value; recursive
-  data goes through a `ref` (hosted) or a pointer (freestanding).
+- A type cannot contain itself by value; recursive data goes through a `ref`
+  (hosted) or a pointer (freestanding).
+
+## Equality
+
+```jihoo
+p == Point { x: 1, y: 2 }
+Option.Some(3) != Option(i64).None
+[1, 2, 3] == [1, 2, 3]
+list(50) == list(50)          // enum List { Cons(i64, ref List), Nil }
+```
+
+- `==` and `!=` work on every type made of comparable parts, and compare
+  structurally: structs field by field, enums by variant and then payload,
+  arrays element by element. Integers, bools and `str` (by contents) compare as
+  before, and pointers compare as addresses.
+- A `ref` compares by the value it refers to. Refs are immutable, so which
+  object a ref points to cannot be observed; comparing what it refers to is the
+  only meaning that fits. So lists and trees can be compared directly.
+- Function values and channels cannot be compared, and neither can a value
+  that holds one; the error says which part is to blame.
+- There is no ordering (`<`) on structs, enums or arrays.
+- Each compared type gets a helper function `fn.eq.N` in JIR, made on first
+  use (`crates/jihoo-sema/src/equality.rs`); helpers call each other, and
+  themselves for recursive types. Nothing new is needed in JIR or the backends.
 
 ## References
 
@@ -455,7 +478,8 @@ print(p.x)                     // fields and elements read through a ref
 - Refs are immutable: `*r = v` and `r.x = v` are errors. So a value shared
   through refs behaves exactly as if it had been copied, and jihoo keeps its
   value semantics; a new version is built from the parts that change and refs
-  to the parts that do not (see `examples/lists.jh`). There is no `==` on refs.
+  to the parts that do not (see `examples/lists.jh`). `==` on refs compares
+  the values they refer to.
 - A `ref` breaks the rule that a type cannot contain itself, which is what makes
   lists and trees possible.
 - Hosted only, like `str`: the GC owns the value. Freestanding code uses

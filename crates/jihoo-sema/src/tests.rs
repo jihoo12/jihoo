@@ -596,6 +596,31 @@ fn match_expressions() {
     assert!(err("enum E {}\nfn f(e: E) -> i64 { return match e {} }\nfn main() {}").contains("needs at least one arm"));
 }
 
+// ---- equality ----
+
+#[test]
+fn structural_equality() {
+    let m = check(
+        "struct P { x: i64, s: str }\nenum L { Cons(P, ref L), Nil }\n\
+         fn main() { let p = P { x: 1, s: \"a\" }\n print(p == p && [p] != [p] && L.Cons(p, ref L.Nil) == L.Nil) }",
+    )
+    .unwrap();
+    let text = m.to_string();
+    // One helper per type compared, called for nested parts; `L` and `ref L` call each other.
+    assert!(text.contains("fn @fn.eq.0($P, $P) -> bool"), "{text}");
+    assert!(text.contains("call @fn.eq.0("), "{text}");
+    assert!(text.matches("fn @fn.eq.").count() == 4, "{text}");
+
+    let e = err("struct S { f: fn(i64) }\nfn g(x: i64) {}\nfn main() { let s = S { f: g }\n print(s == s) }");
+    assert!(e.contains("cannot apply `==` to S: function values (fn(i64)) cannot be compared"), "{e}");
+    let e = err("enum E { A(chan i64), B }\nfn main() { let c = chan(i64)\n print(E.A(c) != E.B) }");
+    assert!(e.contains("cannot apply `!=` to E: channels (chan i64) cannot be compared"), "{e}");
+    assert!(err("struct P { x: i64 }\nfn main() { print(P { x: 1 } == 1) }").contains("cannot apply `==` to P and i64"));
+    assert!(err("struct P { x: i64 }\nfn main() { let p = P { x: 1 }\n print(p < p) }").contains("cannot apply `<` to P and P"));
+    // Works natively too, with pointers compared as addresses.
+    check(&fs("struct N { v: i64, next: *N }\nfn f(a: N, b: N) -> bool { return a == b }")).unwrap();
+}
+
 // ---- refs ----
 
 #[test]
@@ -615,7 +640,8 @@ fn refs() {
     let e = err("struct P { x: i64 }\nfn main() { let p = ref P { x: 1 }\n p.x = 2 }");
     assert!(e.contains("cannot assign to a value behind a `ref`"), "{e}");
     assert!(err("fn main() { let r = ref 1\n *r = 2 }").contains("behind a `ref`"));
-    assert!(err("fn main() { let r = ref 1\n print(r == r) }").contains("cannot apply `==`"));
+    // Refs compare by value: which object a ref is cannot be observed.
+    check("fn main() { let r = ref 1\n print(r == ref 1) }").unwrap();
     assert!(err(&fs("fn f() { let r = ref 1 }")).contains("only available in hosted mode"));
     assert!(err(&fs("fn f(r: ref i64) {}")).contains("use a pointer (`*T`)"));
     assert!(err("fn main() { let r = ref [1, 2]\n r[0] = 5 }").contains("behind a `ref`"));

@@ -16,6 +16,7 @@ mod asm;
 mod closures;
 mod comptime;
 mod enums;
+mod equality;
 mod env;
 mod generic;
 mod macros;
@@ -905,6 +906,9 @@ impl<'a> FnCx<'a> {
         };
 
         let (lt, rt) = (self.ty(lhs).clone(), self.ty(rhs).clone());
+        if matches!(op, ir::BinOp::Eq | ir::BinOp::Ne) && lt == rt && equality::is_structural(&lt) {
+            return self.structural_eq(pos, lhs, rhs, op == ir::BinOp::Ne);
+        }
         let ty = types::binary(op, &lt, &rt)
             .ok_or_else(|| Error::new(pos, format!("cannot apply `{sym}` to {lt} and {rt}")))?;
         Ok(self.emit_to(ty, |dst| Inst::Binary { dst, op, lhs, rhs }))

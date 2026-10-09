@@ -1,0 +1,50 @@
+// `==` and `!=` on structs, enums and arrays compare structurally.
+
+struct Point {
+    x: i64
+    y: u8
+}
+
+struct Line {
+    a: Point
+    b: Point
+    tag: bool
+}
+
+enum Option(T: type) {
+    Some(T)
+    None
+}
+
+enum Shape {
+    Dot(Point)
+    Seg(Line, [u8; 3])
+    Empty
+}
+
+fn bit(b: bool, n: i64) -> i64 {
+    if b {
+        return n
+    }
+    return 0
+}
+
+fn entry() -> i64 {
+    let p = Point { x: -5, y: 200 }
+    let q = Point { x: -5, y: 201 }
+    let l = Line { a: p, b: q, tag: true }
+    let total = 0
+    total = total + bit(p == Point { x: -5, y: 200 }, 1)
+    total = total + bit(p != q, 2)
+    total = total + bit(l == Line { a: p, b: q, tag: true }, 4)
+    total = total + bit(l == Line { a: p, b: q, tag: false }, 8)            // no
+    total = total + bit([p, q] == [p, q], 16)
+    total = total + bit([1, 2, 3] == [1, 2, 4], 32)                         // no
+    total = total + bit(Shape.Dot(p) == Shape.Dot(p), 64)
+    total = total + bit(Shape.Dot(p) == Shape.Empty, 128)                   // no
+    total = total + bit(Shape.Seg(l, [1, 2, 3]) == Shape.Seg(l, [1, 2, 3]), 256)
+    total = total + bit(Shape.Seg(l, [1, 2, 3]) != Shape.Seg(l, [1, 9, 3]), 512)
+    total = total + bit(Option.Some(Option.Some(p)) == Option.Some(Option.Some(p)), 1024)
+    total = total + bit(Option.Some(Option(Point).None) == Option(Option(Point)).None, 2048)  // no
+    return total % 255     // 1+2+4+16+64+256+512+1024 = 1879; % 255 = 94
+}
