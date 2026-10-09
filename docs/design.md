@@ -101,6 +101,29 @@ fn sum(list: *Node) -> i64 {
 - Assignment targets are *places*: variables, fields, `*p` and `p[i]`
   (`crates/jihoo-sema/src/place.rs`).
 
+## Arrays
+
+```jihoo
+let xs = [5, 3, 9]            // [i64; 3]
+let buf: [u8; 64] = [0; 64]   // literals take their element type from context
+buf[0] = 72
+let n = len(buf)              // 64, a constant
+```
+
+- `[T; N]` is a value type like a struct, in both profiles. `N` is an integer
+  literal.
+- Indexing an array is bounds-checked: the VM reports an error, native code traps.
+  Indexing a raw pointer (`p[i]` with `p: *T`) is not checked.
+- `p[i]` and `len(p)` with `p: *[T; N]` work on the array `p` points to, and
+  `&a[i]` is a pointer to an element, so `&buf[0]` is how a buffer becomes a `*u8`.
+- On the VM an array is an immutable GC object, like a struct, so an element write
+  copies the array: O(N). Natively, writes happen in place.
+
+`size_of(T)` and `align_of(T)` are `i64` constants, computed with C layout rules for
+64-bit targets (`crates/jihoo-ir/src/layout.rs`). JIR records each struct's layout
+and the LLVM backend checks it against the target, so a mismatch is a compile
+error instead of silent memory corruption. Types containing `str` have no layout.
+
 As in Rust, a struct literal cannot appear directly in an `if`/`while` condition
 (`if p == Point { ... }` would be ambiguous); wrap it in parentheses.
 
@@ -135,7 +158,7 @@ grows past twice the size that survived the last collection (1 MiB minimum).
 
 1. ~~Type checker (static types with inference) and typed JIR.~~
 2. ~~Differential tests across both backends.~~ Rust-side JIR parser.
-3. ~~Sized integers, pointers with loads/stores, structs.~~ Arrays, `size_of`,
-   inline `asm` blocks.
+3. ~~Sized integers, pointers with loads/stores, structs, arrays, `size_of`.~~
+   Inline `asm` blocks.
 4. `comptime` on the VM.
 5. `alloc` layer; AST macros.

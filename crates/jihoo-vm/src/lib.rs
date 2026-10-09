@@ -18,14 +18,15 @@ pub enum Value {
     Int(i64),
     Bool(bool),
     Str(GcRef),
-    Struct(GcRef),
+    /// A struct or an array.
+    Agg(GcRef),
 }
 
 impl Value {
     /// The heap object this value refers to, if any.
     pub fn gc_ref(&self) -> Option<GcRef> {
         match self {
-            Value::Str(r) | Value::Struct(r) => Some(*r),
+            Value::Str(r) | Value::Agg(r) => Some(*r),
             Value::Unit | Value::Int(_) | Value::Bool(_) => None,
         }
     }
@@ -182,24 +183,54 @@ impl<'m> Vm<'m> {
             }
             Inst::Struct { dst, fields, .. } => {
                 let values = fields.iter().map(|r| self.get(*r)).collect();
-                let r = self.alloc_struct(values);
-                self.set(*dst, Value::Struct(r));
+                let r = self.alloc_agg(values);
+                self.set(*dst, Value::Agg(r));
             }
             Inst::Field { dst, src, index } => {
-                let r = self.struct_ref(*src)?;
-                let v = self.heap.fields(r)[*index as usize];
+                let r = self.agg_ref(*src)?;
+                let v = self.heap.items(r)[*index as usize];
                 self.set(*dst, v);
             }
             Inst::SetField { dst, src, index, value } => {
-                let r = self.struct_ref(*src)?;
-                let mut values = self.heap.fields(r).to_vec();
+                let r = self.agg_ref(*src)?;
+                let mut values = self.heap.items(r).to_vec();
                 values[*index as usize] = self.get(*value);
                 // `src` and `value` are still in registers, so everything in
                 // `values` stays rooted if this allocation collects.
-                let new = self.alloc_struct(values);
-                self.set(*dst, Value::Struct(new));
+                let new = self.alloc_agg(values);
+                self.set(*dst, Value::Agg(new));
             }
-            Inst::Load { .. } | Inst::Store { .. } | Inst::Addr { .. } | Inst::FieldPtr { .. } => {
+            Inst::Array { dst, items } => {
+                let values = items.iter().map(|r| self.get(*r)).collect();
+                let r = self.alloc_agg(values);
+                self.set(*dst, Value::Agg(r));
+            }
+            Inst::Splat { dst, value } => {
+                let Type::Array(_, n) = f.reg_type(*dst) else {
+                    return Err(self.error("`splat` needs an array register"));
+                };
+                let r = self.alloc_agg(vec![self.get(*value); *n as usize]);
+                self.set(*dst, Value::Agg(r));
+            }
+            Inst::Elem { dst, src, index } => {
+                let r = self.agg_ref(*src)?;
+                let i = self.bounds_check(r, *index)?;
+                let v = self.heap.items(r)[i];
+                self.set(*dst, v);
+            }
+            Inst::SetElem { dst, src, index, value } => {
+                let r = self.agg_ref(*src)?;
+                let i = self.bounds_check(r, *index)?;
+                let mut values = self.heap.items(r).to_vec();
+                values[i] = self.get(*value);
+                let new = self.alloc_agg(values);
+                self.set(*dst, Value::Agg(new));
+            }
+            Inst::Load { .. }
+            | Inst::Store { .. }
+            | Inst::Addr { .. }
+            | Inst::FieldPtr { .. }
+            | Inst::ElemPtr { .. } => {
                 return Err(self.error("pointers are not available on the VM"))
             }
             Inst::Call { dst, func, args } => {
@@ -213,7 +244,7 @@ impl<'m> Vm<'m> {
                     Value::Int(n) => n.to_string(),
                     Value::Bool(b) => b.to_string(),
                     Value::Str(r) => self.heap.str(r).to_string(),
-                    v @ (Value::Unit | Value::Struct(_)) => {
+                    v @ (Value::Unit | Value::Agg(_)) => {
                         return Err(self.error(&format!("cannot print {}", type_name(v))))
                     }
                 };
@@ -274,9 +305,9 @@ impl<'m> Vm<'m> {
         self.heap.alloc_str(s)
     }
 
-    fn alloc_struct(&mut self, fields: Vec<Value>) -> GcRef {
+    fn alloc_agg(&mut self, fields: Vec<Value>) -> GcRef {
         self.maybe_collect();
-        self.heap.alloc_struct(fields)
+        self.heap.alloc_agg(fields)
     }
 
     fn maybe_collect(&mut self) {
@@ -285,10 +316,19 @@ impl<'m> Vm<'m> {
         }
     }
 
-    fn struct_ref(&self, r: Reg) -> Result<GcRef, VmError> {
+    fn bounds_check(&self, agg: GcRef, index: Reg) -> Result<usize, VmError> {
+        let i = self.int(index)?;
+        let len = self.heap.items(agg).len();
+        if i < 0 || i as usize >= len {
+            return Err(self.error(&format!("index {i} out of bounds for length {len}")));
+        }
+        Ok(i as usize)
+    }
+
+    fn agg_ref(&self, r: Reg) -> Result<GcRef, VmError> {
         match self.get(r) {
-            Value::Struct(s) => Ok(s),
-            v => Err(self.error(&format!("expected a struct, found {}", type_name(v)))),
+            Value::Agg(s) => Ok(s),
+            v => Err(self.error(&format!("expected a struct or array, found {}", type_name(v)))),
         }
     }
 
@@ -329,7 +369,7 @@ fn type_name(v: Value) -> &'static str {
         Value::Int(_) => "i64",
         Value::Bool(_) => "bool",
         Value::Str(_) => "str",
-        Value::Struct(_) => "struct",
+        Value::Agg(_) => "aggregate",
     }
 }
 
@@ -463,6 +503,53 @@ fn main() {
         vm.run_main(&mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "kept!\n4498500\n");
         assert!(vm.heap().stats().collections > 0, "{:?}", vm.heap().stats());
+    }
+
+    #[test]
+    fn arrays() {
+        let src = "
+struct Grid { cells: [[u8; 3]; 2] }
+
+fn sort(xs: [i64; 6]) -> [i64; 6] {
+    let i = 0
+    while i < len(xs) {
+        let j = 0
+        while j < len(xs) - 1 - i {
+            if xs[j] > xs[j + 1] {
+                let t = xs[j]
+                xs[j] = xs[j + 1]
+                xs[j + 1] = t
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return xs
+}
+
+fn main() {
+    let xs = [5, 3, 9, 1, 4, 1]
+    let sorted = sort(xs)
+    print(sorted[0] * 100 + sorted[5])   // 109
+    print(xs[0])                          // 5: `sort` got a copy
+    let g = Grid { cells: [[0; 3]; 2] }
+    g.cells[1][2] = 7
+    let row = g.cells[1]
+    row[0] = 1
+    print(g.cells[1][0] + g.cells[1][2]) // 7: `row` is a copy
+    print(len(g.cells) * len(row))       // 6
+}";
+        let (_, out) = run_src(src);
+        assert_eq!(out, "109\n5\n7\n6\n");
+    }
+
+    #[test]
+    fn array_index_out_of_bounds_is_an_error() {
+        let m = compile("fn main() { let a = [1, 2, 3]\n let i = 3\n print(a[i]) }");
+        let err = run(&m, &mut Vec::new()).unwrap_err();
+        assert_eq!(err.msg, "index 3 out of bounds for length 3");
+        let m = compile("fn main() { let a = [1, 2, 3]\n a[-1] = 0 }");
+        assert!(run(&m, &mut Vec::new()).unwrap_err().msg.contains("index -1 out of bounds"));
     }
 
     #[test]

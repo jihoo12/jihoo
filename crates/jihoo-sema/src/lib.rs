@@ -14,7 +14,7 @@ mod place;
 use std::collections::{HashMap, VecDeque};
 
 use jihoo_ir as ir;
-use jihoo_ir::types;
+use jihoo_ir::{layout, types};
 use jihoo_ir::{BlockId, Inst, IntTy, Profile, Reg, Terminator, Type};
 use jihoo_syntax::ast::*;
 use jihoo_syntax::{Error, Pos};
@@ -106,7 +106,7 @@ struct Env {
 }
 
 fn is_builtin(name: &str) -> bool {
-    matches!(name, "print" | "syscall")
+    matches!(name, "print" | "syscall" | "len" | "size_of" | "align_of")
 }
 
 impl Env {
@@ -118,6 +118,7 @@ impl Env {
                 }
                 Ok(Type::ptr(self.resolve(inner)?))
             }
+            TypeExprKind::Array(elem, n) => Ok(Type::array(self.resolve(elem)?, *n)),
             TypeExprKind::Named(name) => {
                 if let Some(ty) = Type::from_name(name) {
                     if ty == Type::Str && self.profile == Profile::Freestanding {
@@ -160,6 +161,11 @@ impl Env {
         }
         stack.push(name.to_string());
         for (_, t) in self.structs.get(name).into_iter().flatten() {
+            // Arrays hold their elements by value; pointers break the cycle.
+            let mut t = t;
+            while let Type::Array(elem, _) = t {
+                t = elem;
+            }
             if let Type::Struct(inner) = t {
                 self.check_acyclic(decl, inner, stack)?;
             }
@@ -206,6 +212,11 @@ impl Env {
             .find(|(_, (n, _))| n == name)
             .map(|(i, (_, t))| (i as u32, t.clone()))
             .ok_or_else(|| Error::new(pos, format!("struct `{s}` has no field `{name}`")))
+    }
+
+    fn layout(&self, pos: Pos, t: &Type) -> Result<layout::Layout, Error> {
+        layout::of(t, &|name| self.structs.get(name).map(|f| &f[..]))
+            .ok_or_else(|| Error::new(pos, format!("type {t} has no fixed memory layout (it contains a GC reference)")))
     }
 
     fn field_type(&self, t: &Type, index: u32) -> Type {
@@ -516,6 +527,23 @@ impl<'a> FnCx<'a> {
             ExprKind::Binary(op, l, r) => self.binary(e.pos, *op, l, r, expected)?,
             ExprKind::Call(name, args) => self.call(e.pos, name, args)?,
             ExprKind::StructLit(name, inits) => self.struct_literal(e.pos, name, inits)?,
+            ExprKind::ArrayLit(items) => self.array_literal(e.pos, items, expected)?,
+            ExprKind::ArrayRepeat(value, n) => {
+                let hint = match expected {
+                    Some(Type::Array(elem, _)) => Some(&**elem),
+                    _ => None,
+                };
+                let v = self.expr(value, hint)?;
+                let ty = Type::array(self.ty(v).clone(), *n);
+                self.emit_to(ty, |dst| Inst::Splat { dst, value: v })
+            }
+            ExprKind::SizeOf(t) | ExprKind::AlignOf(t) => {
+                let ty = self.env.resolve(t)?;
+                let l = self.env.layout(t.pos, &ty)?;
+                let n = if matches!(e.kind, ExprKind::SizeOf(_)) { l.size } else { l.align };
+                let n = i64::try_from(n).map_err(|_| Error::new(e.pos, format!("{ty} is too large")))?;
+                self.konst(Type::I64, n)
+            }
             ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Deref(_) => {
                 let place = self.place(e)?;
                 self.read(place)
@@ -617,6 +645,29 @@ impl<'a> FnCx<'a> {
         Ok(res)
     }
 
+    /// `[a, b, c]`: the element type comes from the expected type if there is one,
+    /// otherwise from the first element.
+    fn array_literal(&mut self, pos: Pos, items: &[Expr], expected: Option<&Type>) -> Result<Reg, Error> {
+        let mut elem = match expected {
+            Some(Type::Array(elem, _)) => Some((**elem).clone()),
+            _ => None,
+        };
+        let mut regs = Vec::with_capacity(items.len());
+        for item in items {
+            let r = self.expr(item, elem.as_ref())?;
+            match &elem {
+                Some(t) => self.expect(item.pos, r, t, "an array element")?,
+                None => elem = Some(self.ty(r).clone()),
+            }
+            regs.push(r);
+        }
+        let Some(elem) = elem else {
+            return Err(Error::new(pos, "cannot infer the element type of `[]`; give the variable a type"));
+        };
+        let ty = Type::array(elem, regs.len() as u64);
+        Ok(self.emit_to(ty, |dst| Inst::Array { dst, items: regs }))
+    }
+
     fn struct_literal(&mut self, pos: Pos, name: &str, inits: &[FieldInit]) -> Result<Reg, Error> {
         let env = self.env;
         let Some(fields) = env.structs.get(name) else {
@@ -665,6 +716,22 @@ impl<'a> FnCx<'a> {
                 }
                 self.emit(Inst::Print { src: r });
                 Ok(self.unit())
+            }
+            "len" => {
+                let [arg] = args else {
+                    return Err(Error::new(pos, "`len` takes exactly 1 argument"));
+                };
+                let r = self.expr(arg, None)?;
+                let n = match self.ty(r) {
+                    Type::Array(_, n) => *n,
+                    Type::Ptr(inner) if matches!(**inner, Type::Array(..)) => {
+                        let Type::Array(_, n) = **inner else { unreachable!() };
+                        n
+                    }
+                    t => return Err(Error::new(arg.pos, format!("`len` needs an array, found {t}"))),
+                };
+                let n = i64::try_from(n).map_err(|_| Error::new(arg.pos, "array is too long"))?;
+                Ok(self.konst(Type::I64, n))
             }
             "syscall" => {
                 if self.profile() != Profile::Freestanding {

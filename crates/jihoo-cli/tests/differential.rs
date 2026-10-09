@@ -59,3 +59,27 @@ fn vm_and_native_agree() {
 
     std::fs::remove_dir_all(&work).unwrap();
 }
+
+#[test]
+fn out_of_bounds_fails_on_both_backends() {
+    let work = std::env::temp_dir().join(format!("jihoo-oob-{}", std::process::id()));
+    std::fs::create_dir_all(&work).unwrap();
+    let body = "fn get(xs: [i64; 4], i: i64) -> i64 { return xs[i] }\nfn entry() -> i64 { return get([1, 2, 3, 4], 4) }\n";
+
+    let hosted = work.join("oob.hosted.jh");
+    std::fs::write(&hosted, format!("{body}fn main() -> i64 {{ return entry() }}\n")).unwrap();
+    let out = Command::new(JIHOO).arg("run").arg(&hosted).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("index 4 out of bounds for length 4"));
+
+    if std::env::var_os("JIHOO_LLC").is_some() {
+        let src = work.join("oob.native.jh");
+        let bin = work.join("oob");
+        std::fs::write(&src, format!("#![freestanding]\n{body}fn _start() -> i64 {{ return entry() }}\n")).unwrap();
+        assert_eq!(exit_code(Command::new(JIHOO).arg("build").arg(&src).arg("-o").arg(&bin)), 0);
+        let status = Command::new(&bin).status().unwrap();
+        // Natively, a failed bounds check traps (SIGILL) instead of exiting.
+        assert_eq!(status.code(), None, "expected a trap, got {status}");
+    }
+    std::fs::remove_dir_all(&work).unwrap();
+}

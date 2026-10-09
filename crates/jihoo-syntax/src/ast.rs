@@ -50,6 +50,8 @@ pub enum TypeExprKind {
     Named(String),
     /// `*T`
     Ptr(Box<TypeExpr>),
+    /// `[T; N]`
+    Array(Box<TypeExpr>, u64),
 }
 
 #[derive(Debug, Clone)]
@@ -109,7 +111,7 @@ pub enum ExprKind {
     StructLit(String, Vec<FieldInit>),
     /// `base.field`
     Field(Box<Expr>, String),
-    /// `ptr[index]`
+    /// `array[index]` or `ptr[index]`
     Index(Box<Expr>, Box<Expr>),
     /// `*ptr`
     Deref(Box<Expr>),
@@ -117,6 +119,14 @@ pub enum ExprKind {
     AddrOf(Box<Expr>),
     /// `value as T`
     Cast(Box<Expr>, TypeExpr),
+    /// `[a, b, c]`
+    ArrayLit(Vec<Expr>),
+    /// `[value; N]`
+    ArrayRepeat(Box<Expr>, u64),
+    /// `size_of(T)`
+    SizeOf(TypeExpr),
+    /// `align_of(T)`
+    AlignOf(TypeExpr),
 }
 
 #[derive(Debug, Clone)]

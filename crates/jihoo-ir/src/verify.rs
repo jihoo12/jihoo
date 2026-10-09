@@ -61,7 +61,7 @@ impl Cx<'_> {
             Type::Struct(name) if !self.structs.contains_key(name.as_str()) => {
                 Err(format!("unknown struct `${name}`"))
             }
-            Type::Ptr(inner) => self.check_type(inner),
+            Type::Ptr(inner) | Type::Array(inner, _) => self.check_type(inner),
             _ => Ok(()),
         }
     }
@@ -73,6 +73,11 @@ impl Cx<'_> {
         }
         stack.push(name.to_string());
         for (_, t) in &self.structs[name].fields {
+            // Arrays hold their elements by value; pointers break the cycle.
+            let mut t = t;
+            while let Type::Array(elem, _) = t {
+                t = elem;
+            }
             if let Type::Struct(inner) = t {
                 self.check_acyclic(inner, stack)?;
             }
@@ -199,6 +204,42 @@ impl Cx<'_> {
                         freestanding("fieldptr")?;
                         let pointee = ty(ptr)?.pointee().ok_or_else(|| format!("{ptr} is not a pointer"))?;
                         expect(dst, &Type::ptr(self.field(pointee, *index)?.clone()))
+                    }
+                    Inst::Array { dst, items } => {
+                        let Type::Array(elem, n) = ty(dst)? else {
+                            return Err(at(format!("{dst} is not an array")));
+                        };
+                        if *n != items.len() as u64 {
+                            Err(format!("{} needs {n} elements, {} given", ty(dst)?.jir(), items.len()))
+                        } else {
+                            items.iter().try_for_each(|r| expect(r, elem))
+                        }
+                    }
+                    Inst::Splat { dst, value } => match ty(dst)? {
+                        Type::Array(elem, _) => expect(value, elem),
+                        t => Err(format!("`splat` cannot produce {}", t.jir())),
+                    },
+                    Inst::Elem { dst, src, index } => match ty(src)? {
+                        Type::Array(elem, _) => expect(index, &Type::I64).and(expect(dst, elem)),
+                        t => Err(format!("{} is not an array", t.jir())),
+                    },
+                    Inst::SetElem { dst, src, index, value } => match ty(src)? {
+                        Type::Array(elem, _) => {
+                            expect(index, &Type::I64)?;
+                            expect(value, elem)?;
+                            expect(dst, ty(src)?)
+                        }
+                        t => Err(format!("{} is not an array", t.jir())),
+                    },
+                    Inst::ElemPtr { dst, ptr, index } => {
+                        freestanding("elemptr")?;
+                        match ty(ptr)?.pointee() {
+                            Some(Type::Array(elem, _)) => {
+                                expect(index, &Type::I64)?;
+                                expect(dst, &Type::ptr((**elem).clone()))
+                            }
+                            _ => Err(format!("{ptr} is not a pointer to an array")),
+                        }
                     }
                     Inst::Syscall { dst, args } => {
                         freestanding("syscall")?;

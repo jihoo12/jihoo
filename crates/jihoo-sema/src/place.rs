@@ -1,10 +1,11 @@
 //! Places: expressions that denote a storage location and can be read, written,
 //! or have their address taken.
 //!
-//! - A *register place* is a variable plus a path of struct fields (`a.b.c`).
-//!   Writing it rebuilds the struct with `setfield`, innermost field first.
+//! - A *register place* is a variable plus a path of struct fields and array
+//!   elements (`a.b[i].c`). Writing it rebuilds the aggregates along the path with
+//!   `setfield`/`setelem`, innermost first.
 //! - A *memory place* is a pointer (`*p`, `p[i]`, `p.x` where `p: *Struct`).
-//!   Writing it is a `store`; field access uses `fieldptr`.
+//!   Writing it is a `store`; fields and elements use `fieldptr`/`elemptr`.
 
 use jihoo_ir::{BinOp, Inst, Reg, Type};
 use jihoo_syntax::ast::{Expr, ExprKind};
@@ -12,11 +13,17 @@ use jihoo_syntax::{Error, Pos};
 
 use crate::FnCx;
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Step {
+    Field(u32),
+    /// An array element; the register holds the `i64` index.
+    Elem(Reg),
+}
+
 pub(crate) enum Place {
     Reg {
         root: Reg,
-        /// Field indices from `root` down to this place.
-        path: Vec<u32>,
+        path: Vec<Step>,
         ty: Type,
         /// False for temporaries such as `f().x`.
         assignable: bool,
@@ -37,6 +44,36 @@ impl Place {
 }
 
 impl FnCx<'_> {
+    /// Type of `t` after taking one step into it.
+    fn step_type(&self, t: &Type, step: Step) -> Type {
+        match (step, t) {
+            (Step::Field(i), _) => self.env.field_type(t, i),
+            (Step::Elem(_), Type::Array(elem, _)) => (**elem).clone(),
+            _ => unreachable!("cannot step into {t}"),
+        }
+    }
+
+    /// Extends `base` (whose type is a struct or array) by `step`.
+    fn step(&mut self, base: Place, step: Step, ty: Type) -> Place {
+        match base {
+            Place::Reg { root, mut path, assignable, .. } => {
+                path.push(step);
+                Place::Reg { root, path, ty, assignable }
+            }
+            Place::Mem { ptr, .. } => self.step_ptr(ptr, step, ty),
+        }
+    }
+
+    /// The place `step` leads to inside the aggregate `ptr` points to.
+    fn step_ptr(&mut self, ptr: Reg, step: Step, ty: Type) -> Place {
+        let ptr_ty = Type::ptr(ty.clone());
+        let ptr = match step {
+            Step::Field(index) => self.emit_to(ptr_ty, |dst| Inst::FieldPtr { dst, ptr, index }),
+            Step::Elem(index) => self.emit_to(ptr_ty, |dst| Inst::ElemPtr { dst, ptr, index }),
+        };
+        Place::Mem { ptr, ty }
+    }
+
     pub(crate) fn place(&mut self, e: &Expr) -> Result<Place, Error> {
         match &e.kind {
             ExprKind::Var(name) => {
@@ -48,38 +85,41 @@ impl FnCx<'_> {
                 match base.ty().clone() {
                     t @ Type::Struct(_) => {
                         let (index, fty) = self.env.field(e.pos, &t, name)?;
-                        Ok(match base {
-                            Place::Reg { root, mut path, assignable, .. } => {
-                                path.push(index);
-                                Place::Reg { root, path, ty: fty, assignable }
-                            }
-                            Place::Mem { ptr, .. } => {
-                                let ptr = self.emit_to(Type::ptr(fty.clone()), |dst| Inst::FieldPtr { dst, ptr, index });
-                                Place::Mem { ptr, ty: fty }
-                            }
-                        })
+                        Ok(self.step(base, Step::Field(index), fty))
                     }
                     // `p.x` with `p: *Struct` reads through the pointer, like Go.
                     Type::Ptr(inner) if matches!(*inner, Type::Struct(_)) => {
                         let (index, fty) = self.env.field(e.pos, &inner, name)?;
-                        let base_ptr = self.read(base);
-                        let ptr = self.emit_to(Type::ptr(fty.clone()), |dst| Inst::FieldPtr { dst, ptr: base_ptr, index });
-                        Ok(Place::Mem { ptr, ty: fty })
+                        let ptr = self.read(base);
+                        Ok(self.step_ptr(ptr, Step::Field(index), fty))
                     }
                     t => Err(Error::new(e.pos, format!("type {t} has no fields"))),
                 }
             }
-            ExprKind::Index(base, index) => {
-                let base_pos = base.pos;
-                let b = self.expr(base, None)?;
-                let Some(elem) = self.ty(b).pointee().cloned() else {
-                    return Err(Error::new(base_pos, format!("cannot index into {}", self.ty(b))));
-                };
-                let i = self.expr(index, Some(&Type::I64))?;
-                self.expect(index.pos, i, &Type::I64, "an index")?;
-                let ptr_ty = self.ty(b).clone();
-                let ptr = self.emit_to(ptr_ty, |dst| Inst::Binary { dst, op: BinOp::Add, lhs: b, rhs: i });
-                Ok(Place::Mem { ptr, ty: elem })
+            ExprKind::Index(base_expr, index) => {
+                let base = self.place(base_expr)?;
+                match base.ty().clone() {
+                    Type::Array(elem, _) => {
+                        let i = self.index(index)?;
+                        Ok(self.step(base, Step::Elem(i), *elem))
+                    }
+                    // `p[i]` with `p: *[T; N]` indexes the array, like Go.
+                    Type::Ptr(inner) if matches!(*inner, Type::Array(..)) => {
+                        let Type::Array(elem, _) = *inner else { unreachable!() };
+                        let ptr = self.read(base);
+                        let i = self.index(index)?;
+                        Ok(self.step_ptr(ptr, Step::Elem(i), *elem))
+                    }
+                    // `p[i]` with `p: *T` is `*(p + i)`: no bounds check.
+                    p @ Type::Ptr(_) => {
+                        let elem = p.pointee().unwrap().clone();
+                        let b = self.read(base);
+                        let i = self.index(index)?;
+                        let ptr = self.emit_to(p, |dst| Inst::Binary { dst, op: BinOp::Add, lhs: b, rhs: i });
+                        Ok(Place::Mem { ptr, ty: elem })
+                    }
+                    t => Err(Error::new(base_expr.pos, format!("cannot index into {t}"))),
+                }
             }
             ExprKind::Deref(inner) => {
                 let p = self.expr(inner, None)?;
@@ -95,16 +135,24 @@ impl FnCx<'_> {
         }
     }
 
+    fn index(&mut self, index: &Expr) -> Result<Reg, Error> {
+        let i = self.expr(index, Some(&Type::I64))?;
+        self.expect(index.pos, i, &Type::I64, "an index")?;
+        Ok(i)
+    }
+
+    /// Reads one step out of the aggregate value in `src`.
+    fn read_step(&mut self, src: Reg, step: Step) -> Reg {
+        let ty = self.step_type(self.ty(src), step);
+        match step {
+            Step::Field(index) => self.emit_to(ty, |dst| Inst::Field { dst, src, index }),
+            Step::Elem(index) => self.emit_to(ty, |dst| Inst::Elem { dst, src, index }),
+        }
+    }
+
     pub(crate) fn read(&mut self, place: Place) -> Reg {
         match place {
-            Place::Reg { root, path, .. } => {
-                let mut cur = root;
-                for index in path {
-                    let ty = self.env.field_type(self.ty(cur), index);
-                    cur = self.emit_to(ty, |dst| Inst::Field { dst, src: cur, index });
-                }
-                cur
-            }
+            Place::Reg { root, path, .. } => path.into_iter().fold(root, |cur, step| self.read_step(cur, step)),
             Place::Mem { ptr, ty } => self.emit_to(ty, |dst| Inst::Load { dst, ptr }),
         }
     }
@@ -114,19 +162,21 @@ impl FnCx<'_> {
         match place {
             Place::Reg { assignable: false, .. } => Err(Error::new(pos, "cannot assign to this expression")),
             Place::Reg { root, path, .. } => {
-                // The struct values along the path: root, root.a, root.a.b, ...
+                // The aggregates along the path: root, root.a, root.a[i], ...
                 let mut along = vec![root];
-                for &index in &path[..path.len().saturating_sub(1)] {
-                    let cur = *along.last().unwrap();
-                    let ty = self.env.field_type(self.ty(cur), index);
-                    along.push(self.emit_to(ty, |dst| Inst::Field { dst, src: cur, index }));
+                for &step in &path[..path.len().saturating_sub(1)] {
+                    let next = self.read_step(*along.last().unwrap(), step);
+                    along.push(next);
                 }
-                // Rebuild from the innermost struct outwards; the last step writes `root`.
+                // Rebuild from the innermost aggregate outwards; the last step writes `root`.
                 let mut new = value;
-                for (k, &index) in path.iter().enumerate().rev() {
+                for (k, &step) in path.iter().enumerate().rev() {
                     let src = along[k];
                     let dst = if k == 0 { root } else { self.new_reg(self.ty(src).clone()) };
-                    self.emit(Inst::SetField { dst, src, index, value: new });
+                    self.emit(match step {
+                        Step::Field(index) => Inst::SetField { dst, src, index, value: new },
+                        Step::Elem(index) => Inst::SetElem { dst, src, index, value: new },
+                    });
                     new = dst;
                 }
                 if path.is_empty() {
@@ -151,10 +201,10 @@ impl FnCx<'_> {
                 let root_ty = self.ty(root).clone();
                 let mut ptr = self.emit_to(Type::ptr(root_ty.clone()), |dst| Inst::Addr { dst, src: root });
                 let mut ty = root_ty;
-                for index in path {
-                    ty = self.env.field_type(&ty, index);
-                    let base = ptr;
-                    ptr = self.emit_to(Type::ptr(ty.clone()), |dst| Inst::FieldPtr { dst, ptr: base, index });
+                for step in path {
+                    ty = self.step_type(&ty, step);
+                    let Place::Mem { ptr: p, .. } = self.step_ptr(ptr, step, ty.clone()) else { unreachable!() };
+                    ptr = p;
                 }
                 Ok(ptr)
             }

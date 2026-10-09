@@ -1,5 +1,5 @@
 #![freestanding]
-// Pointers, structs and sized integers, with no libc and no GC.
+// Pointers, structs, arrays and sized integers, with no libc and no GC.
 //   jihoo build examples/pointers.jh -o out/pointers && ./out/pointers
 
 struct Buf {
@@ -10,14 +10,6 @@ struct Buf {
 struct Node {
     value: i64
     next: *Node
-}
-
-// 32 bytes of stack space (there are no arrays yet).
-struct Scratch {
-    a: i64
-    b: i64
-    c: i64
-    d: i64
 }
 
 fn strlen(s: *u8) -> i64 {
@@ -79,10 +71,12 @@ fn _start() -> i64 {
     let s = sum(&c)
 
     // Format the message into a stack buffer and write it out in one syscall.
-    let storage = Scratch { a: 0, b: 0, c: 0, d: 0 }
-    let out = Buf { data: &storage as *u8, len: 0 }
+    let storage = [0 as u8; 64]
+    let out = Buf { data: &storage[0], len: 0 }
     push_str(&out, "sum = ")
     push_int(&out, s)
+    push_str(&out, ", size_of(Node) = ")
+    push_int(&out, size_of(Node))
     push_byte(&out, 10) // '\n'
     write(out.data, out.len)
 

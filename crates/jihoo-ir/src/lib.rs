@@ -7,6 +7,7 @@
 //! SSA: a register may be assigned many times (a `let` variable is a register).
 //! The LLVM backend gives each register an alloca and lets mem2reg clean up.
 
+pub mod layout;
 mod print;
 pub mod types;
 mod verify;
@@ -171,6 +172,17 @@ pub enum Inst {
     Addr { dst: Reg, src: Reg },
     /// Freestanding only: the address of field `index` of the struct `ptr` points to.
     FieldPtr { dst: Reg, ptr: Reg, index: u32 },
+    /// Builds an array from all of its elements.
+    Array { dst: Reg, items: Vec<Reg> },
+    /// An array with every element set to `value`.
+    Splat { dst: Reg, value: Reg },
+    /// Reads element `index` (an `i64`) of an array value. Bounds-checked.
+    Elem { dst: Reg, src: Reg, index: Reg },
+    /// A copy of array `src` with element `index` replaced by `value`. Bounds-checked.
+    SetElem { dst: Reg, src: Reg, index: Reg, value: Reg },
+    /// Freestanding only: the address of element `index` of the array `ptr` points
+    /// to. Bounds-checked.
+    ElemPtr { dst: Reg, ptr: Reg, index: Reg },
     /// Freestanding only. First argument is the syscall number, then up to 6 more.
     Syscall { dst: Reg, args: Vec<Reg> },
     /// Hosted-only builtin.

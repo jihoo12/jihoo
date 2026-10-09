@@ -24,7 +24,12 @@ impl Display for Module {
         for s in &self.structs {
             writeln!(f)?;
             let fields: Vec<String> = s.fields.iter().map(|(n, t)| format!("{n}: {}", t.jir())).collect();
-            writeln!(f, "struct ${} {{ {} }}", s.name, fields.join(", "))?;
+            write!(f, "struct ${} {{ {} }}", s.name, fields.join(", "))?;
+            // The backend checks this against LLVM's data layout.
+            if let Some(l) = layout::of(&Type::Struct(s.name.clone()), &|n| self.struct_def(n).map(|d| &d.fields[..])) {
+                write!(f, " size {} align {}", l.size, l.align)?;
+            }
+            writeln!(f)?;
         }
         for func in &self.funcs {
             writeln!(f)?;
@@ -76,6 +81,11 @@ impl Display for Inst {
             Inst::Store { ptr, value } => write!(f, "store {ptr}, {value}"),
             Inst::Addr { dst, src } => write!(f, "{dst} = addr {src}"),
             Inst::FieldPtr { dst, ptr, index } => write!(f, "{dst} = fieldptr {ptr}, {index}"),
+            Inst::Array { dst, items } => write!(f, "{dst} = array({})", list(items)),
+            Inst::Splat { dst, value } => write!(f, "{dst} = splat {value}"),
+            Inst::Elem { dst, src, index } => write!(f, "{dst} = elem {src}, {index}"),
+            Inst::SetElem { dst, src, index, value } => write!(f, "{dst} = setelem {src}, {index}, {value}"),
+            Inst::ElemPtr { dst, ptr, index } => write!(f, "{dst} = elemptr {ptr}, {index}"),
             Inst::Syscall { dst, args } => write!(f, "{dst} = syscall({})", list(args)),
             Inst::Print { src } => write!(f, "print {src}"),
         }

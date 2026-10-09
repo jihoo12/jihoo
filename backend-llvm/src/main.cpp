@@ -110,9 +110,8 @@ int run(const Options &o) {
       triple, "generic", "", llvm::TargetOptions(), llvm::Reloc::Static));
 
   llvm::LLVMContext ctx;
-  auto mod = jihoo::codegen(jm, ctx, triple);
+  auto mod = jihoo::codegen(jm, ctx, triple, tm->createDataLayout());
   mod->setTargetTriple(triple);
-  mod->setDataLayout(tm->createDataLayout());
   optimize(*mod, *tm, o.opt_level);
 
   std::error_code ec;

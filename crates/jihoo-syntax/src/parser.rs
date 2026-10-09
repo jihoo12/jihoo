@@ -167,8 +167,25 @@ impl Parser {
             let inner = self.type_expr()?;
             return Ok(TypeExpr { pos, kind: TypeExprKind::Ptr(Box::new(inner)) });
         }
+        if self.eat(&Tok::LBracket) {
+            let elem = self.type_expr()?;
+            self.expect(&Tok::Semi, "`;` and an array length")?;
+            let len = self.array_len()?;
+            self.expect(&Tok::RBracket, "`]`")?;
+            return Ok(TypeExpr { pos, kind: TypeExprKind::Array(Box::new(elem), len) });
+        }
         let (pos, name) = self.ident("a type")?;
         Ok(TypeExpr { pos, kind: TypeExprKind::Named(name) })
+    }
+
+    fn array_len(&mut self) -> PResult<u64> {
+        match *self.peek() {
+            Tok::Int(n) => {
+                self.bump();
+                Ok(n as u64) // the lexer only produces non-negative literals
+            }
+            _ => Err(self.unexpected("an integer array length")),
+        }
     }
 
     // ---- statements ----
@@ -345,6 +362,40 @@ impl Parser {
                 self.bump();
                 ExprKind::Str(s)
             }
+            Tok::Ident(name) if matches!(name.as_str(), "size_of" | "align_of") && self.toks[self.i + 1].tok == Tok::LParen => {
+                self.bump();
+                self.bump();
+                let ty = self.type_expr()?;
+                self.expect(&Tok::RParen, "`)`")?;
+                if name == "size_of" {
+                    ExprKind::SizeOf(ty)
+                } else {
+                    ExprKind::AlignOf(ty)
+                }
+            }
+            Tok::LBracket => {
+                self.bump();
+                self.with_struct_lit(true, |p| {
+                    if p.eat(&Tok::RBracket) {
+                        return Ok(ExprKind::ArrayLit(vec![]));
+                    }
+                    let first = p.expr()?;
+                    if p.eat(&Tok::Semi) {
+                        let len = p.array_len()?;
+                        p.expect(&Tok::RBracket, "`]`")?;
+                        return Ok(ExprKind::ArrayRepeat(Box::new(first), len));
+                    }
+                    let mut items = vec![first];
+                    while p.eat(&Tok::Comma) {
+                        if *p.peek() == Tok::RBracket {
+                            break;
+                        }
+                        items.push(p.expr()?);
+                    }
+                    p.expect(&Tok::RBracket, "`,` or `]`")?;
+                    Ok(ExprKind::ArrayLit(items))
+                })?
+            }
             Tok::Ident(name) => {
                 self.bump();
                 if self.same_line(&Tok::LParen) {
@@ -514,6 +565,21 @@ mod tests {
         let Stmt::If { cond, then, .. } = &s[0] else { panic!() };
         assert!(matches!(cond.kind, ExprKind::Binary(BinOp::Eq, _, _)));
         assert!(then.stmts.is_empty());
+    }
+
+    #[test]
+    fn arrays_and_size_of() {
+        let s = body("let a: [u8; 4] = [1, 2, 3, 4,]\nlet b = [0; 16]\nlet n = size_of([*u8; 2]) + align_of(i64)\nlet c = []");
+        let Stmt::Let { ty: Some(ty), value, .. } = &s[0] else { panic!() };
+        assert!(matches!(ty.kind, TypeExprKind::Array(_, 4)));
+        assert!(matches!(&value.kind, ExprKind::ArrayLit(items) if items.len() == 4));
+        let Stmt::Let { value, .. } = &s[1] else { panic!() };
+        assert!(matches!(value.kind, ExprKind::ArrayRepeat(_, 16)));
+        let Stmt::Let { value, .. } = &s[2] else { panic!() };
+        let ExprKind::Binary(_, l, r) = &value.kind else { panic!() };
+        assert!(matches!(l.kind, ExprKind::SizeOf(_)) && matches!(r.kind, ExprKind::AlignOf(_)));
+        let Stmt::Let { value, .. } = &s[3] else { panic!() };
+        assert!(matches!(&value.kind, ExprKind::ArrayLit(items) if items.is_empty()));
     }
 
     #[test]

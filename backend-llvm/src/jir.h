@@ -13,10 +13,11 @@ namespace jir {
 enum class Profile { Hosted, Freestanding };
 
 struct Type {
-  enum Kind { Unit, Bool, Int, Str, Ptr, Struct } kind = Unit;
+  enum Kind { Unit, Bool, Int, Str, Ptr, Struct, Array } kind = Unit;
   unsigned bits = 0;               // Int
   bool is_signed = false;          // Int
-  std::shared_ptr<Type> pointee;   // Ptr
+  std::shared_ptr<Type> pointee;   // Ptr: the pointee; Array: the element type
+  uint64_t count = 0;              // Array
   std::string name;                // Struct
 
   static Type unit() { return {}; }
@@ -33,12 +34,20 @@ struct Type {
     t.pointee = std::make_shared<Type>(std::move(to));
     return t;
   }
+  static Type array(Type elem, uint64_t count) {
+    Type t;
+    t.kind = Array;
+    t.pointee = std::make_shared<Type>(std::move(elem));
+    t.count = count;
+    return t;
+  }
 
   bool operator==(const Type &o) const {
     if (kind != o.kind) return false;
     switch (kind) {
       case Int: return bits == o.bits && is_signed == o.is_signed;
       case Ptr: return *pointee == *o.pointee;
+      case Array: return count == o.count && *pointee == *o.pointee;
       case Struct: return name == o.name;
       default: return true;
     }
@@ -53,6 +62,7 @@ struct Type {
       case Str: return "str";
       case Ptr: return "*" + pointee->str();
       case Struct: return "$" + name;
+      case Array: return "[" + std::to_string(count) + " x " + pointee->str() + "]";
     }
     return "?";
   }
@@ -61,12 +71,16 @@ struct Type {
 struct StructDef {
   std::string name;
   std::vector<std::pair<std::string, Type>> fields;
+  // Layout computed by the frontend; checked against LLVM's data layout.
+  bool has_layout = false;
+  uint64_t size = 0, align = 0;
 };
 
 enum class Op {
   Const, Unit, Str, Copy, Neg, Not,
   Add, Sub, Mul, Div, Rem, Eq, Ne, Lt, Le, Gt, Ge,
   Cast, Call, Struct, Field, SetField, Load, Store, Addr, FieldPtr,
+  Array, Splat, Elem, SetElem, ElemPtr,
   Syscall, Print,
 };
 

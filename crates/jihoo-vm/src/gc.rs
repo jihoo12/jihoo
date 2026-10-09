@@ -1,7 +1,8 @@
 //! VM-managed heap with a simple stop-the-world mark & sweep collector.
 //!
-//! Strings and structs live here. Struct objects are immutable: the VM implements
-//! struct value semantics by allocating a new object on every field update.
+//! Strings and aggregates (structs and arrays) live here. Aggregate objects are
+//! immutable: the VM implements value semantics by allocating a new object on every
+//! field or element update.
 
 use crate::Value;
 
@@ -11,7 +12,8 @@ pub struct GcRef(u32);
 #[derive(Debug)]
 enum Obj {
     Str(Box<str>),
-    Struct(Box<[Value]>),
+    /// Fields of a struct or elements of an array.
+    Agg(Box<[Value]>),
 }
 
 impl Obj {
@@ -19,14 +21,14 @@ impl Obj {
         std::mem::size_of::<Obj>()
             + match self {
                 Obj::Str(s) => s.len(),
-                Obj::Struct(fields) => std::mem::size_of_val(&**fields),
+                Obj::Agg(fields) => std::mem::size_of_val(&**fields),
             }
     }
 
     fn children(&self, out: &mut Vec<GcRef>) {
         match self {
             Obj::Str(_) => {}
-            Obj::Struct(fields) => out.extend(fields.iter().filter_map(Value::gc_ref)),
+            Obj::Agg(fields) => out.extend(fields.iter().filter_map(Value::gc_ref)),
         }
     }
 }
@@ -77,8 +79,8 @@ impl Heap {
         self.alloc(Obj::Str(s.into()))
     }
 
-    pub fn alloc_struct(&mut self, fields: Vec<Value>) -> GcRef {
-        self.alloc(Obj::Struct(fields.into()))
+    pub fn alloc_agg(&mut self, fields: Vec<Value>) -> GcRef {
+        self.alloc(Obj::Agg(fields.into()))
     }
 
     fn alloc(&mut self, obj: Obj) -> GcRef {
@@ -104,10 +106,10 @@ impl Heap {
         }
     }
 
-    pub fn fields(&self, r: GcRef) -> &[Value] {
+    pub fn items(&self, r: GcRef) -> &[Value] {
         match &self.slots[r.0 as usize].obj {
-            Some(Obj::Struct(f)) => f,
-            Some(_) => panic!("{r:?} is not a struct"),
+            Some(Obj::Agg(f)) => f,
+            Some(_) => panic!("{r:?} is not an aggregate"),
             None => panic!("use of freed object {r:?}"),
         }
     }

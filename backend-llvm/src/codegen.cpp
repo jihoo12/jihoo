@@ -5,7 +5,18 @@
 // is simply the address of that alloca, which mem2reg then leaves in memory.
 //
 // Type mapping: iN/uN -> iN, bool -> i1, *T -> ptr, unit -> {} (empty struct),
-// $S -> a named LLVM struct. `str` is a GC type and never reaches this backend.
+// $S -> a named LLVM struct, [N x T] -> [N x T]. `str` is a GC type and never
+// reaches this backend.
+//
+// Aggregates (structs and arrays) are never loaded or stored as SSA values: LLVM
+// handles large first-class aggregates very poorly (a 64 KiB array copy takes
+// minutes to compile). Instead they are copied with `llvm.memcpy`, accessed with
+// GEPs, passed to functions by pointer (the callee copies), and returned through
+// a hidden `sret` pointer. Weak `memcpy`/`memmove`/`memset` definitions are added
+// to the module, since there is no libc to provide them.
+//
+// Array element access is bounds-checked and traps (`llvm.trap`) when out of
+// range; raw pointer arithmetic is not checked.
 
 #include "codegen.h"
 
@@ -14,6 +25,7 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InlineAsm.h>
+#include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
 
@@ -29,7 +41,7 @@ namespace {
 // Module-wide type information.
 class Types {
  public:
-  Types(LLVMContext &ctx, const jir::Module &m) : ctx_(ctx) {
+  Types(LLVMContext &ctx, const jir::Module &m, const DataLayout &dl) : ctx_(ctx) {
     // Create all structs first so fields can refer to any of them through pointers.
     for (const auto &s : m.structs) {
       if (structs_.count(s.name)) throw CodegenError("duplicate struct $" + s.name);
@@ -40,6 +52,18 @@ class Types {
       for (const auto &f : s.fields) fields.push_back(lower(f.second));
       structs_[s.name].ty->setBody(fields);
     }
+    // `size_of`/`align_of` were folded to constants by the frontend; make sure
+    // they describe the same layout LLVM uses for this target.
+    for (const auto &s : m.structs) {
+      if (!s.has_layout) continue;
+      StructType *ty = structs_[s.name].ty;
+      uint64_t size = dl.getTypeAllocSize(ty);
+      uint64_t align = dl.getABITypeAlign(ty).value();
+      if (size != s.size || align != s.align)
+        throw CodegenError("layout mismatch for $" + s.name + ": JIR says size " + std::to_string(s.size) +
+                           " align " + std::to_string(s.align) + ", the target says size " +
+                           std::to_string(size) + " align " + std::to_string(align));
+    }
   }
 
   Type *lower(const jir::Type &t) const {
@@ -49,15 +73,23 @@ class Types {
       case jir::Type::Int: return Type::getIntNTy(ctx_, t.bits);
       case jir::Type::Ptr: return PointerType::get(ctx_, 0);
       case jir::Type::Struct: return info(t.name).ty;
+      case jir::Type::Array: return ArrayType::get(lower(*t.pointee), t.count);
       case jir::Type::Str: break;
     }
     throw CodegenError("type `str` is garbage collected and cannot be compiled natively");
   }
 
+  static bool is_agg(const jir::Type &t) { return t.kind == jir::Type::Struct || t.kind == jir::Type::Array; }
+
+  // Aggregate parameters become pointers; an aggregate result becomes a leading
+  // `sret` pointer parameter and a void return.
   FunctionType *signature(const jir::Function &f) const {
     std::vector<Type *> params;
-    for (const auto &t : f.params) params.push_back(lower(t));
-    return FunctionType::get(lower(f.ret), params, false);
+    Type *ptr = PointerType::get(ctx_, 0);
+    if (is_agg(f.ret)) params.push_back(ptr);
+    for (const auto &t : f.params) params.push_back(is_agg(t) ? ptr : lower(t));
+    Type *ret = is_agg(f.ret) ? Type::getVoidTy(ctx_) : lower(f.ret);
+    return FunctionType::get(ret, params, false);
   }
 
   // JIR type of field `index` of struct type `t`.
@@ -132,7 +164,15 @@ class FnGen {
     b_.SetInsertPoint(entry);
     for (size_t r = 0; r < f_.regs.size(); r++)
       slots_.push_back(b_.CreateAlloca(types_.lower(f_.regs[r]), nullptr, "r" + std::to_string(r)));
-    for (size_t p = 0; p < f_.params.size(); p++) b_.CreateStore(fn_->getArg(p), slots_[p]);
+    unsigned first = 0;
+    if (Types::is_agg(f_.ret)) sret_ = fn_->getArg(first++);
+    for (size_t p = 0; p < f_.params.size(); p++) {
+      Argument *a = fn_->getArg(first + p);
+      if (Types::is_agg(f_.params[p]))
+        memcopy(slots_[p], a, f_.params[p]);  // the callee owns its copy
+      else
+        b_.CreateStore(a, slots_[p]);
+    }
     b_.CreateBr(blocks_[0]);
 
     for (size_t i = 0; i < f_.blocks.size(); i++) {
@@ -154,6 +194,86 @@ class FnGen {
   Type *i64_;
   std::vector<AllocaInst *> slots_;
   std::vector<BasicBlock *> blocks_;
+  BasicBlock *trap_ = nullptr;  // shared target of failed bounds checks
+  Value *sret_ = nullptr;       // where an aggregate result goes
+
+  bool agg(uint32_t r) { return Types::is_agg(type(r)); }
+
+  void memcopy(Value *dst, Value *src, const jir::Type &t) {
+    const DataLayout &dl = mod_.getDataLayout();
+    Type *ty = types_.lower(t);
+    Align a = dl.getABITypeAlign(ty);
+    b_.CreateMemCpy(dst, a, src, a, dl.getTypeAllocSize(ty));
+  }
+
+  // Writes the value of register `src` to memory at `dst`.
+  void write_mem(Value *dst, uint32_t src) {
+    if (agg(src))
+      memcopy(dst, slot(src), type(src));
+    else
+      b_.CreateStore(load(src), dst);
+  }
+
+  // Reads a value of register `dst`'s type from memory at `src` into `dst`.
+  void read_mem(uint32_t dst, Value *src) {
+    if (agg(dst))
+      memcopy(slot(dst), src, type(dst));
+    else
+      store(dst, b_.CreateLoad(slot(dst)->getAllocatedType(), src));
+  }
+
+  void copy_reg(uint32_t dst, uint32_t src) {
+    if (dst != src) read_mem(dst, slot(src));
+  }
+
+  // Continues in a new block if `index < len`, traps otherwise.
+  void bounds_check(Value *index, uint64_t len) {
+    if (!trap_) {
+      trap_ = BasicBlock::Create(ctx_, "out_of_bounds", fn_);
+      IRBuilder<> tb(trap_);
+      tb.CreateCall(Intrinsic::getOrInsertDeclaration(&mod_, Intrinsic::trap));
+      tb.CreateUnreachable();
+    }
+    auto *ok = BasicBlock::Create(ctx_, "in_bounds", fn_);
+    // Unsigned, so negative indices are out of range too.
+    b_.CreateCondBr(b_.CreateICmpULT(index, b_.getInt64(len)), ok, trap_);
+    b_.SetInsertPoint(ok);
+  }
+
+  // Array type of register `r`, which must hold an array (or point to one if `ptr`).
+  const jir::Type &array_of(uint32_t r, bool ptr) {
+    const jir::Type *t = &type(r);
+    if (ptr) {
+      if (t->kind != jir::Type::Ptr) fail(f_.name, "%" + std::to_string(r) + " is not a pointer");
+      t = t->pointee.get();
+    }
+    if (t->kind != jir::Type::Array) fail(f_.name, "%" + std::to_string(r) + " is not an array");
+    return *t;
+  }
+
+  // Address of element `index` of the array at `base`, after a bounds check.
+  Value *elem_addr(const jir::Type &arr, Value *base, Value *index) {
+    bounds_check(index, arr.count);
+    return b_.CreateGEP(types_.lower(arr), base, {b_.getInt64(0), index});
+  }
+
+  void splat(uint32_t dst, uint32_t value) {
+    const jir::Type &arr = array_of(dst, false);
+    if (arr.count == 0) return;
+    Type *arr_ty = types_.lower(arr);
+    BasicBlock *pre = b_.GetInsertBlock();
+    auto *loop = BasicBlock::Create(ctx_, "splat", fn_);
+    auto *done = BasicBlock::Create(ctx_, "splat.done", fn_);
+    b_.CreateBr(loop);
+    b_.SetInsertPoint(loop);
+    PHINode *i = b_.CreatePHI(i64_, 2);
+    i->addIncoming(b_.getInt64(0), pre);
+    write_mem(b_.CreateGEP(arr_ty, slot(dst), {b_.getInt64(0), i}), value);
+    Value *next = b_.CreateAdd(i, b_.getInt64(1));
+    i->addIncoming(next, loop);
+    b_.CreateCondBr(b_.CreateICmpULT(next, b_.getInt64(arr.count)), loop, done);
+    b_.SetInsertPoint(done);
+  }
 
   AllocaInst *slot(uint32_t r) {
     if (r >= slots_.size()) fail(f_.name, "register %" + std::to_string(r) + " out of range");
@@ -163,7 +283,10 @@ class FnGen {
     slot(r);
     return f_.regs[r];
   }
-  Value *load(uint32_t r) { return b_.CreateLoad(slot(r)->getAllocatedType(), slot(r)); }
+  Value *load(uint32_t r) {
+    if (agg(r)) fail(f_.name, "internal error: aggregate %" + std::to_string(r) + " loaded as a value");
+    return b_.CreateLoad(slot(r)->getAllocatedType(), slot(r));
+  }
   void store(uint32_t r, Value *v) {
     if (v->getType() != slot(r)->getAllocatedType())
       fail(f_.name, "type mismatch when writing %" + std::to_string(r));
@@ -207,7 +330,7 @@ class FnGen {
     const jir::Type &from = type(src);
     Value *v = load(src);
     Type *ty = types_.lower(to);
-    if (from == to) return v;
+    if (from == to) return v;  // aggregates are handled by the caller
     if (to.kind == jir::Type::Int) {
       if (from.kind == jir::Type::Ptr) return b_.CreatePtrToInt(v, ty);
       if (from.kind == jir::Type::Int || from.kind == jir::Type::Bool)
@@ -236,7 +359,7 @@ class FnGen {
         // Freestanding strings are addresses of NUL-terminated constant bytes.
         store(inst.dst, b_.CreateGlobalString(inst.text, ".str", 0, &mod_));
         return;
-      case Op::Copy: store(inst.dst, arg(0)); return;
+      case Op::Copy: copy_reg(inst.dst, arg_reg(0)); return;
       case Op::Neg: store(inst.dst, b_.CreateNeg(arg(0))); return;
       case Op::Not: store(inst.dst, b_.CreateNot(arg(0))); return;
       case Op::Add:
@@ -262,49 +385,94 @@ class FnGen {
       case Op::Eq: case Op::Ne: case Op::Lt: case Op::Le: case Op::Gt: case Op::Ge:
         store(inst.dst, compare(inst.op, arg(0), arg(1), is_signed(arg_reg(0))));
         return;
-      case Op::Cast: store(inst.dst, cast(arg_reg(0), type(inst.dst))); return;
+      case Op::Cast:
+        if (type(arg_reg(0)) == type(inst.dst))
+          copy_reg(inst.dst, arg_reg(0));
+        else
+          store(inst.dst, cast(arg_reg(0), type(inst.dst)));
+        return;
       case Op::Call: {
         auto it = fns_.find(inst.text);
         if (it == fns_.end()) fail(f_.name, "call to unknown function @" + inst.text);
         Function *callee = it->second;
-        if (callee->arg_size() != inst.args.size())
+        bool sret = agg(inst.dst);
+        if (callee->arg_size() != inst.args.size() + sret)
           fail(f_.name, "wrong number of arguments to @" + inst.text);
         std::vector<Value *> args;
+        if (sret) args.push_back(slot(inst.dst));
         for (size_t i = 0; i < inst.args.size(); i++) {
-          args.push_back(arg(i));
-          if (args.back()->getType() != callee->getArg(i)->getType())
+          // Aggregates are passed by pointer; the callee copies them.
+          args.push_back(agg(arg_reg(i)) ? slot(arg_reg(i)) : arg(i));
+          if (args.back()->getType() != callee->getArg(i + sret)->getType())
             fail(f_.name, "argument " + std::to_string(i + 1) + " to @" + inst.text + " has the wrong type");
         }
-        store(inst.dst, b_.CreateCall(callee, args));
+        Value *result = b_.CreateCall(callee, args);
+        if (!sret) store(inst.dst, result);
         return;
       }
       case Op::Struct: {
-        Value *v = PoisonValue::get(types_.struct_type(inst.text));
-        for (unsigned i = 0; i < inst.args.size(); i++) v = b_.CreateInsertValue(v, arg(i), {i});
-        store(inst.dst, v);
+        StructType *ty = types_.struct_type(inst.text);
+        if (ty != slot(inst.dst)->getAllocatedType()) fail(f_.name, "`struct` result has the wrong type");
+        if (ty->getNumElements() != inst.args.size()) fail(f_.name, "wrong number of struct fields");
+        for (unsigned i = 0; i < inst.args.size(); i++)
+          write_mem(b_.CreateStructGEP(ty, slot(inst.dst), i), arg_reg(i));
         return;
       }
-      case Op::Field:
-        types_.field(type(arg_reg(0)), inst.imm);  // bounds check
-        store(inst.dst, b_.CreateExtractValue(arg(0), {unsigned(inst.imm)}));
-        return;
-      case Op::SetField:
-        types_.field(type(arg_reg(0)), inst.imm);
-        store(inst.dst, b_.CreateInsertValue(arg(0), arg(1), {unsigned(inst.imm)}));
-        return;
-      case Op::Load: store(inst.dst, b_.CreateLoad(pointee(arg_reg(0)), arg(0))); return;
-      case Op::Store: {
-        Value *v = arg(1);
-        if (v->getType() != pointee(arg_reg(0))) fail(f_.name, "stored value has the wrong type");
-        b_.CreateStore(v, arg(0));
+      case Op::Field: {
+        const jir::Type &st = type(arg_reg(0));
+        types_.field(st, inst.imm);  // bounds check
+        read_mem(inst.dst, b_.CreateStructGEP(types_.lower(st), slot(arg_reg(0)), unsigned(inst.imm)));
         return;
       }
+      case Op::SetField: {
+        const jir::Type &st = type(arg_reg(0));
+        types_.field(st, inst.imm);
+        copy_reg(inst.dst, arg_reg(0));
+        write_mem(b_.CreateStructGEP(types_.lower(st), slot(inst.dst), unsigned(inst.imm)), arg_reg(1));
+        return;
+      }
+      case Op::Load:
+        if (types_.lower(type(inst.dst)) != pointee(arg_reg(0))) fail(f_.name, "loaded value has the wrong type");
+        read_mem(inst.dst, arg(0));
+        return;
+      case Op::Store:
+        if (types_.lower(type(arg_reg(1))) != pointee(arg_reg(0))) fail(f_.name, "stored value has the wrong type");
+        write_mem(arg(0), arg_reg(1));
+        return;
       case Op::Addr: store(inst.dst, slot(arg_reg(0))); return;
       case Op::FieldPtr: {
         const jir::Type &t = type(arg_reg(0));
         if (t.kind != jir::Type::Ptr) fail(f_.name, "`fieldptr` needs a pointer");
         types_.field(*t.pointee, inst.imm);
         store(inst.dst, b_.CreateStructGEP(types_.lower(*t.pointee), arg(0), unsigned(inst.imm)));
+        return;
+      }
+      case Op::Array: {
+        const jir::Type &arr = array_of(inst.dst, false);
+        if (arr.count != inst.args.size()) fail(f_.name, "wrong number of array elements");
+        Type *ty = types_.lower(arr);
+        for (unsigned i = 0; i < inst.args.size(); i++)
+          write_mem(b_.CreateConstGEP2_64(ty, slot(inst.dst), 0, i), arg_reg(i));
+        return;
+      }
+      case Op::Splat: splat(inst.dst, arg_reg(0)); return;
+      case Op::Elem: {
+        // Registers live in allocas, so index the alloca instead of the loaded value.
+        const jir::Type &arr = array_of(arg_reg(0), false);
+        read_mem(inst.dst, elem_addr(arr, slot(arg_reg(0)), arg(1)));
+        return;
+      }
+      case Op::SetElem: {
+        const jir::Type &arr = array_of(arg_reg(0), false);
+        if (type(inst.dst) != arr) fail(f_.name, "`setelem` result has the wrong type");
+        Value *index = arg(1);
+        copy_reg(inst.dst, arg_reg(0));
+        write_mem(elem_addr(arr, slot(inst.dst), index), arg_reg(2));
+        return;
+      }
+      case Op::ElemPtr: {
+        const jir::Type &arr = array_of(arg_reg(0), true);
+        store(inst.dst, elem_addr(arr, arg(0), arg(1)));
         return;
       }
       case Op::Syscall: {
@@ -341,6 +509,9 @@ class FnGen {
           int64_t exit_nr = triple_.getArch() == Triple::aarch64 ? 93 : 60;
           b_.CreateCall(syscall_asm(ctx_, triple_, 2), {b_.getInt64(exit_nr), code});
           b_.CreateUnreachable();
+        } else if (sret_) {
+          write_mem(sret_, t.reg);
+          b_.CreateRetVoid();
         } else {
           b_.CreateRet(load(t.reg));
         }
@@ -349,14 +520,69 @@ class FnGen {
   }
 };
 
+// Defines `kind(dst, src_or_byte, n)` as a byte loop, where `kind` is "memcpy",
+// "memmove" or "memset". The definitions are weak so a real libc can take over.
+void define_mem_function(Module &m, const std::string &kind) {
+  LLVMContext &ctx = m.getContext();
+  Type *ptr = PointerType::get(ctx, 0);
+  Type *i64 = Type::getInt64Ty(ctx);
+  Type *i8 = Type::getInt8Ty(ctx);
+  bool is_set = kind == "memset";
+  bool is_move = kind == "memmove";
+  auto *ty = FunctionType::get(ptr, {ptr, is_set ? Type::getInt32Ty(ctx) : ptr, i64}, false);
+  Function *f = Function::Create(ty, GlobalValue::WeakAnyLinkage, kind, m);
+  // The loop below must not be recognized as a call to itself.
+  f->addFnAttr("no-builtins");
+  f->addFnAttr(Attribute::NoUnwind);
+
+  Value *dst = f->getArg(0), *src = f->getArg(1), *n = f->getArg(2);
+  auto *entry = BasicBlock::Create(ctx, "entry", f);
+  auto *pick = is_move ? BasicBlock::Create(ctx, "pick", f) : nullptr;
+  auto *fwd = BasicBlock::Create(ctx, "forward", f);
+  auto *bwd = is_move ? BasicBlock::Create(ctx, "backward", f) : nullptr;
+  auto *done = BasicBlock::Create(ctx, "done", f);
+
+  IRBuilder<> b(entry);
+  b.CreateCondBr(b.CreateICmpEQ(n, b.getInt64(0)), done, is_move ? pick : fwd);
+  Value *last = nullptr;
+  if (is_move) {
+    // Copy backwards when the destination starts after the source, so an
+    // overlapping tail is read before it is overwritten.
+    b.SetInsertPoint(pick);
+    Value *after = b.CreateICmpUGT(b.CreatePtrToInt(dst, i64), b.CreatePtrToInt(src, i64));
+    last = b.CreateSub(n, b.getInt64(1));
+    b.CreateCondBr(after, bwd, fwd);
+  }
+
+  // One loop over i = start, start +/- 1, ...: dst[i] = src[i] (or the byte).
+  auto loop = [&](BasicBlock *bb, BasicBlock *pred, Value *start, bool backward) {
+    b.SetInsertPoint(bb);
+    PHINode *i = b.CreatePHI(i64, 2);
+    i->addIncoming(start, pred);
+    Value *byte = is_set ? b.CreateTrunc(src, i8) : b.CreateLoad(i8, b.CreateGEP(i8, src, i));
+    b.CreateStore(byte, b.CreateGEP(i8, dst, i));
+    Value *next = backward ? b.CreateSub(i, b.getInt64(1)) : b.CreateAdd(i, b.getInt64(1));
+    i->addIncoming(next, bb);
+    Value *more = backward ? b.CreateICmpNE(i, b.getInt64(0)) : b.CreateICmpULT(next, n);
+    b.CreateCondBr(more, bb, done);
+  };
+  loop(fwd, is_move ? pick : entry, b.getInt64(0), false);
+  if (is_move) loop(bwd, pick, last, true);
+
+  b.SetInsertPoint(done);
+  b.CreateRet(dst);
+}
+
 }  // namespace
 
-std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, const Triple &triple) {
+std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, const Triple &triple,
+                                      const DataLayout &dl) {
   if (m.profile != jir::Profile::Freestanding)
     throw CodegenError("only freestanding modules can be compiled natively (for now)");
 
   auto mod = std::make_unique<Module>("jihoo", ctx);
-  Types types(ctx, m);
+  mod->setDataLayout(dl);
+  Types types(ctx, m, dl);
 
   // Declare everything first so calls can refer to any function.
   std::unordered_map<std::string, Function *> fns;
@@ -381,6 +607,7 @@ std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, co
   if (entry->second->arg_size() != 0) throw CodegenError("@_start must take no parameters");
 
   for (const auto &f : m.funcs) FnGen(f, fns[f.name], *mod, types, fns, triple).run();
+  for (const char *kind : {"memcpy", "memmove", "memset"}) define_mem_function(*mod, kind);
 
   std::string err;
   raw_string_ostream os(err);

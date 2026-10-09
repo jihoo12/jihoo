@@ -88,6 +88,8 @@ pub enum Type {
     Ptr(Box<Type>),
     /// A struct, by name. Structs are values: copying one copies its fields.
     Struct(String),
+    /// `[T; N]`, a fixed-size array. Also a value type.
+    Array(Box<Type>, u64),
 }
 
 impl Type {
@@ -114,6 +116,10 @@ impl Type {
         }
     }
 
+    pub fn array(elem: Type, len: u64) -> Type {
+        Type::Array(Box::new(elem), len)
+    }
+
     pub fn pointee(&self) -> Option<&Type> {
         match self {
             Type::Ptr(t) => Some(t),
@@ -127,6 +133,7 @@ impl Type {
         match self {
             Type::Str => profile == Profile::Hosted,
             Type::Ptr(inner) => profile == Profile::Freestanding && inner.available_in(profile),
+            Type::Array(elem, _) => elem.available_in(profile),
             Type::Unit | Type::Bool | Type::Int(_) | Type::Struct(_) => true,
         }
     }
@@ -144,6 +151,7 @@ impl Type {
         match self {
             Type::Ptr(t) => format!("*{}", t.jir()),
             Type::Struct(name) => format!("${name}"),
+            Type::Array(elem, n) => format!("[{n} x {}]", elem.jir()),
             other => other.to_string(),
         }
     }
@@ -159,6 +167,7 @@ impl fmt::Display for Type {
             Type::Str => f.write_str("str"),
             Type::Ptr(t) => write!(f, "*{t}"),
             Type::Struct(name) => f.write_str(name),
+            Type::Array(elem, n) => write!(f, "[{elem}; {n}]"),
         }
     }
 }

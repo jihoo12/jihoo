@@ -212,3 +212,63 @@ fn field_access_through_pointers() {
     ))
     .unwrap();
 }
+
+// ---- arrays ----
+
+#[test]
+fn array_literals() {
+    check("fn main() { let a = [1, 2, 3]\n let b: [u8; 2] = [250, 5]\n let c = [true; 8]\n let d: [i64; 0] = []\n print(a[0] + len(c)) }")
+        .unwrap();
+    assert!(err("fn main() { let a = [1, true] }").contains("array element must be i64, found bool"));
+    assert!(err("fn main() { let a: [u8; 2] = [1, 256] }").contains("does not fit in u8"));
+    assert!(err("fn main() { let a: [i64; 3] = [1, 2] }").contains("must be [i64; 3], found [i64; 2]"));
+    assert!(err("fn main() { let a = [] }").contains("cannot infer the element type"));
+    assert!(err("fn main() { print(len(5)) }").contains("`len` needs an array"));
+}
+
+#[test]
+fn array_element_assignment() {
+    let m = check(
+        "struct S { xs: [i64; 4], n: i64 }\n\
+         fn main() {\n  let s = S { xs: [0; 4], n: 0 }\n  let i = 0\n  while i < len(s.xs) {\n    s.xs[i] = i * i\n    i = i + 1\n  }\n  print(s.xs[3])\n}",
+    )
+    .unwrap();
+    let text = m.funcs[0].to_string();
+    // s.xs[i] = v  =>  t = field s, 0; t2 = setelem t, i, v; s = setfield s, 0, t2
+    assert!(text.contains("setelem"), "{text}");
+    assert!(text.contains("splat"), "{text}");
+    assert!(err("fn main() { let a = [1, 2]\n a[true] = 3 }").contains("an index must be i64, found bool"));
+    assert!(err("fn main() { let a = [1, 2]\n a[0] = \"x\" }").contains("must be i64, found str"));
+}
+
+#[test]
+fn pointers_to_arrays() {
+    let m = check(&fs(
+        "fn zero(buf: *[u8; 16]) {\n  let i = 0\n  while i < len(buf) {\n    buf[i] = 0\n    i = i + 1\n  }\n}\n\
+         fn first(buf: *[u8; 16]) -> *u8 { return &buf[0] }\n\
+         fn f() -> u8 {\n  let b = [7 as u8; 16]\n  zero(&b)\n  let p = &b[3]\n  *p = 9\n  return b[3] + first(&b)[0]\n}",
+    ))
+    .unwrap();
+    let text = m.to_string();
+    assert!(text.contains("elemptr"), "{text}");
+    // Arrays of structs that contain themselves are still cycles.
+    assert!(err("struct A { xs: [A; 2] }\nfn main() {}").contains("contains itself"));
+    check(&fs("struct N { kids: [*N; 2] }")).unwrap();
+}
+
+#[test]
+fn size_and_align() {
+    let m = check(&fs(
+        "struct A { a: u8, b: i64, c: bool }\n\
+         fn f() -> i64 { return size_of(A) * 100 + align_of(A) * 10 + size_of([u16; 3]) }",
+    ))
+    .unwrap();
+    let text = m.to_string();
+    for c in ["= const 24\n", "= const 8\n", "= const 6\n"] {
+        assert!(text.contains(c), "{c} missing in {text}");
+    }
+    assert!(m.to_string().contains("struct $A { a: u8, b: i64, c: bool } size 24 align 8"), "{m}");
+    assert!(err("fn main() { print(size_of(str)) }").contains("no fixed memory layout"));
+    assert!(err("struct S { s: str }\nfn main() { print(size_of(S)) }").contains("no fixed memory layout"));
+    check("fn main() { print(size_of(i32) == 4) }").unwrap();
+}

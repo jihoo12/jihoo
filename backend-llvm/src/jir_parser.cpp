@@ -98,7 +98,7 @@ std::vector<Tok> tokenize(int line, const std::string &src) {
       size_t j = i;
       while (i < src.size() && ident_char(src[i])) i++;
       out.push_back({TokKind::Word, src.substr(j, i - j)});
-    } else if (std::string("=,(){}:*").find(c) != std::string::npos) {
+    } else if (std::string("=,(){}:*[]").find(c) != std::string::npos) {
       out.push_back({TokKind::Punct, std::string(1, c)});
       i++;
     } else {
@@ -145,10 +145,18 @@ struct Line {
     if (t.kind != TokKind::Word || t.text.rfind("bb", 0) != 0) fail(no, "expected a block like bb0");
     return uint32_t(number(no, t.text.substr(2)));
   }
-  // unit | bool | str | i8..i64 | u8..u64 | *T | $Name
+  // unit | bool | str | i8..i64 | u8..u64 | *T | $Name | [N x T]
   Type type() {
     const Tok &t = next("a type");
     if (t.kind == TokKind::Punct && t.text == "*") return Type::pointer(type());
+    if (t.kind == TokKind::Punct && t.text == "[") {
+      int64_t n = integer();
+      if (n < 0) fail(no, "array length must not be negative");
+      word("x");
+      Type elem = type();
+      punct("]");
+      return Type::array(std::move(elem), uint64_t(n));
+    }
     if (t.kind == TokKind::StructName) {
       Type s;
       s.kind = Type::Struct;
@@ -256,6 +264,24 @@ Inst parse_assign(Line &l) {
     inst.args = {l.reg()};
     l.punct(",");
     inst.imm = l.index();
+  } else if (w == "array") {
+    inst.op = Op::Array;
+    inst.args = l.reg_list();
+  } else if (w == "splat") {
+    inst.op = Op::Splat;
+    inst.args = {l.reg()};
+  } else if (w == "elem" || w == "elemptr") {
+    inst.op = w == "elem" ? Op::Elem : Op::ElemPtr;
+    uint32_t a = l.reg();
+    l.punct(",");
+    inst.args = {a, l.reg()};
+  } else if (w == "setelem") {
+    inst.op = Op::SetElem;
+    uint32_t a = l.reg();
+    l.punct(",");
+    uint32_t i = l.reg();
+    l.punct(",");
+    inst.args = {a, i, l.reg()};
   } else if (w == "setfield") {
     inst.op = Op::SetField;
     uint32_t src = l.reg();
@@ -313,6 +339,13 @@ Module parse(const std::string &text) {
           if (!l.peek_punct("}")) l.punct(",");
         }
         l.punct("}");
+        if (!l.done()) {
+          l.word("size");
+          def.size = uint64_t(l.integer());
+          l.word("align");
+          def.align = uint64_t(l.integer());
+          def.has_layout = true;
+        }
         m.structs.push_back(std::move(def));
       } else if (first.kind == TokKind::Word && first.text == "fn") {
         if (!saw_version || !saw_profile) fail(no, "missing `jir 0` / `profile` header");

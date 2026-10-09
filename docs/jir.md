@@ -13,7 +13,7 @@ in `backend-llvm/src/jir.h`. The typing rules are implemented once, in
 jir 0
 profile freestanding
 
-struct $Node { value: i64, next: *$Node }
+struct $Node { value: i64, next: *$Node } size 16 align 8
 
 fn @sum(*$Node) -> i64 {
   regs *$Node i64 i64 i64 *$Node bool *i64 i64 i64 **$Node *$Node
@@ -76,6 +76,7 @@ It takes no parameters and returns `unit` or `i64`.
 | `str`             | GC-managed string, hosted only           | —             |
 | `*T`              | raw pointer to `T`, freestanding only    | `ptr`         |
 | `$Name`           | struct, by value                         | named struct  |
+| `[N x T]`         | array of `N` `T`s, by value              | `[N x T]`     |
 
 `str` and `*T` are deliberately separate: GC references and raw pointers must never
 mix. That separation is what will later allow GC-enabled native builds.
@@ -87,14 +88,21 @@ pattern). `const` values must already be canonical.
 ## Structs
 
 ```
-struct $Name { field: T, field: T, ... }
+struct $Name { field: T, field: T, ... } size S align A
 ```
 
 Field names are only for readability; instructions refer to fields by index. A
-struct may contain other structs by value, but not itself (directly or through
-other structs); use a pointer for recursive data.
+struct may contain other structs and arrays by value, but not itself (directly or
+through other structs or arrays); use a pointer for recursive data.
 
-Structs are values: `copy` copies all fields, and `setfield` produces a new value.
+`size S align A` is the struct's layout as computed by the frontend
+(`crates/jihoo-ir/src/layout.rs`: C rules for 64-bit targets). It is what
+`size_of`/`align_of` were folded to, so the LLVM backend rejects the module if the
+target's data layout disagrees. It is omitted for structs without a fixed layout
+(those containing `str`, which only exist on the VM).
+
+Structs and arrays are values: `copy` copies all fields or elements, and
+`setfield`/`setelem` produce a new value.
 
 ## Functions
 
@@ -151,6 +159,18 @@ The result type is what the destination register must be declared as.
 | `%d = field %s, N`                  | `$S`                  | type of field N | read a field |
 | `%d = setfield %s, N, %v`           | `$S`, type of field N | `$S`   | copy of `%s` with field N replaced |
 
+### Arrays
+
+`index` operands are `i64`. Element access is bounds-checked: the VM reports a
+runtime error and native code traps.
+
+| syntax                              | operands              | result | meaning |
+|-------------------------------------|-----------------------|--------|---------|
+| `%d = array(%a, %b, ...)`           | `N` values of type `T` | `[N x T]` | build an array |
+| `%d = splat %v`                     | `T`                   | `[N x T]` | an array with every element `%v` |
+| `%d = elem %a, %i`                  | `[N x T], i64`        | `T`    | read an element |
+| `%d = setelem %a, %i, %v`           | `[N x T], i64, T`     | `[N x T]` | copy of `%a` with element `%i` replaced |
+
 ### Memory (freestanding only)
 
 | syntax                          | operands              | result | meaning |
@@ -159,6 +179,7 @@ The result type is what the destination register must be declared as.
 | `store %p, %v`                  | `*T, T`               |        | write memory |
 | `%d = addr %r`                  | `T`                   | `*T`   | address of register `%r` (valid until the function returns) |
 | `%d = fieldptr %p, N`           | `*$S`                 | `*F` (F = type of field N) | address of a field |
+| `%d = elemptr %p, %i`           | `*[N x T], i64`       | `*T`   | address of an element; bounds-checked |
 
 ### Builtins
 
@@ -179,8 +200,16 @@ The result type is what the destination register must be declared as.
 Returning from `@_start` exits the process: with the returned value if `@_start`
 returns `i64`, with 0 if it returns `unit`.
 
+## Native ABI
+
+`jihoo-llc` passes aggregates (structs and arrays) by pointer: the caller passes
+the address of its copy and the callee copies it into its own storage, and an
+aggregate result is written through a hidden first parameter. Aggregates are
+moved with `memcpy`; the module defines weak `memcpy`, `memmove` and `memset`
+because freestanding programs have no libc.
+
 ## Planned
 
-- Arrays, inline `asm` blocks, `size_of`.
+- Inline `asm` blocks.
 - `gcref` types for GC-managed objects beyond `str` and structs.
 - A Rust-side JIR parser so `jihoo run file.jir` works.
