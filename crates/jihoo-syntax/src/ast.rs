@@ -127,6 +127,8 @@ pub enum TypeExprKind {
     Ref(Box<TypeExpr>),
     /// `chan T`: a channel between tasks.
     Chan(Box<TypeExpr>),
+    /// `cell T`: a shared, mutable `T`.
+    Cell(Box<TypeExpr>),
     /// `fn(A, B) -> R`; without `-> R` the function returns unit.
     Fn(Vec<TypeExpr>, Option<Box<TypeExpr>>),
 }
@@ -286,6 +288,8 @@ pub enum ExprKind {
     AddrOf(Box<Expr>),
     /// `ref value`: a new reference to a copy of `value`.
     NewRef(Box<Expr>),
+    /// `cell(value)`: a new cell holding a copy of `value`.
+    NewCell(Box<Expr>),
     /// `value as T`
     Cast(Box<Expr>, TypeExpr),
     /// `[a, b, c]`
@@ -417,6 +421,7 @@ pub fn set_pos(e: &mut Expr, pos: Pos) {
         | ExprKind::Deref(x)
         | ExprKind::AddrOf(x)
         | ExprKind::NewRef(x)
+        | ExprKind::NewCell(x)
         | ExprKind::Comptime(x)
         | ExprKind::Hole(x) => set_pos(x, pos),
         ExprKind::Binary(_, l, r) | ExprKind::Index(l, r) | ExprKind::ArrayRepeat(l, r) => {
@@ -485,7 +490,9 @@ fn set_type_pos(t: &mut TypeExpr, pos: Pos) {
     t.pos = pos;
     match &mut t.kind {
         TypeExprKind::Named(_) => {}
-        TypeExprKind::Ptr(inner) | TypeExprKind::Ref(inner) | TypeExprKind::Chan(inner) => set_type_pos(inner, pos),
+        TypeExprKind::Ptr(inner) | TypeExprKind::Ref(inner) | TypeExprKind::Chan(inner) | TypeExprKind::Cell(inner) => {
+            set_type_pos(inner, pos)
+        }
         TypeExprKind::Array(elem, n) => {
             set_type_pos(elem, pos);
             set_pos(n, pos);

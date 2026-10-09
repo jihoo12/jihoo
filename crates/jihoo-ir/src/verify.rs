@@ -75,7 +75,9 @@ impl Cx<'_> {
                 Err(format!("unknown struct `${name}`"))
             }
             Type::Enum(name) if !self.enums.contains_key(name.as_str()) => Err(format!("unknown enum `${name}`")),
-            Type::Ptr(inner) | Type::Array(inner, _) | Type::Ref(inner) | Type::Chan(inner) => self.check_type(inner),
+            Type::Ptr(inner) | Type::Array(inner, _) | Type::Ref(inner) | Type::Chan(inner) | Type::Cell(inner) => {
+                self.check_type(inner)
+            }
             Type::Fn(params, ret) => params.iter().chain([&**ret]).try_for_each(|t| self.check_type(t)),
             _ => Ok(()),
         }
@@ -363,6 +365,18 @@ impl Cx<'_> {
                         let pointee = ty(ptr)?.pointee().ok_or_else(|| format!("{ptr} is not a pointer"))?;
                         expect(dst, &Type::ptr(self.field(pointee, *index)?.clone()))
                     }
+                    // Cell types are hosted only, so checking types checks the profile.
+                    Inst::NewCell { dst, value } => expect(dst, &Type::Cell(Box::new(ty(value)?.clone()))),
+                    Inst::CellGet { dst, cell, path } => match ty(cell)? {
+                        Type::Cell(t) if path.is_empty() => expect(dst, t),
+                        Type::Cell(t) => expect(dst, &self.walk(t, path, &f.regs)?),
+                        t => Err(format!("`cellget` needs a cell, found {}", t.jir())),
+                    },
+                    Inst::CellSet { cell, path, value } => match ty(cell)? {
+                        Type::Cell(t) if path.is_empty() => expect(value, t),
+                        Type::Cell(t) => expect(value, &self.walk(t, path, &f.regs)?),
+                        t => Err(format!("`cellset` needs a cell, found {}", t.jir())),
+                    },
                     Inst::GetPath { dst, src, path } => {
                         let t = self.walk(ty(src)?, path, &f.regs)?;
                         expect(dst, &t)

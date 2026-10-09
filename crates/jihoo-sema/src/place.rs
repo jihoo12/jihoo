@@ -8,6 +8,9 @@
 //!   Writing it is a `store`; fields and elements use `fieldptr`/`elemptr`.
 //! - What a `ref` refers to (`*r`, `r.x`, `r[i]`) is a register place holding
 //!   the value read through the ref. It cannot be written: refs are immutable.
+//! - What a `cell` holds (`*c`, `c.x`, `c[i]`, `c.a[i]`) is a *cell place*:
+//!   one `cellget` reads it and one `cellset` writes it, so everything holding
+//!   the cell sees the change.
 
 use jihoo_ir::{BinOp, Inst, PathStep, Reg, Type};
 use jihoo_syntax::ast::{Expr, ExprKind};
@@ -48,12 +51,18 @@ pub(crate) enum Place {
         ptr: Reg,
         ty: Type,
     },
+    /// What `cell` holds, or the part of it at `path`.
+    Cell {
+        cell: Reg,
+        path: Vec<Step>,
+        ty: Type,
+    },
 }
 
 impl Place {
     pub(crate) fn ty(&self) -> &Type {
         match self {
-            Place::Reg { ty, .. } | Place::Mem { ty, .. } => ty,
+            Place::Reg { ty, .. } | Place::Mem { ty, .. } | Place::Cell { ty, .. } => ty,
         }
     }
 }
@@ -76,6 +85,10 @@ impl FnCx<'_> {
                 Place::Reg { root, path, ty, readonly }
             }
             Place::Mem { ptr, .. } => self.step_ptr(ptr, step, ty),
+            Place::Cell { cell, mut path, .. } => {
+                path.push(step);
+                Place::Cell { cell, path, ty }
+            }
         }
     }
 
@@ -117,6 +130,12 @@ impl FnCx<'_> {
                         let ptr = self.read(base);
                         Ok(self.step_ptr(ptr, Step::Field(index), fty))
                     }
+                    // `c.x` with `c: cell Struct` is a part of what the cell holds.
+                    Type::Cell(inner) if matches!(*inner, Type::Struct(_)) => {
+                        let (index, fty) = self.env.field(e.pos, &inner, name)?;
+                        let cell = self.read(base);
+                        Ok(Place::Cell { cell, path: vec![Step::Field(index)], ty: fty })
+                    }
                     // `r.x` with `r: ref Struct` reads through the ref.
                     Type::Ref(inner) if matches!(*inner, Type::Struct(_)) => {
                         let (index, fty) = self.env.field(e.pos, &inner, name)?;
@@ -139,6 +158,13 @@ impl FnCx<'_> {
                         let ptr = self.read(base);
                         let i = self.index(index)?;
                         Ok(self.step_ptr(ptr, Step::Elem(i), *elem))
+                    }
+                    // `c[i]` with `c: cell [T; N]` is a part of what the cell holds.
+                    Type::Cell(inner) if matches!(*inner, Type::Array(..)) => {
+                        let Type::Array(elem, _) = *inner else { unreachable!() };
+                        let cell = self.read(base);
+                        let i = self.index(index)?;
+                        Ok(Place::Cell { cell, path: vec![Step::Elem(i)], ty: *elem })
                     }
                     // `r[i]` with `r: ref [T; N]` reads through the ref.
                     Type::Ref(inner) if matches!(*inner, Type::Array(..)) => {
@@ -168,6 +194,9 @@ impl FnCx<'_> {
             }
             ExprKind::Deref(inner) => {
                 let p = self.expr(inner, None)?;
+                if let Type::Cell(ty) = self.ty(p).clone() {
+                    return Ok(Place::Cell { cell: p, path: vec![], ty: *ty });
+                }
                 if let Type::Ref(ty) = self.ty(p).clone() {
                     let root = self.emit_to(*ty.clone(), |dst| Inst::Deref { dst, src: p });
                     return Ok(Place::Reg { root, path: vec![], ty: *ty, readonly: Some(BEHIND_REF) });
@@ -217,6 +246,10 @@ impl FnCx<'_> {
             }
             Place::Reg { root, path, .. } => path.into_iter().fold(root, |cur, step| self.read_step(cur, step)),
             Place::Mem { ptr, ty } => self.emit_to(ty, |dst| Inst::Load { dst, ptr }),
+            Place::Cell { cell, path, ty } => {
+                let path = path.into_iter().map(path_step).collect();
+                self.emit_to(ty, |dst| Inst::CellGet { dst, cell, path })
+            }
         }
     }
 
@@ -256,12 +289,18 @@ impl FnCx<'_> {
                 self.emit(Inst::Store { ptr, value });
                 Ok(())
             }
+            Place::Cell { cell, path, .. } => {
+                let path = path.into_iter().map(path_step).collect();
+                self.emit(Inst::CellSet { cell, path, value });
+                Ok(())
+            }
         }
     }
 
     pub(crate) fn addr_of(&mut self, pos: Pos, place: Place) -> Result<Reg, Error> {
         match place {
             Place::Mem { ptr, .. } => Ok(ptr),
+            Place::Cell { .. } => Err(Error::new(pos, "cannot take the address of what a cell holds")),
             Place::Reg { readonly: Some(what), .. } => Err(Error::new(pos, format!("cannot take the address of {what}"))),
             Place::Reg { root, path, .. } => {
                 let root_ty = self.ty(root).clone();

@@ -598,6 +598,29 @@ fn match_expressions() {
     assert!(err("enum E {}\nfn f(e: E) -> i64 { return match e {} }\nfn main() {}").contains("needs at least one arm"));
 }
 
+// ---- cells ----
+
+#[test]
+fn cells() {
+    let m = check(
+        "struct S { n: i64, xs: [i64; 2] }\n\
+         fn bump(c: cell S) { c.n = c.n + 1\n c.xs[1] = c.n }\n\
+         fn main() { let c = cell(S { n: 0, xs: [0, 0] })\n bump(c)\n let k = cell(0)\n let f = fn() { *k = *k + 1 }\n f()\n print(*k + c.xs[1]) }",
+    )
+    .unwrap();
+    let text = m.to_string();
+    assert!(text.contains("cellset %0, (field 1, elem %"), "{text}");
+    assert!(text.contains("= cellget %0, (field 0)"), "{text}");
+    assert!(text.contains("= cell %"), "{text}");
+    // The captured `k` cannot be reassigned, but what it holds can change.
+    assert!(err("fn main() { let k = cell(0)\n let f = fn() { k = cell(1) } }").contains("cannot assign to a captured variable"));
+    assert!(err("fn main() { let c = cell(1)\n print(c == c) }").contains("cells (cell i64) cannot be compared; compare what they hold"));
+    assert!(err("fn main() { let c = cell(1)\n *c = true }").contains("must be i64, found bool"));
+    assert!(err("const C = cell(1)\nfn main() {}").contains("a cell cannot be computed at compile time"));
+    assert!(err(&fs("fn f() { let c = cell(1) }")).contains("only available in hosted mode"));
+    assert!(err(&fs("fn f(c: cell i64) {}")).contains("only available in hosted mode"));
+}
+
 // ---- equality ----
 
 #[test]

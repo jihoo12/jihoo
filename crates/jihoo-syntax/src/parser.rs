@@ -389,6 +389,10 @@ impl Parser {
             let inner = self.type_expr()?;
             return Ok(TypeExpr { pos, kind: TypeExprKind::Chan(Box::new(inner)) });
         }
+        if self.eat(&Tok::Cell) {
+            let inner = self.type_expr()?;
+            return Ok(TypeExpr { pos, kind: TypeExprKind::Cell(Box::new(inner)) });
+        }
         if self.eat(&Tok::LBracket) {
             let elem = self.type_expr()?;
             self.expect(&Tok::Semi, "`;` and an array length")?;
@@ -874,6 +878,15 @@ impl Parser {
                 ExprKind::NewChan(ty, cap)
             }
             Tok::Chan => ExprKind::Type(self.type_expr()?),
+            // `cell(value)` makes a cell; `cell T` is the type.
+            Tok::Cell if self.toks[self.i + 1].tok == Tok::LParen => {
+                self.bump();
+                self.bump();
+                let value = self.with_struct_lit(true, |p| p.expr())?;
+                self.expect(&Tok::RParen, "`)`")?;
+                ExprKind::NewCell(Box::new(value))
+            }
+            Tok::Cell => ExprKind::Type(self.type_expr()?),
             Tok::Quote => {
                 self.bump();
                 self.quote()?
@@ -1138,6 +1151,7 @@ fn punct(t: &Tok) -> &'static str {
         Tok::Go => "go",
         Tok::Chan => "chan",
         Tok::Select => "select",
+        Tok::Cell => "cell",
         Tok::FatArrow => "=>",
         Tok::As => "as",
         Tok::Const => "const",
@@ -1473,6 +1487,15 @@ mod tests {
         assert!(matches!(&s[1], Stmt::Go { call, .. } if matches!(call.kind, ExprKind::Call(..))));
         assert!(matches!(&s[2], Stmt::Go { call, .. } if matches!(call.kind, ExprKind::CallExpr(..))));
         assert!(matches!(&s[3], Stmt::Let { value, .. } if matches!(&value.kind, ExprKind::Call(_, a) if matches!(a[0].kind, ExprKind::Type(_)))));
+    }
+
+    #[test]
+    fn cells() {
+        let s = body("let c: cell u8 = cell(1)\n*c = 2\nlet t = V(cell u8)");
+        assert!(matches!(&s[0], Stmt::Let { ty: Some(t), value, .. }
+            if matches!(t.kind, TypeExprKind::Cell(_)) && matches!(value.kind, ExprKind::NewCell(_))));
+        assert!(matches!(&s[1], Stmt::Assign { target, .. } if matches!(target.kind, ExprKind::Deref(_))));
+        assert!(matches!(&s[2], Stmt::Let { value, .. } if matches!(&value.kind, ExprKind::Call(_, a) if matches!(a[0].kind, ExprKind::Type(_)))));
     }
 
     #[test]

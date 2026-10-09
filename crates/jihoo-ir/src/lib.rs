@@ -238,6 +238,13 @@ pub enum Inst {
     /// one can, and sets `dst` (an `i64`) to its index. With `default`, it does
     /// not wait: if none can go ahead, `dst` is `cases.len()`.
     Select { dst: Reg, cases: Vec<SelectCase>, default: bool },
+    /// Hosted only: a new cell holding `value`.
+    NewCell { dst: Reg, value: Reg },
+    /// Hosted only: reads what cell `cell` holds, or the part of it at `path`.
+    CellGet { dst: Reg, cell: Reg, path: Vec<PathStep> },
+    /// Hosted only: replaces what cell `cell` holds, or the part of it at
+    /// `path`, by `value`. Everything holding the cell sees the change.
+    CellSet { cell: Reg, path: Vec<PathStep>, value: Reg },
     /// Reads the part of aggregate `src` at `path` (fields and elements, outside
     /// in). Elements are bounds-checked.
     GetPath { dst: Reg, src: Reg, path: Vec<PathStep> },
@@ -380,7 +387,11 @@ impl Inst {
             SetElem { dst, src, index, value } => vec![dst, src, index, value],
             Store { ptr, value } | Send { chan: ptr, value } => vec![ptr, value],
             Spawn { callee, args } => std::iter::once(callee).chain(args).collect(),
-            GetPath { dst, src, path } => [dst, src].into_iter().chain(path_regs(path)).collect(),
+            GetPath { dst, src, path } | CellGet { dst, cell: src, path } => {
+                [dst, src].into_iter().chain(path_regs(path)).collect()
+            }
+            NewCell { dst, value } => vec![dst, value],
+            CellSet { cell, path, value } => [cell, value].into_iter().chain(path_regs(path)).collect(),
             SetPath { dst, src, path, value } => [dst, src, value].into_iter().chain(path_regs(path)).collect(),
             Select { dst, cases, .. } => std::iter::once(dst)
                 .chain(cases.iter_mut().flat_map(|c| match c {

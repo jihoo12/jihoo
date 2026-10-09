@@ -85,6 +85,7 @@ It takes no parameters and returns `unit` or `i64`.
 | `fn(T, ...) -> R` | function value                           | `ptr`         |
 | `ref T`           | immutable GC reference to a `T`, hosted only | —         |
 | `chan T`          | channel of `T` values between tasks, hosted only | —     |
+| `cell T`          | shared mutable `T`, hosted only          | —             |
 
 `str` and `*T` are deliberately separate: GC references and raw pointers must never
 mix. That separation is what will later allow GC-enabled native builds.
@@ -214,6 +215,14 @@ object exists).
 A `ref` field breaks the rule that a struct or enum may not contain itself.
 Types containing a `ref` have no fixed layout, like those containing `str`.
 
+### Cells (hosted only)
+
+| syntax                              | operands              | result | meaning |
+|-------------------------------------|-----------------------|--------|---------|
+| `%d = cell %v`                      | `T`                   | `cell T` | a new cell holding a copy of `%v` |
+| `%d = cellget %c, (step, ...)`      | `cell T`, a path into `T` (may be empty) | type at the end of the path | read what the cell holds, or a part of it |
+| `cellset %c, (step, ...), %v`       | `cell T`, a path, the type at its end | | replace what the cell holds, or a part of it |
+
 ### Tasks and channels (hosted only)
 
 | syntax                              | operands              | result | meaning |
@@ -225,7 +234,9 @@ Types containing a `ref` have no fixed layout, like those containing `str`.
 | `%d = select [case; ...]`           | each case `recv %c -> %v` (`%v: T`) or `send %c, %v`, optionally a last `default` | `i64` | do the first case that can go ahead, waiting until one can; `%d` is its index. With `default` it does not wait: `%d` is the number of cases if none can go ahead |
 
 The VM runs tasks on one thread with a deterministic round-robin scheduler; the
-run ends when the entry function returns.
+run ends when the entry function returns. A task is only switched out at a
+call, at a jump to a block with a lower or equal number (every loop has one,
+since blocks are numbered breadth-first), or when it waits on a channel.
 
 ### Arrays
 

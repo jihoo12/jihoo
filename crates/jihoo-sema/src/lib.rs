@@ -819,6 +819,18 @@ impl<'a> FnCx<'a> {
                 let place = self.place(e)?;
                 self.read(place)
             }
+            ExprKind::NewCell(inner) => {
+                if self.profile() != Profile::Hosted && !self.in_macro {
+                    return Err(Error::new(e.pos, "`cell` allocates on the GC heap; it is only available in hosted mode"));
+                }
+                let hint = match expected {
+                    Some(Type::Cell(t)) => Some(&**t),
+                    _ => None,
+                };
+                let value = self.expr(inner, hint)?;
+                let ty = Type::Cell(Box::new(self.ty(value).clone()));
+                self.emit_to(ty, |dst| Inst::NewCell { dst, value })
+            }
             ExprKind::NewRef(inner) => {
                 if self.profile() != Profile::Hosted && !self.in_macro {
                     return Err(Error::new(e.pos, "`ref` allocates on the GC heap; it is only available in hosted mode"));
@@ -906,7 +918,8 @@ impl<'a> FnCx<'a> {
         };
 
         let (lt, rt) = (self.ty(lhs).clone(), self.ty(rhs).clone());
-        if matches!(op, ir::BinOp::Eq | ir::BinOp::Ne) && lt == rt && equality::is_structural(&lt) {
+        // Cells go there too, for an error that says what to compare instead.
+        if matches!(op, ir::BinOp::Eq | ir::BinOp::Ne) && lt == rt && (equality::is_structural(&lt) || matches!(lt, Type::Cell(_))) {
             return self.structural_eq(pos, lhs, rhs, op == ir::BinOp::Ne);
         }
         let ty = types::binary(op, &lt, &rt)

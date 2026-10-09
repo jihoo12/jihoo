@@ -54,9 +54,9 @@ fn area(w: i64, h: i64) -> i64 {   // signatures are written out
 ```
 
 - Types: `unit`, `bool`, `i8`…`i64`, `u8`…`u64`, structs, enums, arrays, function types
-  `fn(A, B) -> R`, plus `str`, `ref T` and `chan T` (hosted only, garbage
-  collected) and `*T` (freestanding only, raw pointer). A string literal is a
-  `str` when hosted and a `*u8` to constant bytes when freestanding.
+  `fn(A, B) -> R`, plus `str`, `ref T`, `cell T` and `chan T` (hosted only,
+  garbage collected) and `*T` (freestanding only, raw pointer). A string literal
+  is a `str` when hosted and a `*u8` to constant bytes when freestanding.
 - Bitwise operators `&`, `|`, `^`, `<<`, `>>` work on integers, and `!` flips
   every bit of an integer. `>>` is arithmetic for signed types and logical for
   unsigned ones; shift amounts are taken modulo the bit width, so `x << 64` on an
@@ -485,6 +485,37 @@ print(p.x)                     // fields and elements read through a ref
   the values they refer to.
 - A `ref` breaks the rule that a type cannot contain itself, which is what makes
   lists and trees possible.
+
+## Cells
+
+```jihoo
+fn deposit(a: cell Account, amount: i64) {
+    a.balance = a.balance + amount       // seen by everything holding the cell
+}
+
+let acct = cell(Account { owner: "ada", balance: 0 })
+deposit(acct, 50)
+let n = cell(0)
+let next = fn() -> i64 { *n = *n + 1 ... }   // a closure with state
+```
+
+- `cell T` is the one kind of shared, mutable state in hosted code. `cell(v)`
+  makes a cell holding a copy of `v`; copying the cell (assigning it, passing
+  it, capturing it, sending it) shares it, and everything holding it sees
+  changes. `*c` is what it holds, and `c.x`, `c[i]`, `c.a[i]` are parts of
+  that: all can be read and assigned.
+- Reading `*c` gives a copy: `let before = *c` keeps the value of the moment.
+- Each read or write is one instruction (`cellget`/`cellset` with a path), and
+  a nested write updates what the cell holds in place (see [GC](#gc)), so a
+  cell holding a large array has O(1) element writes.
+- Tasks may share cells. A task is only interrupted at a call or where a loop
+  goes round, so a statement without calls, such as `*n = *n + 1` or
+  `c.count = c.count + 1`, never interleaves with another task. An update that
+  calls a function in between, `*c = f(*c)`, can be interleaved; guard it with
+  a channel that has room for one value, used as a lock:
+  `send(lock, true)` before and `recv(lock)` after.
+- Cells cannot be compared (compare what they hold, `*a == *b`). Hosted only;
+  freestanding code uses pointers.
 - Hosted only, like `str`: the GC owns the value. Freestanding code uses
   pointers. On the VM a ref is a one-element heap object; in JIR it is `ref T`,
   with `ref` and `deref` instructions.
@@ -539,8 +570,11 @@ match recv(c) { ... }
   possible goes ahead; its waits on the other channels are cancelled.
 - Tasks run on one OS thread. The VM's scheduler is round-robin and
   deterministic: a task runs until it waits on a channel, finishes, or has run
-  1000 instructions, then the next ready task gets its turn. The same program
-  prints the same output on every run, which keeps tests reliable.
+  1000 instructions and reaches a *safepoint* (a call, or a loop going round),
+  then the next ready task gets its turn. The same program prints the same
+  output on every run, which keeps tests reliable. Code without calls and loops
+  is never interrupted, which is what makes updates of [cells](#cells) such as
+  `*n = *n + 1` safe.
 - The program ends when `main` returns, even if other tasks are still running
   or waiting (as in Go). If every task waits on a channel, the run stops with
   `deadlock: every task is waiting on a channel`. An error in any task stops

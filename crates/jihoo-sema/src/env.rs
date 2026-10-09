@@ -271,6 +271,15 @@ impl<'p> Env<'p> {
                 }
                 Ok(Type::Chan(Box::new(self.resolve_in(inner, b, in_macro)?)))
             }
+            TypeExprKind::Cell(inner) => {
+                if self.profile != Profile::Hosted && !in_macro {
+                    return Err(Error::new(
+                        t.pos,
+                        "cells are garbage collected and only available in hosted mode; use a pointer (`*T`)",
+                    ));
+                }
+                Ok(Type::Cell(Box::new(self.resolve_in(inner, b, in_macro)?)))
+            }
             TypeExprKind::Ref(inner) => {
                 if self.profile != Profile::Hosted && !in_macro {
                     return Err(Error::new(

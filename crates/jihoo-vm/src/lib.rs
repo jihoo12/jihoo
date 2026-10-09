@@ -2,9 +2,13 @@
 //!
 //! Tasks (`go f(x)`) run on one OS thread, interleaved by a deterministic
 //! round-robin scheduler: a task runs until it waits on a channel, finishes, or
-//! has run `TIME_SLICE` instructions. The same program always prints the same
-//! thing. When the first task (`main`) returns, the run ends, whatever the
-//! other tasks are doing; when every task waits on a channel, it is a deadlock.
+//! has run `TIME_SLICE` instructions and reaches a *safepoint*: a call, or a
+//! jump back to an earlier block. The frontend numbers blocks in breadth-first
+//! order, so every loop has such a jump. Code without calls and loops therefore
+//! never interleaves with other tasks: `*c = *c + 1` on a cell is atomic. The
+//! same program always prints the same thing. When the first task (`main`)
+//! returns, the run ends, whatever the other tasks are doing; when every task
+//! waits on a channel, it is a deadlock.
 
 pub mod gc;
 
@@ -16,7 +20,8 @@ use gc::{GcRef, Heap, Waiter};
 use jihoo_ir::{BinOp, Function, Inst, Module, PathStep, Profile, Reg, SelectCase, Terminator, Type, UnOp};
 
 const MAX_CALL_DEPTH: usize = 10_000;
-/// Instructions a task runs before the next ready task gets its turn.
+/// Instructions a task runs before the next ready task gets its turn, at the
+/// next safepoint.
 const TIME_SLICE: u32 = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,14 +226,7 @@ impl<'m> Vm<'m> {
                 }
                 *fuel -= 1;
             }
-            if self.slice == 0 {
-                self.slice = TIME_SLICE;
-                if !self.ready.is_empty() {
-                    self.ready.push_back(self.current);
-                    self.switch_task()?;
-                }
-            }
-            self.slice -= 1;
+            self.slice = self.slice.saturating_sub(1);
 
             let frame = self.stack.last_mut().unwrap();
             let f = &module.funcs[frame.func];
@@ -240,20 +238,29 @@ impl<'m> Vm<'m> {
                 if self.blocked {
                     self.blocked = false;
                     self.switch_task()?;
+                } else if matches!(inst, Inst::Call { .. } | Inst::CallIndirect { .. }) {
+                    self.safepoint()?;
                 }
                 continue;
             }
 
+            let from = frame.block;
             match &block.term {
                 Terminator::Jump(b) => {
                     frame.block = b.0 as usize;
                     frame.ip = 0;
+                    if frame.block <= from {
+                        self.safepoint()?;
+                    }
                 }
                 Terminator::Branch { cond, then, els } => {
                     let c = self.bool(*cond)?;
                     let frame = self.stack.last_mut().unwrap();
                     frame.block = if c { then.0 } else { els.0 } as usize;
                     frame.ip = 0;
+                    if frame.block <= from {
+                        self.safepoint()?;
+                    }
                 }
                 Terminator::Unreachable => return Err(self.error("reached `unreachable`")),
                 Terminator::Ret(r) => {
@@ -272,6 +279,19 @@ impl<'m> Vm<'m> {
                 }
             }
         }
+    }
+
+    /// Gives way to the next ready task if the running one has used its time
+    /// slice. Called only at safepoints: calls and jumps back.
+    fn safepoint(&mut self) -> Result<(), VmError> {
+        if self.slice == 0 {
+            self.slice = TIME_SLICE;
+            if !self.ready.is_empty() {
+                self.ready.push_back(self.current);
+                self.switch_task()?;
+            }
+        }
+        Ok(())
     }
 
     /// Puts the running task aside and runs the next ready one.
@@ -460,56 +480,32 @@ impl<'m> Vm<'m> {
                 self.update(*dst, *src, r, *index as usize, v);
             }
             Inst::GetPath { dst, src, path } => {
-                let mut v = self.get(*src);
-                for step in path {
-                    let r = self.agg_of(v)?;
-                    let i = self.step_index(r, *step)?;
-                    v = self.heap.items(r)[i];
-                }
-                // Only the part read gets a second reference, not the ones on the way.
-                let v = self.share(v);
+                let v = self.get_in(self.get(*src), path)?;
                 self.set(*dst, v);
             }
             Inst::SetPath { dst, src, path, value } => {
                 let v = self.shared(*value);
-                // The objects along the path, outside in, and the index taken in each.
-                let mut objs = Vec::with_capacity(path.len());
-                let mut at = Vec::with_capacity(path.len());
-                let mut cur = self.get(*src);
-                for step in path {
-                    let r = self.agg_of(cur)?;
-                    let i = self.step_index(r, *step)?;
-                    objs.push(r);
-                    at.push(i);
-                    cur = self.heap.items(r)[i];
-                }
-                // An object may be updated in place if the result replaces the
-                // only reference to the root and no object on the way to it is
-                // shared. Deeper objects are copied once one is not.
-                let mut in_place = dst == src;
-                let places: Vec<bool> = objs
-                    .iter()
-                    .map(|r| {
-                        in_place = in_place && !self.heap.is_shared(*r);
-                        in_place
-                    })
-                    .collect();
-                // Rebuild inside out. Nothing is changed in place before every
-                // copy is made, so the old objects stay reachable from `src`.
-                let mut new = v;
-                for k in (0..objs.len()).rev() {
-                    if places[k] {
-                        self.heap.items_mut(objs[k])[at[k]] = new;
-                        new = Value::Agg(objs[k]);
-                    } else {
-                        let mut values = self.heap.items(objs[k]).to_vec();
-                        values[at[k]] = new;
-                        self.temp_roots.push(new);
-                        new = Value::Agg(self.alloc_agg(values));
-                    }
-                }
-                self.temp_roots.clear();
+                let new = self.set_in(self.get(*src), path, v, dst == src)?;
                 self.set(*dst, new);
+            }
+            // A cell is a one-element aggregate that is changed in place.
+            Inst::NewCell { dst, value } => {
+                let v = self.shared(*value);
+                let r = self.alloc_agg(vec![v]);
+                self.set(*dst, Value::Agg(r));
+            }
+            Inst::CellGet { dst, cell, path } => {
+                let c = self.agg_ref(*cell)?;
+                let v = self.get_in(self.heap.items(c)[0], path)?;
+                self.set(*dst, v);
+            }
+            Inst::CellSet { cell, path, value } => {
+                let c = self.agg_ref(*cell)?;
+                let v = self.shared(*value);
+                // The cell is the one reference to what it holds, which may be
+                // updated in place unless shared. The cell keeps everything rooted.
+                let new = if path.is_empty() { v } else { self.set_in(self.heap.items(c)[0], path, v, true)? };
+                self.heap.items_mut(c)[0] = new;
             }
             Inst::Array { dst, items } => {
                 let values = items.iter().map(|r| self.shared(*r)).collect();
@@ -845,6 +841,59 @@ impl<'m> Vm<'m> {
     fn shared(&mut self, r: Reg) -> Value {
         let v = self.get(r);
         self.share(v)
+    }
+
+    /// The part of `v` at `path`, which gets a second reference: the parts on
+    /// the way do not.
+    fn get_in(&mut self, mut v: Value, path: &[PathStep]) -> Result<Value, VmError> {
+        for step in path {
+            let r = self.agg_of(v)?;
+            let i = self.step_index(r, *step)?;
+            v = self.heap.items(r)[i];
+        }
+        Ok(self.share(v))
+    }
+
+    /// `root` with the part at `path` replaced by `v`. `in_place` says whether
+    /// the result replaces the only reference to `root`: then objects are
+    /// updated in place down to the first shared one, and copied from there.
+    /// `root` must be reachable from a root of the GC.
+    fn set_in(&mut self, root: Value, path: &[PathStep], v: Value, in_place: bool) -> Result<Value, VmError> {
+        // The objects along the path, outside in, and the index taken in each.
+        let mut objs = Vec::with_capacity(path.len());
+        let mut at = Vec::with_capacity(path.len());
+        let mut cur = root;
+        for step in path {
+            let r = self.agg_of(cur)?;
+            let i = self.step_index(r, *step)?;
+            objs.push(r);
+            at.push(i);
+            cur = self.heap.items(r)[i];
+        }
+        let mut in_place = in_place;
+        let places: Vec<bool> = objs
+            .iter()
+            .map(|r| {
+                in_place = in_place && !self.heap.is_shared(*r);
+                in_place
+            })
+            .collect();
+        // Rebuild inside out. Nothing is changed in place before every copy is
+        // made, so the old objects stay reachable from `root`.
+        let mut new = v;
+        for k in (0..objs.len()).rev() {
+            if places[k] {
+                self.heap.items_mut(objs[k])[at[k]] = new;
+                new = Value::Agg(objs[k]);
+            } else {
+                let mut values = self.heap.items(objs[k]).to_vec();
+                values[at[k]] = new;
+                self.temp_roots.push(new);
+                new = Value::Agg(self.alloc_agg(values));
+            }
+        }
+        self.temp_roots.clear();
+        Ok(new)
     }
 
     fn agg_of(&self, v: Value) -> Result<GcRef, VmError> {
@@ -1291,6 +1340,58 @@ fn main() {
         assert_eq!(out, "19907\n");
         let (r, _) = run_limited("fn main() { let c = chan(i64)\n select { recv(c) => {} } }", false);
         assert!(r.unwrap_err().msg.contains("deadlock"));
+    }
+
+    #[test]
+    fn cells_are_shared_and_updates_without_calls_are_atomic() {
+        // Four tasks add to one cell. Each `*total = *total + 1` has no call or
+        // loop inside, so no other task runs between its read and its write.
+        // `slow` makes the second counter's update span a call: then a channel
+        // with room for one value serves as a lock around it.
+        let src = "
+fn slow(x: i64) -> i64 {
+    let i = 0
+    while i < 3 {
+        i = i + 1
+    }
+    return x + 1
+}
+fn main() {
+    let total = cell(0)
+    let locked = cell(0)
+    let lock = chan(bool, 1)
+    let done = chan(bool)
+    let w = 0
+    while w < 4 {
+        go fn() {
+            let i = 0
+            while i < 500 {
+                *total = *total + 1
+                send(lock, true)
+                *locked = slow(*locked)
+                recv(lock)
+                i = i + 1
+            }
+            send(done, true)
+        }()
+        w = w + 1
+    }
+    let k = 0
+    while k < 4 {
+        recv(done)
+        k = k + 1
+    }
+    print(*total)
+    print(*locked)
+}";
+        let (r, out) = run_limited(src, false);
+        r.unwrap();
+        assert_eq!(out, "2000\n2000\n");
+        // Without the lock, updates spanning a call get lost.
+        let racy = src.replace("send(lock, true)", "").replace("recv(lock)", "");
+        let (r, out) = run_limited(&racy, false);
+        r.unwrap();
+        assert!(out.starts_with("2000\n") && out != "2000\n2000\n", "{out}");
     }
 
     #[test]

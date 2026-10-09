@@ -33,6 +33,7 @@ impl Env<'_> {
         let parts: Vec<Type> = match t {
             Type::Fn(..) => return Some(format!("function values ({t}) cannot be compared")),
             Type::Chan(_) => return Some(format!("channels ({t}) cannot be compared")),
+            Type::Cell(_) => return Some(format!("cells ({t}) cannot be compared; compare what they hold, `*a == *b`")),
             Type::Expr | Type::Stmts | Type::Items => return Some(format!("{t} values cannot be compared")),
             Type::Array(elem, _) | Type::Ref(elem) => vec![(**elem).clone()],
             Type::Struct(s) => self.struct_fields(Pos::default(), s).ok()?.iter().map(|(_, t)| t.clone()).collect(),

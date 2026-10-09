@@ -1,0 +1,65 @@
+// Shared mutable state with `cell`: a cell holds a value that everything
+// holding the cell sees change. Everything else in jihoo is a value.
+//   jihoo run examples/cells.jh
+
+struct Account {
+    owner: str
+    balance: i64
+    history: [i64; 4]
+}
+
+// Takes the cell, not a copy of the account: the change is seen outside.
+fn deposit(a: cell Account, amount: i64) {
+    a.balance = a.balance + amount
+    a.history[0] = amount
+}
+
+// A closure that keeps state between calls: the cell it captured.
+fn counter() -> fn() -> i64 {
+    let n = cell(0)
+    return fn() -> i64 {
+        *n = *n + 1
+        return *n
+    }
+}
+
+fn main() {
+    let acct = cell(Account { owner: "ada", balance: 0, history: [0; 4] })
+    deposit(acct, 50)
+    deposit(acct, 25)
+    print(acct.owner + " has " + to_str(acct.balance))     // ada has 75
+
+    let before = *acct                  // a copy of what it holds now
+    deposit(acct, 5)
+    print(before.balance)               // 75
+    print(acct.balance)                 // 80
+
+    let next = counter()
+    next()
+    next()
+    print(next())                       // 3
+
+    // Tasks share a cell. A task is only interrupted at a call or a loop's
+    // jump back, so `*hits = *hits + 1` is never interrupted between its read
+    // and its write.
+    let hits = cell(0)
+    let done = chan(bool)
+    let w = 0
+    while w < 8 {
+        go fn() {
+            let i = 0
+            while i < 1000 {
+                *hits = *hits + 1
+                i = i + 1
+            }
+            send(done, true)
+        }()
+        w = w + 1
+    }
+    let k = 0
+    while k < 8 {
+        recv(done)
+        k = k + 1
+    }
+    print(*hits)                        // 8000
+}

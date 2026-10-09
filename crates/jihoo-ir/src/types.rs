@@ -98,6 +98,9 @@ pub enum Type {
     Ref(Box<Type>),
     /// `chan T`: a channel carrying `T` values between tasks. Hosted only.
     Chan(Box<Type>),
+    /// `cell T`: a mutable `T` on the GC heap, shared by everything that holds
+    /// the cell. Hosted only.
+    Cell(Box<Type>),
     /// Pieces of code inside macros: an expression, statements, or items. They
     /// only exist while compiling; the VM represents them as source text.
     Expr,
@@ -148,7 +151,9 @@ impl Type {
             Type::Ptr(inner) => profile == Profile::Freestanding && inner.available_in(profile),
             Type::Array(elem, _) => elem.available_in(profile),
             Type::Fn(params, ret) => params.iter().chain([&**ret]).all(|t| t.available_in(profile)),
-            Type::Ref(inner) | Type::Chan(inner) => profile == Profile::Hosted && inner.available_in(profile),
+            Type::Ref(inner) | Type::Chan(inner) | Type::Cell(inner) => {
+                profile == Profile::Hosted && inner.available_in(profile)
+            }
             Type::Expr | Type::Stmts | Type::Items => false,
             Type::Unit | Type::Bool | Type::Int(_) | Type::Struct(_) | Type::Enum(_) => true,
         }
@@ -179,6 +184,7 @@ impl Type {
             }
             Type::Ref(t) => format!("ref {}", t.jir()),
             Type::Chan(t) => format!("chan {}", t.jir()),
+            Type::Cell(t) => format!("cell {}", t.jir()),
             other => other.to_string(),
         }
     }
@@ -197,6 +203,7 @@ impl fmt::Display for Type {
             Type::Array(elem, n) => write!(f, "[{elem}; {n}]"),
             Type::Ref(t) => write!(f, "ref {t}"),
             Type::Chan(t) => write!(f, "chan {t}"),
+            Type::Cell(t) => write!(f, "cell {t}"),
             Type::Fn(params, ret) => {
                 let params: Vec<String> = params.iter().map(Type::to_string).collect();
                 write!(f, "fn({})", params.join(", "))?;

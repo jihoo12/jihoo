@@ -39,8 +39,8 @@ fn _start() {
     let ok = 0
     if bswap(0x0102030405060708) == 0x0807060504030201 { ok = ok + 1 }
     if lea3(10, 4) == 21 { ok = ok + 1 }
-    let cell = 5
-    if swap_mem(&cell, 9) == 5 && cell == 9 { ok = ok + 1 }
+    let slot = 5
+    if swap_mem(&slot, 9) == 5 && slot == 9 { ok = ok + 1 }
     if add32(2000000000, 2000000000) == -294967296 { ok = ok + 1 } // wraps in 32 bits
     exit(ok)  // 4 when everything worked
 }

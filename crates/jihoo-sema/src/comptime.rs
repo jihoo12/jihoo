@@ -150,6 +150,9 @@ impl Env<'_> {
             (Value::Chan(_), _) => {
                 return Err(Error::new(pos, "a channel cannot be computed at compile time"));
             }
+            (_, Type::Cell(_)) => {
+                return Err(Error::new(pos, "a cell cannot be computed at compile time"));
+            }
             (Value::Agg(_), Type::Fn(..)) => {
                 return Err(Error::new(
                     pos,
