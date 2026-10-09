@@ -1,0 +1,106 @@
+{
+  "name": "jihoo",
+  "scopeName": "source.jihoo",
+  "fileTypes": ["jh"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#attributes" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#holes" },
+    { "include": "#declarations" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#macro-calls" },
+    { "include": "#calls" },
+    { "include": "#struct-names" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [{ "name": "comment.line.double-slash.jihoo", "match": "//.*$" }]
+    },
+    "attributes": {
+      "patterns": [{ "name": "meta.attribute.jihoo", "match": "#!\\[[^\\]]*\\]" }]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.jihoo",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [{ "name": "constant.character.escape.jihoo", "match": "\\\\[ntr0\\\\\"]" }]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.hex.jihoo", "match": "\\b0[xX][0-9a-fA-F_]+\\b" },
+        { "name": "constant.numeric.binary.jihoo", "match": "\\b0[bB][01_]+\\b" },
+        { "name": "constant.numeric.decimal.jihoo", "match": "\\b[0-9][0-9_]*\\b" }
+      ]
+    },
+    "holes": {
+      "patterns": [{ "name": "variable.other.hole.jihoo", "match": "\\$(?:[A-Za-z_][A-Za-z0-9_]*)?" }]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(fn|macro)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.function.jihoo" },
+            "2": { "name": "entity.name.function.jihoo" }
+          }
+        },
+        {
+          "match": "\\b(struct)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.struct.jihoo" },
+            "2": { "name": "entity.name.type.jihoo" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        { "name": "keyword.control.jihoo", "match": "\\b(if|else|while|return)\\b" },
+        { "name": "storage.type.jihoo", "match": "\\b(let|const|fn|macro|struct)\\b" },
+        { "name": "storage.modifier.jihoo", "match": "\\b(pub|comptime)\\b" },
+        { "name": "keyword.other.jihoo", "match": "\\b(import|as|quote|asm|items)\\b" }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.jihoo",
+          "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|bool|unit|str|type|expr|stmts)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [{ "name": "constant.language.boolean.jihoo", "match": "\\b(true|false)\\b" }]
+    },
+    "macro-calls": {
+      "patterns": [{ "name": "entity.name.function.macro.jihoo", "match": "\\b[A-Za-z_][A-Za-z0-9_]*!(?=\\()" }]
+    },
+    "calls": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.jihoo",
+          "match": "\\b(print|syscall|len|size_of|align_of|stringify|to_str|unique|ident)(?=\\()"
+        },
+        { "name": "entity.name.function.call.jihoo", "match": "\\b[a-z_][A-Za-z0-9_]*(?=\\()" }
+      ]
+    },
+    "struct-names": {
+      "patterns": [{ "name": "entity.name.type.jihoo", "match": "\\b[A-Z][A-Za-z0-9_]*\\b" }]
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.arrow.jihoo", "match": "->" },
+        { "name": "keyword.operator.jihoo", "match": "==|!=|<=|>=|<<|>>|&&|\\|\\||[-+*/%<>=!&|^]" }
+      ]
+    }
+  }
+}

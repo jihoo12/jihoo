@@ -1,0 +1,64 @@
+---
+title: jihoo
+description: An easy programming language with a garbage-collected VM, freestanding LLVM builds, compile-time evaluation and macros.
+template: splash
+hero:
+  tagline: An easy language that goes all the way down. Run everyday code on a garbage-collected VM, or switch the GC off and compile to a tiny static binary that talks to the kernel itself.
+  actions:
+    - text: Get started
+      link: start/getting-started/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/jihoo12/jihoo
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+```jihoo title="hello.jh"
+fn greet(name: str) -> str {
+    return "Hello, " + name + "!"
+}
+
+fn main() {
+    print(greet("jihoo"))
+}
+```
+
+```jihoo title="tiny.jh — no libc, no GC: a 2 KB static binary"
+#![freestanding]
+
+fn _start() -> i64 {
+    syscall(1, 1, "hi\n", 3)   // write(1, "hi\n", 3)
+    return 0                   // exit(0)
+}
+```
+
+<CardGrid>
+  <Card title="Two profiles, one IR" icon="seti:pipeline">
+    Hosted programs run on a VM with a garbage collector. `#![freestanding]`
+    programs have no GC and no libc and are compiled by LLVM. Both share one typed
+    IR, and the test suite checks that they agree.
+  </Card>
+  <Card title="Compile-time everything" icon="rocket">
+    `const`, `comptime` and array lengths run ordinary functions on the VM while
+    compiling, even for freestanding programs, and bake the results in.
+  </Card>
+  <Card title="Macros are just functions" icon="puzzle">
+    A macro is a function that runs at compile time and returns code: an
+    expression, statements, or whole functions and types.
+  </Card>
+  <Card title="Generics and modules" icon="seti:folder">
+    `comptime T: type` parameters, generic structs like `Vec(T)`, and modules with
+    `import` and `pub`, including a small standard library.
+  </Card>
+  <Card title="Down to the metal" icon="setting">
+    Raw pointers, arrays, inline asm and `syscall` for freestanding code, with an
+    arena allocator and `Vec(T)` written in jihoo itself.
+  </Card>
+  <Card title="Built with Nix" icon="seti:nix">
+    `nix run github:jihoo12/jihoo` gives you the whole toolchain: the VM, the LLVM
+    backend, the linker and the standard library.
+  </Card>
+</CardGrid>

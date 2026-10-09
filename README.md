@@ -6,8 +6,10 @@ An easy programming language with two faces:
 - **freestanding**: no GC, no std, raw syscalls. Compiled through LLVM into tiny
   static binaries.
 
-Both share one intermediate representation, JIR. See [docs/design.md](docs/design.md)
-for the architecture and [docs/jir.md](docs/jir.md) for the IR format.
+Both share one intermediate representation, JIR. Documentation lives at
+**<https://jihoo12.github.io/jihoo/>** (built from [docs/](docs) and
+[examples/](examples)); see [docs/design.md](docs/design.md) for the language and
+architecture and [docs/jir.md](docs/jir.md) for the IR format.
 
 ```jihoo
 fn greet(name: str) -> str {
@@ -27,6 +29,21 @@ fn _start() -> i64 {
     return 0                 // exit(0)
 }
 ```
+
+## Install
+
+The whole toolchain (VM, LLVM backend, linker, standard library) is a Nix flake:
+
+```sh
+nix run github:jihoo12/jihoo -- run hello.jh       # try it
+nix profile install github:jihoo12/jihoo           # install `jihoo`
+```
+
+Flake outputs: `packages.<system>.default` (the toolchain, also `jihoo`),
+`jihoo-frontend` (VM only), `jihoo-llc`, `overlays.default`, `apps.default`, and
+`checks` (`nix flake check` builds and runs examples with the packaged toolchain).
+Building the frontend runs the test suite, including the VM-vs-native
+differential tests.
 
 ## Getting started
 
@@ -69,6 +86,7 @@ nix build
 | `crates/jihoo-cli`     | Rust     | the `jihoo` command |
 | `backend-llvm`         | C++      | `jihoo-llc`: JIR text → LLVM → object file |
 | `lib`                  | jihoo    | the standard library (`import alloc`, `import io`) |
+| `site`                 | Astro    | the website ([site/README.md](site/README.md)) |
 | `tests/diff`           | jihoo    | programs that must behave the same on the VM and natively |
 
 ## Status

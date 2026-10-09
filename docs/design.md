@@ -106,33 +106,6 @@ fn sum(list: *Node) -> i64 {
 - Assignment targets are *places*: variables, fields, `*p` and `p[i]`
   (`crates/jihoo-sema/src/place.rs`).
 
-## Inline assembly
-
-```jihoo
-#![freestanding]
-fn write(fd: i64, buf: *u8, len: i64) -> i64 {
-    return asm("syscall",
-        out("rax") i64,
-        in("rax") 1, in("rdi") fd, in("rsi") buf, in("rdx") len,
-        clobber("rcx", "r11", "memory"))
-}
-fn bswap(x: u64) -> u64 {
-    return asm("mov {out}, {0}", "bswap {out}", out(reg) u64, in(reg) x)
-}
-```
-
-- `asm(...)` is an expression of the `out` type, or `unit` without one. Template
-  lines are joined with newlines; `{0}`, `{1}`, ... are the inputs and `{out}` the
-  output. On x86_64 the syntax is Intel.
-- Operands: `out("rax") T` / `in("rdi") x` use that register, `reg` lets the
-  compiler choose, and `in(out) x` starts the output register with `x` (for
-  instructions such as `xchg` or `inc` that update a register in place).
-  `clobber(...)` lists registers and `"memory"`; the flags are always clobbered.
-- Freestanding only. Like `syscall`, asm cannot run at compile time.
-
-The `syscall` builtin stays as a portable shortcut (x86_64 and aarch64) for the
-most common use of asm.
-
 ## Arrays
 
 ```jihoo
@@ -197,20 +170,6 @@ fn _start() -> i64 {
 
 The standard library so far: `alloc` (an arena over `mmap` and `Vec(T)`) and `io`
 (`puts`, `print_int`, `write`, `exit`), both freestanding and x86_64 Linux only.
-
-## Testing
-
-- Unit tests in each crate (`cargo test`).
-- Differential tests (`tests/diff/`): each program runs on the VM and as a native
-  binary, and both must exit with the same status. This keeps the two backends
-  honest about the semantics of JIR.
-
-## Why the IR is a text file
-
-The frontend (Rust) and the LLVM backend (C++) only talk through `.jir` files
-(`docs/jir.md`). This keeps the IR an explicit, versioned contract, lets the backend
-be developed and tested on its own with hand-written `.jir`, and keeps the Rust build
-free of LLVM.
 
 ## Compile-time evaluation
 
@@ -387,12 +346,52 @@ fn main() {
   the module that called the macro. Produced code may call item macros, so this
   repeats, up to 16 rounds.
 
+## Inline assembly
+
+```jihoo
+#![freestanding]
+fn write(fd: i64, buf: *u8, len: i64) -> i64 {
+    return asm("syscall",
+        out("rax") i64,
+        in("rax") 1, in("rdi") fd, in("rsi") buf, in("rdx") len,
+        clobber("rcx", "r11", "memory"))
+}
+fn bswap(x: u64) -> u64 {
+    return asm("mov {out}, {0}", "bswap {out}", out(reg) u64, in(reg) x)
+}
+```
+
+- `asm(...)` is an expression of the `out` type, or `unit` without one. Template
+  lines are joined with newlines; `{0}`, `{1}`, ... are the inputs and `{out}` the
+  output. On x86_64 the syntax is Intel.
+- Operands: `out("rax") T` / `in("rdi") x` use that register, `reg` lets the
+  compiler choose, and `in(out) x` starts the output register with `x` (for
+  instructions such as `xchg` or `inc` that update a register in place).
+  `clobber(...)` lists registers and `"memory"`; the flags are always clobbered.
+- Freestanding only. Like `syscall`, asm cannot run at compile time.
+
+The `syscall` builtin stays as a portable shortcut (x86_64 and aarch64) for the
+most common use of asm.
 
 ## GC
 
 `crates/jihoo-vm/src/gc.rs` is a stop-the-world mark & sweep heap. The roots are the
 registers of every VM frame; a collection may happen at any allocation once the heap
 grows past twice the size that survived the last collection (1 MiB minimum).
+
+## Why the IR is a text file
+
+The frontend (Rust) and the LLVM backend (C++) only talk through `.jir` files
+(`docs/jir.md`). This keeps the IR an explicit, versioned contract, lets the backend
+be developed and tested on its own with hand-written `.jir`, and keeps the Rust build
+free of LLVM.
+
+## Testing
+
+- Unit tests in each crate (`cargo test`).
+- Differential tests (`tests/diff/`): each program runs on the VM and as a native
+  binary, and both must exit with the same status. This keeps the two backends
+  honest about the semantics of JIR.
 
 ## Roadmap
 

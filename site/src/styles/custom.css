@@ -1,0 +1,11 @@
+/* jihoo's accent: a deep teal, light and dark. */
+:root {
+  --sl-color-accent-low: #0b2e2d;
+  --sl-color-accent: #14857f;
+  --sl-color-accent-high: #a6e8e1;
+}
+:root[data-theme='light'] {
+  --sl-color-accent-low: #c9f0eb;
+  --sl-color-accent: #0f6f6a;
+  --sl-color-accent-high: #083d3a;
+}
