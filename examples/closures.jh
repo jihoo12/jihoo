@@ -1,0 +1,67 @@
+// Anonymous functions and closures. A closure copies the variables it uses when
+// it is made; types can be left out where the expected function type gives them.
+//   jihoo run examples/closures.jh
+
+enum List {
+    Cons(i64, ref List)
+    Nil
+}
+
+fn map(l: List, f: fn(i64) -> i64) -> List {
+    match l {
+        Cons(x, rest) => return List.Cons(f(x), ref map(*rest, f))
+        Nil => return List.Nil
+    }
+}
+
+fn filter(l: List, keep: fn(i64) -> bool) -> List {
+    match l {
+        Cons(x, rest) => {
+            if keep(x) {
+                return List.Cons(x, ref filter(*rest, keep))
+            }
+            return filter(*rest, keep)
+        }
+        Nil => return List.Nil
+    }
+}
+
+fn fold(l: List, acc: i64, f: fn(i64, i64) -> i64) -> i64 {
+    match l {
+        Cons(x, rest) => return fold(*rest, f(acc, x), f)
+        Nil => return acc
+    }
+}
+
+fn range(lo: i64, hi: i64) -> List {
+    if lo >= hi {
+        return List.Nil
+    }
+    return List.Cons(lo, ref range(lo + 1, hi))
+}
+
+// Returns a closure: `n` lives on inside it.
+fn adder(n: i64) -> fn(i64) -> i64 {
+    return fn(x) { return x + n }
+}
+
+fn compose(f: fn(i64) -> i64, g: fn(i64) -> i64) -> fn(i64) -> i64 {
+    return fn(x) { return g(f(x)) }
+}
+
+fn main() {
+    let xs = range(1, 11)
+    let limit = 5
+    let small = filter(xs, fn(x) { return x <= limit })
+    print(fold(map(small, fn(x) { return x * x }), 0, fn(a, b) { return a + b }))  // 55
+
+    let add10 = adder(10)
+    let inc_then_double = compose(adder(1), fn(x) { return x * 2 })
+    print(add10(5))               // 15
+    print(inc_then_double(5))     // 12
+
+    // Captured by value: changing `limit` later does not change `small_enough`.
+    let small_enough = fn(x: i64) -> bool { return x <= limit }
+    limit = 100
+    print(small_enough(50))       // false
+}

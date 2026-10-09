@@ -176,6 +176,7 @@ The result type is what the destination register must be declared as.
 | `%d = call @f(%a, ...)`         | parameter types of `@f` | return type of `@f` | call |
 | `%d = funcref @f`               |                       | `fn(P...) -> R` of `@f` | function `@f` as a value |
 | `%d = call %f(%a, ...)`         | `%f: fn(P...) -> R`, then `P...` | `R` | call a function value |
+| `%d = closure @f(%c, ...)`      | the first parameter types of `@f` | `fn(P...) -> R`, the rest of `@f`'s signature | hosted only: a function value that calls `@f` with `%c, ...` before its own arguments |
 
 `cast` allows: int → int (truncate, or sign-/zero-extend by the *source* type),
 `bool` → int (0/1), `*T` → `*U`, `*T` ↔ `i64`/`u64`, and any type to itself.
@@ -269,6 +270,11 @@ A function value is an index into the module's functions on the VM and a code
 pointer natively (8 bytes, aligned to 8). There is no null function value, and
 function values have no equality. A call through a function value uses the same
 calling convention as a direct call, including the aggregate rules below.
+
+A closure (hosted only) is a function value too: on the VM, a GC object holding
+the function and the captured values, which a call passes as the first
+arguments. The frontend names the functions it lifts out of anonymous functions
+`@fn.N`; `fn` is a keyword, so these never clash with user names.
 
 ## Native ABI
 

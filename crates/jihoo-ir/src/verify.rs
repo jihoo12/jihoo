@@ -208,6 +208,22 @@ impl Cx<'_> {
                             .ok_or_else(|| format!("funcref to unknown function @{func}"))?;
                         expect(dst, &Type::Fn(callee.params.clone(), Box::new(callee.ret.clone())))
                     }
+                    Inst::Closure { dst, func, captures } => {
+                        if profile != Profile::Hosted {
+                            return Err(at("closures that capture values need the GC; hosted only".into()));
+                        }
+                        let callee = self
+                            .funcs
+                            .get(func.as_str())
+                            .ok_or_else(|| format!("closure of unknown function @{func}"))?;
+                        if callee.params.len() < captures.len() {
+                            Err(format!("@{func} takes {} arguments, {} captured", callee.params.len(), captures.len()))
+                        } else {
+                            let (caps, rest) = callee.params.split_at(captures.len());
+                            captures.iter().zip(caps).try_for_each(|(r, t)| expect(r, t))?;
+                            expect(dst, &Type::Fn(rest.to_vec(), Box::new(callee.ret.clone())))
+                        }
+                    }
                     Inst::CallIndirect { dst, callee, args } => {
                         let Type::Fn(params, ret) = ty(callee)? else {
                             return Err(at(format!("{callee} is not a function")));

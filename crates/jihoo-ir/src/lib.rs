@@ -196,6 +196,10 @@ pub enum Inst {
     FuncRef { dst: Reg, func: String },
     /// Calls the function value in `callee`.
     CallIndirect { dst: Reg, callee: Reg, args: Vec<Reg> },
+    /// Hosted only: a closure, the function value that calls `func` with
+    /// `captures` followed by its own arguments. `func`'s leading parameters
+    /// take the captured values.
+    Closure { dst: Reg, func: String, captures: Vec<Reg> },
     /// Builds a struct value from all of its fields, in declaration order.
     Struct { dst: Reg, name: String, fields: Vec<Reg> },
     /// Reads field `index` of a struct value.
@@ -288,6 +292,56 @@ impl Terminator {
             Terminator::Jump(b) => vec![b],
             Terminator::Branch { then, els, .. } => vec![then, els],
             Terminator::Ret(_) | Terminator::Unreachable => vec![],
+        }
+    }
+
+    /// Every register the terminator reads.
+    pub fn regs_mut(&mut self) -> Vec<&mut Reg> {
+        match self {
+            Terminator::Branch { cond, .. } => vec![cond],
+            Terminator::Ret(r) => vec![r],
+            Terminator::Jump(_) | Terminator::Unreachable => vec![],
+        }
+    }
+}
+
+impl Inst {
+    /// Every register the instruction reads or writes, for passes that renumber
+    /// registers.
+    pub fn regs_mut(&mut self) -> Vec<&mut Reg> {
+        use Inst::*;
+        match self {
+            Const { dst, .. } | Unit { dst } | Str { dst, .. } | FuncRef { dst, .. } => vec![dst],
+            Copy { dst, src }
+            | Unary { dst, src, .. }
+            | Cast { dst, src }
+            | Field { dst, src, .. }
+            | Tag { dst, src }
+            | Payload { dst, src, .. }
+            | Ref { dst, src }
+            | Deref { dst, src }
+            | ToStr { dst, src }
+            | Addr { dst, src }
+            | Unique { dst, prefix: src }
+            | Load { dst, ptr: src }
+            | FieldPtr { dst, ptr: src, .. }
+            | Splat { dst, value: src } => vec![dst, src],
+            Binary { dst, lhs, rhs, .. }
+            | Elem { dst, src: lhs, index: rhs }
+            | SetField { dst, src: lhs, value: rhs, .. }
+            | ElemPtr { dst, ptr: lhs, index: rhs } => vec![dst, lhs, rhs],
+            SetElem { dst, src, index, value } => vec![dst, src, index, value],
+            Store { ptr, value } => vec![ptr, value],
+            Print { src } => vec![src],
+            Call { dst, args, .. }
+            | Struct { dst, fields: args, .. }
+            | Variant { dst, fields: args, .. }
+            | Array { dst, items: args }
+            | Syscall { dst, args }
+            | Asm { dst, args, .. }
+            | Quote { dst, holes: args, .. }
+            | Closure { dst, captures: args, .. } => std::iter::once(dst).chain(args).collect(),
+            CallIndirect { dst, callee, args } => [dst, callee].into_iter().chain(args).collect(),
         }
     }
 }

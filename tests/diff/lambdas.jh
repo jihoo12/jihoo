@@ -1,0 +1,44 @@
+// Anonymous functions that capture nothing are plain function values, so they
+// work natively too: passed, stored, returned, and with inferred types.
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+fn apply_all(xs: [i64; 4], f: fn(i64) -> i64) -> i64 {
+    let total = 0
+    let i = 0
+    while i < len(xs) {
+        total = total + f(xs[i])
+        i = i + 1
+    }
+    return total
+}
+
+fn pick(n: i64) -> fn(Point) -> Point {
+    if n == 0 {
+        return fn(p) { return Point { x: p.y, y: p.x } }
+    }
+    return fn(p: Point) -> Point {
+        p.x = p.x * 10    // parameters are ordinary locals
+        return p
+    }
+}
+
+fn twice(comptime f: fn(u8) -> u8, x: u8) -> u8 { return f(f(x)) }
+
+fn entry() -> i64 {
+    let xs = [1, 2, 3, 4]
+    let total = apply_all(xs, fn(x) { return x * x })                  // 30
+    total = total + apply_all(xs, fn(x: i64) -> i64 {
+        if x % 2 == 0 { return x }
+        return 0
+    })                                                                 // + 6
+    let swapped = pick(0)(Point { x: 1, y: 2 })
+    let scaled = pick(1)(Point { x: 3, y: 4 })
+    total = total + swapped.x * 100 + scaled.x                         // + 200 + 30
+    let ops = [fn(a: i64, b: i64) -> i64 { return a - b }, fn(a: i64, b: i64) -> i64 { return a * b }]
+    total = total + ops[0](10, 3) + ops[1](10, 3)                      // + 37
+    return total + (twice(fn(x) { return x + 100 }, 1) as i64)         // + 201
+}

@@ -89,6 +89,7 @@ impl Display for Inst {
             Inst::Cast { dst, src } => write!(f, "{dst} = cast {src}"),
             Inst::Call { dst, func, args } => write!(f, "{dst} = call @{func}({})", list(args)),
             Inst::FuncRef { dst, func } => write!(f, "{dst} = funcref @{func}"),
+            Inst::Closure { dst, func, captures } => write!(f, "{dst} = closure @{func}({})", list(captures)),
             Inst::CallIndirect { dst, callee, args } => write!(f, "{dst} = call {callee}({})", list(args)),
             Inst::Struct { dst, name, fields } => {
                 write!(f, "{dst} = struct ${}({})", types::struct_name_jir(name), list(fields))

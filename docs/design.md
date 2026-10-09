@@ -295,8 +295,38 @@ pick(1)(2, 3)                    // a function returning a function
 - Function values cannot be compared with `==`. They are code pointers today,
   but closures will be function values too, and there is no good answer to
   whether two closures are equal.
-- No closures yet: a function value cannot capture local variables. That is
-  the next step; see the roadmap.
+- Anonymous functions and closures are function values too; see below.
+
+## Closures
+
+```jihoo
+fn adder(n: i64) -> fn(i64) -> i64 {
+    return fn(x) { return x + n }        // captures `n`
+}
+
+let limit = 5
+let small = filter(xs, fn(x) { return x <= limit })
+let sq = fn(x: i64) -> i64 { return x * x }
+```
+
+- `fn(params) -> R { body }` is an anonymous function. Parameter and return
+  types may be left out when the expected type is a function type (an argument,
+  a typed `let`, a return value); otherwise they are written out, and a missing
+  `-> R` means unit.
+- It may use the local variables around it. They are captured by value, when
+  the closure is made: changing the variable later does not change the closure,
+  and assigning to a captured variable inside the closure is an error (the
+  change would be lost between calls). This is the same value semantics as
+  everywhere else, and it means closures share no mutable state.
+- A closure has the same type as any other function value, `fn(A) -> R`, so
+  functions that take functions take closures too. Like other function values,
+  closures cannot be compared.
+- The body becomes a function of its own, `fn.N` in JIR, whose first parameters
+  are the captured values (`crates/jihoo-sema/src/closures.rs`). One that
+  captures nothing is a plain `funcref`, which works everywhere, including
+  freestanding code and compile-time constants. One that captures is
+  `closure @fn.N(%captured...)`: a GC object on the VM, so hosted only.
+- A closure cannot call itself by name (it has none); use a named function.
 
 ## Enums and `match`
 
@@ -540,8 +570,7 @@ free of LLVM.
    function values.~~
 7. ~~Sum types and `match`; `ref T` for recursive data.~~ Nested patterns and
    `match` expressions.
-8. Closures, lowered in the frontend to a function plus a struct of captured
-   values (captured by value, like every other value in jihoo).
+8. ~~Closures, captured by value and lifted into functions.~~
 9. Goroutine-like tasks and channels on the VM: one OS thread, a deterministic
    scheduler, the stacks of all tasks as GC roots. Freestanding code gets
    coroutines as a library on top of function values and `asm`.

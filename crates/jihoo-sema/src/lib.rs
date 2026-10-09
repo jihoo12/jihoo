@@ -13,6 +13,7 @@
 //! remaining items are still checked.
 
 mod asm;
+mod closures;
 mod comptime;
 mod enums;
 mod env;
@@ -20,7 +21,7 @@ mod generic;
 mod macros;
 mod place;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use jihoo_ir as ir;
@@ -161,6 +162,7 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
             Err(e) => errors.push(e),
         }
     }
+    funcs.extend(env.lambdas());
 
     for t in env.struct_instances() {
         define(t, Pos::new(1, 1), &mut errors);
@@ -269,6 +271,9 @@ struct FnCx<'a> {
     cur: BlockId,
     regs: Vec<Type>,
     scopes: Vec<HashMap<String, Reg>>,
+    /// Registers holding captured values, in a closure body: they cannot be
+    /// assigned.
+    captured: HashSet<Reg>,
 }
 
 /// An integer literal, possibly negated: its type comes from context.
@@ -295,6 +300,7 @@ impl<'a> FnCx<'a> {
             cur: BlockId(0),
             regs: Vec::new(),
             scopes: vec![HashMap::new()],
+            captured: HashSet::new(),
         }
     }
 
@@ -736,6 +742,7 @@ impl<'a> FnCx<'a> {
                 let callee = self.expr(f, None)?;
                 self.call_value(e.pos, callee, "this function", args)?
             }
+            ExprKind::Lambda(l) => self.lambda(e.pos, l, expected)?,
             ExprKind::FnType(t) => {
                 return Err(Error::new(t.pos, "`fn(...)` is a type, not a value"));
             }

@@ -147,6 +147,12 @@ impl Env<'_> {
                 ConstValue::Agg(items.collect::<Result<_, _>>()?)
             }
             (Value::Func(i), Type::Fn(..)) => ConstValue::Func(vm.func_name(i).to_string()),
+            (Value::Agg(_), Type::Fn(..)) => {
+                return Err(Error::new(
+                    pos,
+                    "a closure that captures values cannot be computed at compile time; only functions can",
+                ))
+            }
             // A ref becomes a one-element aggregate; sharing is not kept, which
             // cannot be observed since refs are immutable.
             (Value::Agg(r), Type::Ref(inner)) => {
@@ -178,7 +184,7 @@ fn callees(f: &jihoo_ir::Function) -> Vec<String> {
     let mut out = Vec::new();
     for b in &f.blocks {
         for inst in &b.insts {
-            if let Inst::Call { func, .. } | Inst::FuncRef { func, .. } = inst {
+            if let Inst::Call { func, .. } | Inst::FuncRef { func, .. } | Inst::Closure { func, .. } = inst {
                 out.push(func.clone());
             }
         }

@@ -213,6 +213,9 @@ pub enum ExprKind {
     /// A function type where an expression is expected: a type argument, as in
     /// `Vec(fn(i64) -> i64)`.
     FnType(TypeExpr),
+    /// `fn(x: i64, y) -> R { ... }`: an anonymous function, which may capture
+    /// local variables.
+    Lambda(Box<Lambda>),
     /// `Point { x: 1, y: 2 }` or `Pair(i64) { a: 1, b: 2 }`
     StructLit(TypeExpr, Vec<FieldInit>),
     /// `base.field`
@@ -248,6 +251,15 @@ pub enum ExprKind {
     SizeOf(TypeExpr),
     /// `align_of(T)`
     AlignOf(TypeExpr),
+}
+
+/// An anonymous function. Parameter and return types may be left out when the
+/// expected function type gives them.
+#[derive(Debug, Clone)]
+pub struct Lambda {
+    pub params: Vec<(Pos, String, Option<TypeExpr>)>,
+    pub ret: Option<TypeExpr>,
+    pub body: Block,
 }
 
 /// What kind of code a quote, or a macro, produces.
@@ -359,6 +371,18 @@ pub fn set_pos(e: &mut Expr, pos: Pos) {
             args.iter_mut().for_each(|a| set_pos(a, pos));
         }
         ExprKind::FnType(t) => ty(t),
+        ExprKind::Lambda(l) => {
+            for (p, _, t) in &mut l.params {
+                *p = pos;
+                if let Some(t) = t {
+                    ty(t);
+                }
+            }
+            if let Some(t) = &mut l.ret {
+                ty(t);
+            }
+            set_block_pos(&mut l.body, pos);
+        }
         ExprKind::Quote(_, _, holes) => holes.iter_mut().for_each(|(_, a)| set_pos(a, pos)),
         ExprKind::MacroCall(_, args) => args.iter_mut().for_each(|a| set_pos(&mut a.expr, pos)),
         ExprKind::StructLit(t, fields) => {

@@ -555,6 +555,45 @@ fn refs() {
     assert!(err("fn main() { let x = 1\n let r = ref x\n print(r + 1) }").contains("cannot apply `+` to ref i64 and i64"));
 }
 
+// ---- closures ----
+
+#[test]
+fn closures() {
+    let m = check(
+        "fn apply(f: fn(i64) -> i64, x: i64) -> i64 { return f(x) }\n\
+         fn main() {\n let k = 2\n let unused = \"x\"\n let f = fn(x: i64) -> i64 { return x * k }\n k = 3\n print(apply(f, 5) + apply(fn(x) { return x }, 1)) }",
+    )
+    .unwrap();
+    let text = m.to_string();
+    // Only `k` is captured; `unused` and `f` are not.
+    assert!(text.contains("fn @fn.0(i64, i64) -> i64"), "{text}");
+    let closure = text.lines().find(|l| l.contains("= closure @fn.0(")).expect("a closure");
+    assert!(!closure.contains(','), "{closure}");
+    // Capturing nothing makes a plain function value.
+    assert!(text.contains("= funcref @fn.1"), "{text}");
+
+    let e = err("fn main() { let k = 1\n let f = fn() { k = 2 } }");
+    assert!(e.contains("cannot assign to a captured variable"), "{e}");
+    assert!(err("fn main() { let f = fn(x) { return x } }").contains("cannot infer the type of parameter `x`; write `x: T`"));
+    assert!(err("fn main() { let f = fn(x: i64, x: i64) {} }").contains("duplicate parameter `x`"));
+    let e = err("fn g(f: fn(i64) -> i64) {}\nfn main() { g(fn(x) { print(x) }) }");
+    assert!(e.contains("missing `return`"), "{e}");
+    let e = err(&fs("fn f(k: i64) -> i64 { let g = fn(x: i64) -> i64 { return x + k }\n return g(1) }"));
+    assert!(e.contains("captures `k`") && e.contains("only available in hosted mode"), "{e}");
+    let e = err("fn adder(n: i64) -> fn(i64) -> i64 { return fn(x) { return x + n } }\nconst A = adder(1)\nfn main() {}");
+    assert!(e.contains("closure that captures values cannot be computed at compile time"), "{e}");
+    assert!(err("fn main() { let f = fn(x: i64) }").contains("expected the body of the anonymous function"));
+    assert!(err("fn main() { let f = fn(*u8) {} }").contains("needs a name"));
+}
+
+#[test]
+fn closures_in_freestanding_code() {
+    // Capturing nothing is fine without a GC, and works at compile time too.
+    let m = check(&fs("const SQ = fn(x: i64) -> i64 { return x * x }\nfn f() -> i64 { let g = fn(x: i64) -> i64 { return x + 1 }\n return g(SQ(3)) }")).unwrap();
+    // `SQ` is a constant, so calling it is a direct call.
+    assert!(m.to_string().contains("call @fn.0(") && m.to_string().contains("funcref @fn.1"), "{m}");
+}
+
 // ---- inline asm ----
 
 #[test]

@@ -95,6 +95,11 @@ pub(crate) struct Env<'p> {
     funcs: Memo<Rc<ir::Function>>,
     /// Numbers the helper functions made for `comptime` expressions.
     pub comptime_ids: Cell<u32>,
+    /// Numbers the functions made from anonymous functions (`fn.N`).
+    pub lambda_ids: Cell<u32>,
+    /// Those functions, and whether each is part of the program (the ones made
+    /// inside macros only exist while compiling).
+    lambdas: RefCell<Vec<(Rc<ir::Function>, bool)>>,
     /// The next number `unique` hands out, across every compile-time run.
     pub uniques: Cell<u64>,
     /// Generic instances by key, their keys by name, and the ones not compiled yet.
@@ -133,6 +138,8 @@ impl<'p> Env<'p> {
             consts: Memo::new(),
             funcs: Memo::new(),
             comptime_ids: Cell::new(0),
+            lambda_ids: Cell::new(0),
+            lambdas: RefCell::new(Vec::new()),
             uniques: Cell::new(0),
             instances: RefCell::new(HashMap::new()),
             struct_keys: RefCell::new(HashMap::new()),
@@ -637,8 +644,21 @@ impl<'p> Env<'p> {
         self.funcs.in_progress(name)
     }
 
-    /// The JIR of function `name` (a plain function or an instance), which must exist.
+    pub fn add_lambda(&self, f: ir::Function, in_program: bool) {
+        self.lambdas.borrow_mut().push((Rc::new(f), in_program));
+    }
+
+    /// The functions made from anonymous functions that are part of the program.
+    pub fn lambdas(&self) -> Vec<ir::Function> {
+        self.lambdas.borrow().iter().filter(|(_, keep)| *keep).map(|(f, _)| (**f).clone()).collect()
+    }
+
+    /// The JIR of function `name` (a plain function, an instance, or a lifted
+    /// anonymous function), which must exist.
     pub fn function(&self, name: &str) -> Result<Rc<ir::Function>, Error> {
+        if let Some((f, _)) = self.lambdas.borrow().iter().find(|(f, _)| f.name == name) {
+            return Ok(f.clone());
+        }
         let instance = self.instance_keys.borrow().get(name).map(|key| {
             let inst = &self.instances.borrow()[key];
             (inst.fn_name.clone(), inst.bindings.clone(), inst.sig.clone())

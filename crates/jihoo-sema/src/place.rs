@@ -17,6 +17,9 @@ use crate::FnCx;
 
 const BEHIND_REF: &str = "a value behind a `ref` (refs are immutable; build a new value and a new ref instead)";
 
+const CAPTURED: &str =
+    "a captured variable (a closure keeps its own copy, taken when it was made; pass the value as an argument or return it instead)";
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Step {
     Field(u32),
@@ -83,7 +86,8 @@ impl FnCx<'_> {
         match &e.kind {
             ExprKind::Var(name) if self.local(name).is_some() => {
                 let root = self.lookup(e.pos, name)?;
-                Ok(Place::Reg { root, path: vec![], ty: self.ty(root).clone(), readonly: None })
+                let readonly = self.captured.contains(&root).then_some(CAPTURED);
+                Ok(Place::Reg { root, path: vec![], ty: self.ty(root).clone(), readonly })
             }
             // `alias.CONST`: a constant of an imported module.
             ExprKind::Field(base, item)

@@ -740,7 +740,7 @@ impl Parser {
                 self.bump();
                 ExprKind::Asm(Box::new(self.asm_args()?))
             }
-            Tok::Fn => ExprKind::FnType(self.type_expr()?),
+            Tok::Fn => return self.fn_expr(),
             Tok::Quote => {
                 self.bump();
                 self.quote()?
@@ -759,6 +759,56 @@ impl Parser {
 }
 
 impl Parser {
+    /// `fn(...)` in an expression: an anonymous function if a body follows on the
+    /// same line, else a function type (a type argument).
+    fn fn_expr(&mut self) -> PResult<Expr> {
+        let pos = self.expect(&Tok::Fn, "`fn`")?.pos;
+        self.expect(&Tok::LParen, "`(`")?;
+        // Each parameter is `name: T`, or just `T` (a type, or a lambda
+        // parameter's name whose type comes from context).
+        let mut params: Vec<(Pos, Option<String>, TypeExpr)> = Vec::new();
+        while *self.peek() != Tok::RParen {
+            let ppos = self.pos();
+            let named = matches!(self.peek(), Tok::Ident(_)) && self.toks[self.i + 1].tok == Tok::Colon;
+            let name = if named {
+                let (_, n) = self.ident("a parameter name")?;
+                self.bump(); // `:`
+                Some(n)
+            } else {
+                None
+            };
+            params.push((ppos, name, self.type_expr()?));
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(&Tok::RParen, "`,` or `)`")?;
+        let ret = if self.same_line(&Tok::Arrow) {
+            self.bump();
+            Some(self.type_expr()?)
+        } else {
+            None
+        };
+        if !self.same_line(&Tok::LBrace) {
+            if let Some((p, _, _)) = params.iter().find(|(_, n, _)| n.is_some()) {
+                return Err(Error::new(*p, "expected the body of the anonymous function: `{ ... }`"));
+            }
+            let params = params.into_iter().map(|(_, _, t)| t).collect();
+            let ty = TypeExpr { pos, kind: TypeExprKind::Fn(params, ret.map(Box::new)) };
+            return Ok(Expr { pos, kind: ExprKind::FnType(ty) });
+        }
+        let params = params
+            .into_iter()
+            .map(|(p, name, ty)| match (name, ty.kind) {
+                (Some(n), kind) => Ok((p, n, Some(TypeExpr { pos: ty.pos, kind }))),
+                (None, TypeExprKind::Named(n)) if !n.contains('.') => Ok((p, n, None)),
+                (None, _) => Err(Error::new(p, "a parameter of an anonymous function needs a name: `x` or `x: T`")),
+            })
+            .collect::<PResult<Vec<_>>>()?;
+        let body = self.with_struct_lit(true, |p| p.block())?;
+        Ok(Expr { pos, kind: ExprKind::Lambda(Box::new(Lambda { params, ret, body })) })
+    }
+
     /// What follows `$`: a name, or a parenthesized expression.
     fn hole_body(&mut self) -> PResult<Expr> {
         if self.eat(&Tok::LParen) {
@@ -1262,6 +1312,19 @@ mod tests {
         // The value is not a struct literal: `o {` starts the arms.
         assert!(parse("fn f() { match p { _ => {} } }").is_ok());
         assert!(parse("fn f() { match p { 1 {} } }").unwrap_err().msg.contains("expected `=>`"));
+    }
+
+    #[test]
+    fn anonymous_functions() {
+        let s = body("let f = fn(x, y: u8) -> u8 { return y }\nlet t = Vec(fn(x) -> u8)\ng(fn() { h() })");
+        let Stmt::Let { value, .. } = &s[0] else { panic!() };
+        let ExprKind::Lambda(l) = &value.kind else { panic!("{value:?}") };
+        assert!(l.params[0].1 == "x" && l.params[0].2.is_none() && l.params[1].2.is_some() && l.ret.is_some());
+        // Without a body, `fn(x) -> u8` is a type: `x` names a type.
+        let Stmt::Let { value, .. } = &s[1] else { panic!() };
+        assert!(matches!(&value.kind, ExprKind::Call(_, a) if matches!(a[0].kind, ExprKind::FnType(_))));
+        let Stmt::Expr(call) = &s[2] else { panic!() };
+        assert!(matches!(&call.kind, ExprKind::Call(_, a) if matches!(a[0].kind, ExprKind::Lambda(_))));
     }
 
     #[test]

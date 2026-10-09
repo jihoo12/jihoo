@@ -347,12 +347,26 @@ impl<'m> Vm<'m> {
                 let v = Value::Func(self.fn_index[func.as_str()] as u32);
                 self.set(*dst, v);
             }
+            // A closure is an aggregate of the function and the captured values,
+            // which become its first arguments.
+            Inst::Closure { dst, func, captures } => {
+                let mut values = vec![Value::Func(self.fn_index[func.as_str()] as u32)];
+                values.extend(captures.iter().map(|r| self.get(*r)));
+                let r = self.alloc_agg(values);
+                self.set(*dst, Value::Agg(r));
+            }
             Inst::CallIndirect { dst, callee, args } => {
-                let Value::Func(callee) = self.get(*callee) else {
-                    return Err(self.error("called a value that is not a function"));
+                let (callee, mut all) = match self.get(*callee) {
+                    Value::Func(i) => (i, Vec::with_capacity(args.len())),
+                    Value::Agg(r) => {
+                        let items = self.heap.items(r);
+                        let Value::Func(i) = items[0] else { return Err(self.error("malformed closure")) };
+                        (i, items[1..].to_vec())
+                    }
+                    _ => return Err(self.error("called a value that is not a function")),
                 };
-                let args: Vec<Value> = args.iter().map(|r| self.get(*r)).collect();
-                self.push_frame(callee as usize, &args, Some(*dst))?;
+                all.extend(args.iter().map(|r| self.get(*r)));
+                self.push_frame(callee as usize, &all, Some(*dst))?;
             }
             Inst::ToStr { dst, src } => {
                 let text = match (f.reg_type(*src), self.get(*src)) {
