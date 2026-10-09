@@ -95,10 +95,11 @@ impl FnCx<'_> {
                 return Err(Error::new(e.pos, "`in(out)` needs an `out(...)` operand"));
             }
             let r = self.expr(e, None)?;
-            if !matches!(self.ty(r), Type::Int(_) | Type::Ptr(_) | Type::Bool) {
+            // A function value is a code pointer, so it can be called from asm.
+            if !matches!(self.ty(r), Type::Int(_) | Type::Ptr(_) | Type::Bool | Type::Fn(..)) {
                 return Err(Error::new(
                     e.pos,
-                    format!("asm inputs must be integers, bools or pointers, found {}", self.ty(r)),
+                    format!("asm inputs must be integers, bools, pointers or functions, found {}", self.ty(r)),
                 ));
             }
             constraints.push(constraint(reg));

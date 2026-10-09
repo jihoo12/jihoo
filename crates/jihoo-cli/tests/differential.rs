@@ -120,6 +120,21 @@ fn arena_example_runs_natively() {
     assert_eq!(out.status.code(), Some(1));
 }
 
+#[test]
+fn coroutine_example_runs_natively() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let bin = std::env::temp_dir().join(format!("jihoo-coro-{}", std::process::id()));
+    let src = repo_root().join("examples/coroutines.jh");
+    assert_eq!(exit_code(Command::new(JIHOO).arg("build").arg(&src).arg("-o").arg(&bin)), 0);
+    let out = Command::new(&bin).output().unwrap();
+    std::fs::remove_file(&bin).unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "0\n2\n8\n34\n");
+    assert_eq!(out.status.code(), Some(4));
+}
+
 /// Errors in an imported module name that module's file.
 #[test]
 fn errors_in_imported_modules_name_their_file() {

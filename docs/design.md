@@ -169,8 +169,9 @@ fn _start() -> i64 {
   be imported by freestanding programs.
 - Source positions carry a file number, so errors name the file they are in.
 
-The standard library so far: `alloc` (an arena over `mmap` and `Vec(T)`) and `io`
-(`puts`, `print_int`, `write`, `exit`), both freestanding and x86_64 Linux only.
+The standard library so far, all freestanding and x86_64 Linux only: `alloc` (an
+arena over `mmap` and `Vec(T)`), `io` (`puts`, `print_int`, `write`, `exit`) and
+`coro` (coroutines; see below).
 
 ## Compile-time evaluation
 
@@ -630,7 +631,42 @@ fn bswap(x: u64) -> u64 {
 - Freestanding only. Like `syscall`, asm cannot run at compile time.
 
 The `syscall` builtin stays as a portable shortcut (x86_64 and aarch64) for the
-most common use of asm.
+most common use of asm. A function value can be an input too: it is a code
+pointer, so `call {0}` calls it.
+
+### Coroutines
+
+`lib/coro.jh` gives freestanding programs stackful coroutines, written in jihoo
+with a few lines of inline asm (`examples/coroutines.jh`):
+
+```jihoo
+import coro
+fn squares(c: *coro.Coro) {
+    let i = 1
+    while i <= 3 {
+        coro.yield(c, i * i)
+        i = i + 1
+    }
+}
+let c = coro.new(squares, 64 * 1024)   // a 64 KiB stack from mmap
+while coro.resume(&c) {
+    io.print_int(c.value)              // 1, 4, 9
+}
+coro.free(&c)
+```
+
+- `resume` runs the coroutine until it yields (true) or its function returns
+  (false); `yield` hands a value back in `c.value` and waits. A coroutine can
+  resume others, so they compose into pipelines; `c.data` carries any other
+  state.
+- The context switch saves, on the running stack and below the red zone, the
+  address to continue at, the registers that calls preserve, and its input
+  registers, then loads the other stack pointer, restores that side's registers
+  and `ret`s to its address. A new coroutine starts by calling its function on
+  the fresh stack. The labels are numeric local labels, so this stays correct
+  when LLVM inlines it in several places.
+- Coroutines are cooperative and run on one thread; a started `Coro` must not
+  move, since its function holds a pointer to it.
 
 ## GC
 
@@ -687,5 +723,5 @@ free of LLVM.
    `select`.~~
 10. ~~Comptime closures: closures passed to `comptime` parameters, one
     instance per closure, captured values as hidden arguments.~~
-11. Coroutines for freestanding code, as a library on top of function values
-    and `asm`.
+11. ~~Coroutines for freestanding code, as a library on top of function values
+    and `asm`.~~

@@ -751,6 +751,9 @@ fn inline_asm_lowering() {
     assert!(err("fn main() { asm(\"nop\") }").contains("only available in freestanding"));
     assert!(err(&fs("fn f() -> bool { return asm(\"nop\", out(reg) bool) }")).contains("output must be an integer or a pointer"));
     assert!(err(&fs("fn f() { asm(\"mov {0}, {1}\", in(reg) 1) }")).contains("only 1 inputs"));
+    // A function value is a code pointer, so asm can call it.
+    let m = check(&fs("fn g() {}\nfn f() { asm(\"call {0}\", in(reg) g, clobber(\"memory\")) }")).unwrap();
+    assert!(m.to_string().contains("funcref @g"), "{m}");
     let m = check(&fs("fn inc(x: i64) -> i64 { return asm(\"inc {out}\", out(reg) i64, in(out) x) }")).unwrap();
     assert!(m.to_string().contains(r#""=r,0"(%0)"#), "{m}");
     assert!(err(&fs("fn f() { asm(\"nop\", in(out) 1) }")).contains("needs an `out(...)`"));

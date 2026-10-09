@@ -131,6 +131,10 @@
             jihoo build arena.jh -o arena
             ./arena > arena.out || true
             grep -qx 332833500 arena.out
+            jihoo build coroutines.jh -o coroutines
+            ./coroutines > coroutines.out && status=0 || status=$?
+            test "$status" = 4
+            grep -qx 34 coroutines.out
           '' + ''
             touch $out
           '');

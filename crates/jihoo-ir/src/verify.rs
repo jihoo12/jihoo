@@ -401,7 +401,7 @@ impl Cx<'_> {
                             return Err(at(format!("asm constraints name {inputs} inputs, {} given", args.len())));
                         }
                         for a in args {
-                            if !matches!(ty(a)?, Type::Int(_) | Type::Ptr(_) | Type::Bool) {
+                            if !matches!(ty(a)?, Type::Int(_) | Type::Ptr(_) | Type::Bool | Type::Fn(..)) {
                                 return Err(at(format!("asm operand {a} has type {}", ty(a)?.jir())));
                             }
                         }

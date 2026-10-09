@@ -1,0 +1,47 @@
+#![freestanding]
+// Coroutines without an OS or a GC (lib/coro.jh): each runs a function on a
+// stack of its own, and `yield` / `resume` pass control and a value back and
+// forth. The context switch is a few lines of inline asm in the library.
+//   jihoo build examples/coroutines.jh -o out/coro && ./out/coro
+import coro
+import io
+
+// A generator: the Fibonacci numbers below `c.value`, one per resume.
+fn fibonacci(c: *coro.Coro) {
+    let limit = c.value
+    let a = 0
+    let b = 1
+    while a < limit {
+        coro.yield(c, a)
+        let next = a + b
+        a = b
+        b = next
+    }
+}
+
+// A filter that pulls from another coroutine (passed in `c.data`) and only
+// passes on even values. Coroutines compose like pipeline stages.
+fn evens(c: *coro.Coro) {
+    let source = c.data as *coro.Coro
+    while coro.resume(source) {
+        if source.value % 2 == 0 {
+            coro.yield(c, source.value)
+        }
+    }
+}
+
+fn _start() -> i64 {
+    let fib = coro.new(fibonacci, 64 * 1024)
+    fib.value = 100                    // the limit, read when it starts
+    let even = coro.new(evens, 64 * 1024)
+    even.data = &fib as *u8
+
+    let count = 0
+    while coro.resume(&even) {
+        io.print_int(even.value)       // 0 2 8 34
+        count = count + 1
+    }
+    coro.free(&even)
+    coro.free(&fib)
+    return count                       // exit status 4
+}
