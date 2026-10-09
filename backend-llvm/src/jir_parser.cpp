@@ -77,6 +77,18 @@ std::vector<Tok> tokenize(int line, const std::string &src) {
         }
       }
       out.push_back({TokKind::Str, s});
+    } else if (c == '$' && i + 1 < src.size() && src[i + 1] == '"') {
+      // A quoted struct name, such as `$"Pair(i64)"`.
+      std::string name;
+      i += 2;
+      while (true) {
+        if (i >= src.size()) fail(line, "unterminated struct name");
+        char d = src[i++];
+        if (d == '"') break;
+        if (d == '\\' && i < src.size()) d = src[i++];
+        name += d;
+      }
+      out.push_back({TokKind::StructName, name});
     } else if (c == '%' || c == '@' || c == '$') {
       size_t j = ++i;
       // Instance names of generic functions contain a dot: `@max.0`.

@@ -83,6 +83,11 @@ pub(crate) struct Env<'p> {
     pub empty: Rc<Bindings>,
     /// Generic instances by key, their keys by name, and the ones not compiled yet.
     instances: RefCell<HashMap<String, Instance>>,
+    /// Instances of generic structs: names by key, and (name, declaration name,
+    /// bindings) in creation order. Names rather than `&StructDecl` keep `Env`
+    /// covariant in `'p`.
+    struct_keys: RefCell<HashMap<String, String>>,
+    struct_instances: RefCell<Vec<(String, String, Rc<Bindings>)>>,
     instance_keys: RefCell<HashMap<String, String>>,
     pending: RefCell<VecDeque<String>>,
 }
@@ -103,6 +108,8 @@ impl<'p> Env<'p> {
             comptime_ids: Cell::new(0),
             empty: Rc::new(Bindings::default()),
             instances: RefCell::new(HashMap::new()),
+            struct_keys: RefCell::new(HashMap::new()),
+            struct_instances: RefCell::new(Vec::new()),
             instance_keys: RefCell::new(HashMap::new()),
             pending: RefCell::new(VecDeque::new()),
         };
@@ -148,6 +155,20 @@ impl<'p> Env<'p> {
             TypeExprKind::Array(elem, n) => {
                 Ok(Type::array(self.resolve_in(elem, b, in_macro)?, self.array_len(n, b)?))
             }
+            TypeExprKind::Generic(name, args) => {
+                let Some(decl) = self.struct_decls.get(name.as_str()).copied() else {
+                    return Err(Error::new(t.pos, format!("unknown type `{name}`")));
+                };
+                if decl.params.is_empty() {
+                    return Err(Error::new(t.pos, format!("struct `{name}` takes no arguments")));
+                }
+                if decl.params.len() != args.len() {
+                    let msg = format!("struct `{name}` takes {} arguments, {} given", decl.params.len(), args.len());
+                    return Err(Error::new(t.pos, msg));
+                }
+                let bindings = self.bind(name, decl.params.iter().zip(args), b)?;
+                Ok(Type::Struct(self.struct_instance(decl, bindings)))
+            }
             TypeExprKind::Named(name) => {
                 match b.get(name) {
                     Some(Binding::Type(t)) => return Ok(t.clone()),
@@ -174,7 +195,10 @@ impl<'p> Env<'p> {
                         ));
                     }
                     Ok(ty)
-                } else if self.struct_decls.contains_key(name.as_str()) {
+                } else if let Some(decl) = self.struct_decls.get(name.as_str()) {
+                    if !decl.params.is_empty() {
+                        return Err(Error::new(t.pos, format!("struct `{name}` is generic; write `{name}(...)`")));
+                    }
                     Ok(Type::Struct(name.clone()))
                 } else if name == "ptr" {
                     Err(Error::new(t.pos, "unknown type `ptr`; byte pointers are written `*u8`"))
@@ -201,11 +225,45 @@ impl<'p> Env<'p> {
         }
     }
 
+    /// A struct's declaration and the bindings of its parameters (empty unless
+    /// `name` is an instance of a generic struct).
+    fn struct_decl(&self, pos: Pos, name: &str) -> Result<(&'p StructDecl, Rc<Bindings>), Error> {
+        if let Some(d) = self.struct_decls.get(name) {
+            return Ok((*d, self.empty.clone()));
+        }
+        let instances = self.struct_instances.borrow();
+        let found = instances.iter().find(|(n, _, _)| n == name);
+        found
+            .map(|(_, d, b)| (self.struct_decls[d.as_str()], b.clone()))
+            .ok_or_else(|| Error::new(pos, format!("unknown struct `{name}`")))
+    }
+
+    /// The name of the instance of generic struct `decl` for `bindings`, which is
+    /// how it reads in messages: `Pair(i64)`.
+    fn struct_instance(&self, decl: &'p StructDecl, bindings: Bindings) -> String {
+        let key = format!("{}({})", decl.name, bindings.key());
+        if let Some(name) = self.struct_keys.borrow().get(&key) {
+            return name.clone();
+        }
+        let mut name = format!("{}({})", decl.name, bindings.args());
+        if self.struct_instances.borrow().iter().any(|(n, _, _)| *n == name) {
+            name = format!("{name}#{}", self.struct_instances.borrow().len());
+        }
+        self.struct_keys.borrow_mut().insert(key, name.clone());
+        self.struct_instances.borrow_mut().push((name.clone(), decl.name.clone(), Rc::new(bindings)));
+        name
+    }
+
+    /// Names of every generic struct instance so far, in creation order.
+    pub fn struct_instance_names(&self) -> Vec<String> {
+        self.struct_instances.borrow().iter().map(|(n, _, _)| n.clone()).collect()
+    }
+
     pub fn struct_fields(&self, pos: Pos, name: &str) -> Result<Fields, Error> {
-        let decl = *self
-            .struct_decls
-            .get(name)
-            .ok_or_else(|| Error::new(pos, format!("unknown struct `{name}`")))?;
+        let (decl, bindings) = self.struct_decl(pos, name)?;
+        if !decl.params.is_empty() && bindings.is_empty() {
+            return Err(Error::new(pos, format!("struct `{name}` is generic; write `{name}(...)`")));
+        }
         self.structs.get(
             name,
             || Error::new(decl.pos, format!("struct `{name}` depends on itself")),
@@ -215,7 +273,13 @@ impl<'p> Env<'p> {
                     if fields.iter().any(|(n, _)| *n == f.name) {
                         return Err(Error::new(f.pos, format!("field `{}` is declared twice", f.name)));
                     }
-                    fields.push((f.name.clone(), self.resolve(&f.ty, &self.empty)?));
+                    let ty = self.resolve(&f.ty, &bindings).map_err(|mut e| {
+                        if !bindings.is_empty() {
+                            e.msg = format!("{} (in `{name}`)", e.msg);
+                        }
+                        e
+                    })?;
+                    fields.push((f.name.clone(), ty));
                 }
                 Ok(Rc::new(fields))
             },
@@ -228,7 +292,7 @@ impl<'p> Env<'p> {
     }
 
     fn acyclic(&self, root: &str, name: &str, stack: &mut Vec<String>) -> Result<(), Error> {
-        let pos = self.struct_decls[root].pos;
+        let pos = self.struct_decl(Pos { line: 1, col: 1 }, root)?.0.pos;
         if stack.iter().any(|s| s == name) {
             let path = stack.join(" -> ");
             return Err(Error::new(pos, format!("struct `{root}` contains itself ({path} -> {name}); use a pointer")));

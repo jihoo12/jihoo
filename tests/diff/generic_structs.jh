@@ -1,0 +1,39 @@
+// Instances of generic structs, in both backends.
+
+struct Pair(T: type) {
+    a: T
+    b: T
+}
+
+struct Stack(T: type, N: i64) {
+    items: [T; N]
+    len: i64
+}
+
+fn swap(comptime T: type, p: Pair(T)) -> Pair(T) {
+    return Pair(T) { a: p.b, b: p.a }
+}
+
+fn push(comptime T: type, comptime N: i64, s: Stack(T, N), x: T) -> Stack(T, N) {
+    s.items[s.len] = x
+    s.len = s.len + 1
+    return s
+}
+
+fn top(comptime T: type, comptime N: i64, s: Stack(T, N)) -> T {
+    return s.items[s.len - 1]
+}
+
+fn entry() -> i64 {
+    let p = swap(i64, Pair(i64) { a: 1, b: 2 })
+    let bytes = swap(u8, Pair(u8) { a: 250, b: 10 })
+    let s = Stack(Pair(u8), 4) { items: [Pair(u8) { a: 0, b: 0 }; 4], len: 0 }
+    s = push(Pair(u8), 4, s, bytes)
+    s = push(Pair(u8), 4, s, Pair(u8) { a: 7, b: 9 })
+    let t = top(Pair(u8), 4, s)
+    let total = p.a * 100 + p.b                    // 201
+    total = total + (bytes.a as i64)               // 10
+    total = total + (t.a as i64) * (t.b as i64)    // 63
+    total = total + s.len + size_of(Stack(Pair(u8), 4))  // 2 + 16
+    return total                                   // 292
+}

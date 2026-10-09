@@ -1,0 +1,122 @@
+#![freestanding]
+// Memory allocation with no libc and no GC: a bump allocator on top of mmap, and
+// a growable Vec(T) on top of that, written in jihoo itself (x86_64 Linux).
+//   jihoo build examples/alloc.jh -o out/alloc && ./out/alloc; echo $?
+
+// ---- allocator ----
+
+struct Arena {
+    base: *u8
+    used: i64
+    cap: i64
+}
+
+fn arena_new(cap: i64) -> Arena {
+    // mmap(NULL, cap, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+    let p = syscall(9, 0, cap, 0x3, 0x22, 0 - 1, 0)
+    return Arena { base: p as *u8, used: 0, cap: cap }
+}
+
+// `size` bytes aligned to `align`, or null when the arena is full.
+fn alloc(a: *Arena, size: i64, align: i64) -> *u8 {
+    let start = (a.used + align - 1) / align * align
+    if start + size > a.cap {
+        return 0 as *u8
+    }
+    a.used = start + size
+    return a.base + start
+}
+
+// ---- Vec(T) ----
+
+struct Vec(T: type) {
+    data: *T
+    len: i64
+    cap: i64
+    arena: *Arena
+}
+
+fn vec_new(comptime T: type, a: *Arena) -> Vec(T) {
+    return Vec(T) { data: 0 as *T, len: 0, cap: 0, arena: a }
+}
+
+fn push(comptime T: type, v: *Vec(T), x: T) {
+    if v.len == v.cap {
+        let cap = v.cap * 2
+        if cap == 0 {
+            cap = 4
+        }
+        let p = alloc(v.arena, cap * size_of(T), align_of(T)) as *T
+        let i = 0
+        while i < v.len {
+            p[i] = v.data[i]
+            i = i + 1
+        }
+        v.data = p
+        v.cap = cap
+    }
+    v.data[v.len] = x
+    v.len = v.len + 1
+}
+
+fn get(comptime T: type, v: *Vec(T), i: i64) -> T {
+    return v.data[i]
+}
+
+// ---- output ----
+
+fn write(s: *u8, len: i64) {
+    syscall(1, 1, s, len)
+}
+
+fn print_int(n: i64) {
+    let buf = [0 as u8; 21]
+    let i = 20
+    buf[i] = 10 // '\n'
+    if n == 0 {
+        i = i - 1
+        buf[i] = 48
+    }
+    while n > 0 {
+        i = i - 1
+        buf[i] = 48 + (n % 10) as u8
+        n = n / 10
+    }
+    write(&buf[i], 21 - i)
+}
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+fn _start() -> i64 {
+    let arena = arena_new(0x100000) // 1 MiB
+
+    // 1000 integers: the Vec grows 4 -> 8 -> ... -> 1024.
+    let squares = vec_new(i64, &arena)
+    let i = 0
+    while i < 1000 {
+        push(i64, &squares, i * i)
+        i = i + 1
+    }
+    let sum = 0
+    i = 0
+    while i < squares.len {
+        sum = sum + get(i64, &squares, i)
+        i = i + 1
+    }
+    print_int(squares.len)         // 1000
+    print_int(squares.cap)         // 1024
+    print_int(sum)                 // 332833500
+
+    // The same code, instantiated for a struct.
+    let points = vec_new(Point, &arena)
+    push(Point, &points, Point { x: 3, y: 4 })
+    push(Point, &points, Point { x: 5, y: 12 })
+    let p = get(Point, &points, 1)
+    print_int(p.x * p.y)           // 60
+    print_int(arena.used)          // bytes handed out by the arena
+
+    return points.len              // 2
+}

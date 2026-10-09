@@ -538,3 +538,57 @@ fn macro_errors() {
     // Macro bodies are checked even if the macro is never used.
     assert!(err("macro bad() -> expr { return 1 }\nfn main() {}").contains("return value must be expr"));
 }
+
+// ---- generic structs ----
+
+const PAIR: &str = "struct Pair(T: type) {\n  a: T\n  b: T\n}\n";
+
+#[test]
+fn generic_struct_instances() {
+    let src = format!(
+        "{PAIR}fn sum(comptime T: type, p: Pair(T)) -> T {{ return p.a + p.b }}\n\
+         fn main() {{\n  let p = Pair(i64) {{ a: 1, b: 2 }}\n  let q = Pair(u8) {{ a: 200, b: 100 }}\n  print(sum(i64, p))\n  print(sum(u8, q))\n}}"
+    );
+    assert_eq!(run(&src), "3\n44\n"); // 300 wraps to 44 in u8
+    let m = check(&src).unwrap();
+    let names: Vec<&str> = m.structs.iter().map(|s| s.name.as_str()).collect();
+    // The generic declaration itself is not a type; each instance is.
+    assert_eq!(names, ["Pair(i64)", "Pair(u8)"]);
+    assert!(m.to_string().contains(r#"struct $"Pair(u8)" { a: u8, b: u8 } size 2 align 1"#), "{m}");
+}
+
+#[test]
+fn generic_struct_value_parameters() {
+    let m = check(
+        "struct Buf(N: i64) {\n  data: [u8; N]\n  len: i64\n}\nconst CAP = 8\n\
+         fn cap(comptime N: i64, b: Buf(N)) -> i64 { return len(b.data) }\n\
+         fn main() {\n  let b = Buf(CAP * 2) { data: [0; CAP * 2], len: 0 }\n  print(cap(16, b) + size_of(Buf(4)))\n}",
+    )
+    .unwrap();
+    let text = m.to_string();
+    // `Buf(CAP * 2)` and `Buf(16)` are the same type.
+    assert!(text.contains(r#"struct $"Buf(16)" { data: [16 x u8], len: i64 }"#), "{text}");
+    assert_eq!(m.structs.len(), 2, "{text}"); // Buf(16) and Buf(4)
+}
+
+#[test]
+fn generic_structs_nest_and_point_to_themselves() {
+    check(&fs(&format!(
+        "{PAIR}struct Node(T: type) {{\n  value: T\n  next: *Node(T)\n}}\n\
+         fn f() -> i64 {{\n  let n = Node(Pair(u8)) {{ value: Pair(u8) {{ a: 1, b: 2 }}, next: 0 as *Node(Pair(u8)) }}\n  return n.value.b as i64\n}}"
+    )))
+    .unwrap();
+    assert!(err("struct Bad(T: type) { inner: Bad(T) }\nfn main() { let x = size_of(Bad(i64)) }").contains("contains itself"));
+}
+
+#[test]
+fn generic_struct_errors() {
+    assert!(err(&format!("{PAIR}fn main() {{ let p: Pair = Pair(i64) {{ a: 1, b: 2 }} }}")).contains("is generic; write `Pair(...)`"));
+    assert!(err("struct P { x: i64 }\nfn main() { let p: P(i64) = P { x: 1 } }").contains("takes no arguments"));
+    assert!(err(&format!("{PAIR}fn main() {{ let p: Pair(i64, u8) = 1 }}")).contains("takes 1 arguments, 2 given"));
+    assert!(err(&format!("{PAIR}fn main() {{ let p = Pair(i64) {{ a: 1, b: true }} }}")).contains("field `b` must be i64, found bool"));
+    // Errors in a generic struct's fields are reported per instance.
+    let e = err("struct S(N: i64) { data: [u8; N] }\nfn main() { let s: S(0 - 1) = S(0 - 1) { data: [] } }");
+    assert!(e.contains("array length must be between 0 and"), "{e}");
+    assert!(e.contains("(in `S(-1)`)"), "{e}");
+}

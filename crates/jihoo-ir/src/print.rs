@@ -24,7 +24,7 @@ impl Display for Module {
         for s in &self.structs {
             writeln!(f)?;
             let fields: Vec<String> = s.fields.iter().map(|(n, t)| format!("{n}: {}", t.jir())).collect();
-            write!(f, "struct ${} {{ {} }}", s.name, fields.join(", "))?;
+            write!(f, "struct ${} {{ {} }}", types::struct_name_jir(&s.name), fields.join(", "))?;
             // The backend checks this against LLVM's data layout.
             let fields = |n: &str| self.struct_def(n).map(|d| d.fields.iter().map(|(_, t)| t.clone()).collect());
             if let Some(l) = layout::of(&Type::Struct(s.name.clone()), &fields) {
@@ -73,7 +73,9 @@ impl Display for Inst {
             }
             Inst::Cast { dst, src } => write!(f, "{dst} = cast {src}"),
             Inst::Call { dst, func, args } => write!(f, "{dst} = call @{func}({})", list(args)),
-            Inst::Struct { dst, name, fields } => write!(f, "{dst} = struct ${name}({})", list(fields)),
+            Inst::Struct { dst, name, fields } => {
+                write!(f, "{dst} = struct ${}({})", types::struct_name_jir(name), list(fields))
+            }
             Inst::Field { dst, src, index } => write!(f, "{dst} = field {src}, {index}"),
             Inst::SetField { dst, src, index, value } => {
                 write!(f, "{dst} = setfield {src}, {index}, {value}")

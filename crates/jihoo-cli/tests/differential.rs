@@ -101,3 +101,21 @@ fn inline_asm_example_runs_natively() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "inline asm says hi\n");
     assert_eq!(out.status.code(), Some(4), "every check in examples/asm.jh should pass");
 }
+
+/// The allocator and `Vec(T)` example uses pointers and `mmap`, so it only runs
+/// natively; check its output.
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn alloc_example_runs_natively() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let bin = std::env::temp_dir().join(format!("jihoo-alloc-{}", std::process::id()));
+    let src = repo_root().join("examples/alloc.jh");
+    assert_eq!(exit_code(Command::new(JIHOO).arg("build").arg(&src).arg("-o").arg(&bin)), 0);
+    let out = Command::new(&bin).output().unwrap();
+    std::fs::remove_file(&bin).unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1000\n1024\n332833500\n60\n16416\n");
+    assert_eq!(out.status.code(), Some(2));
+}

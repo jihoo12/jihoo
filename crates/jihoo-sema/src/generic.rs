@@ -40,8 +40,27 @@ impl Bindings {
         self.items.push((name.to_string(), b));
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// The bound values as they would be written as arguments: `i64, 4`.
+    pub fn args(&self) -> String {
+        let parts: Vec<String> = self
+            .items
+            .iter()
+            .map(|(_, b)| match b {
+                Binding::Type(t) => t.to_string(),
+                Binding::Value(_, ConstValue::Int(v)) => v.to_string(),
+                Binding::Value(_, ConstValue::Bool(v)) => v.to_string(),
+                Binding::Value(_, v) => format!("{v:?}"),
+            })
+            .collect();
+        parts.join(", ")
+    }
+
     /// Identifies the instance: equal keys mean equal bindings.
-    fn key(&self) -> String {
+    pub fn key(&self) -> String {
         let parts: Vec<String> = self
             .items
             .iter()
@@ -79,6 +98,8 @@ fn expr_to_type(e: &Expr) -> Result<TypeExpr, Error> {
         ExprKind::Var(n) => TypeExprKind::Named(n.clone()),
         ExprKind::Deref(inner) => TypeExprKind::Ptr(Box::new(expr_to_type(inner)?)),
         ExprKind::ArrayRepeat(elem, n) => TypeExprKind::Array(Box::new(expr_to_type(elem)?), n.clone()),
+        // `Pair(u8)` parses as a call.
+        ExprKind::Call(name, args) => TypeExprKind::Generic(name.clone(), args.clone()),
         _ => return Err(Error::new(e.pos, "expected a type")),
     };
     Ok(TypeExpr { pos: e.pos, kind })
@@ -95,22 +116,8 @@ impl FnCx<'_> {
         }
 
         // Comptime arguments first: they determine the instance.
-        let mut b = Bindings::default();
-        for (p, a) in decl.params.iter().zip(args).filter(|(p, _)| p.comptime) {
-            if is_type_param(p) {
-                let t = self.env.resolve(&expr_to_type(a)?, &self.bindings)?;
-                b.push(&p.name, Binding::Type(t));
-            } else {
-                // The parameter's type may use earlier parameters: `comptime x: T`.
-                let want = self.env.resolve(&p.ty, &Rc::new(b.clone()))?;
-                let (ty, v) = self.env.comptime(a, Some(&want), &self.bindings)?;
-                if ty != want {
-                    let msg = format!("comptime argument `{}` of `{name}` must be {want}, found {ty}", p.name);
-                    return Err(Error::new(a.pos, msg));
-                }
-                b.push(&p.name, Binding::Value(ty, v));
-            }
-        }
+        let comptime = decl.params.iter().zip(args).filter(|(p, _)| p.comptime);
+        let b = self.env.bind(name, comptime, &self.bindings)?;
         let (instance, sig) = self.env.instance(pos, decl, b)?;
 
         let mut regs = Vec::new();
@@ -124,7 +131,35 @@ impl FnCx<'_> {
     }
 }
 
-impl Env<'_> {
+impl<'p> Env<'p> {
+    /// Evaluates comptime arguments into bindings for the matching parameters of
+    /// `owner` (a function or struct). `outer` gives the bindings of the code the
+    /// arguments are written in.
+    pub fn bind<'a>(
+        &self,
+        owner: &str,
+        params_args: impl Iterator<Item = (&'a Param, &'a Expr)>,
+        outer: &Rc<Bindings>,
+    ) -> Result<Bindings, Error> {
+        let mut b = Bindings::default();
+        for (p, a) in params_args {
+            if is_type_param(p) {
+                let t = self.resolve(&expr_to_type(a)?, outer)?;
+                b.push(&p.name, Binding::Type(t));
+            } else {
+                // The parameter's type may use earlier parameters: `comptime x: T`.
+                let want = self.resolve(&p.ty, &Rc::new(b.clone()))?;
+                let (ty, v) = self.comptime(a, Some(&want), outer)?;
+                if ty != want {
+                    let msg = format!("comptime argument `{}` of `{owner}` must be {want}, found {ty}", p.name);
+                    return Err(Error::new(a.pos, msg));
+                }
+                b.push(&p.name, Binding::Value(ty, v));
+            }
+        }
+        Ok(b)
+    }
+
     /// Signature-only part of instantiating `decl`: the body is compiled later, so
     /// an instance can call itself recursively.
     pub fn instance(&self, pos: Pos, decl: &FnDecl, b: Bindings) -> Result<(String, Rc<crate::env::Sig>), Error> {

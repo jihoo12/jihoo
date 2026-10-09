@@ -230,6 +230,33 @@ ramp(5)              // returns [i64; 5]
 - Instances needed only at compile time (`comptime ramp(3)`) still appear in the
   module; natively they are internal and dropped by LLVM.
 
+### Generic structs
+
+```jihoo
+struct Vec(T: type) {
+    data: *T
+    len: i64
+    cap: i64
+    arena: *Arena
+}
+
+fn push(comptime T: type, v: *Vec(T), x: T) { ... }
+
+let v = vec_new(i64, &arena)     // a Vec(i64)
+push(i64, &v, 42)
+```
+
+- Struct parameters are always compile-time (`comptime` is optional). Each
+  distinct set of arguments is its own struct type, named like `Pair(i64)` in
+  messages and as `$"Pair(i64)"` in JIR. `Buf(CAP * 2)` and `Buf(16)` are the
+  same type.
+- Literals name the instance: `Pair(i64) { a: 1, b: 2 }`. A generic struct can
+  point to itself (`next: *Node(T)`), but not contain itself.
+- Like generic functions, a generic struct's fields are checked per instance.
+
+`examples/alloc.jh` puts this together for freestanding code: a bump allocator
+over `mmap`, and a growable `Vec(T)` built on it, all in jihoo.
+
 ## Macros
 
 ```jihoo
@@ -266,8 +293,8 @@ power!(y + 1, 2)    // expands to ((1) * (y + 1)) * (y + 1)
   type checked even when unused, and are never part of the compiled program.
 - Macros produce expressions only, not statements or items.
 
-Planned next: statement and item macros, and generic structs (functions that
-return types).
+Planned next: statement and item macros, bitwise operators, and modules so that
+`alloc` can become a library instead of an example.
 
 ## GC
 
@@ -282,4 +309,5 @@ grows past twice the size that survived the last collection (1 MiB minimum).
 3. ~~Sized integers, pointers with loads/stores, structs, arrays, `size_of`,
    inline asm.~~
 4. ~~`comptime` on the VM, generic functions.~~
-5. ~~Expression macros.~~ `alloc` layer; statement and item macros.
+5. ~~Expression macros, generic structs.~~ Bitwise operators; modules and an
+   `alloc` library; statement and item macros.

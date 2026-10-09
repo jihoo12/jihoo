@@ -166,13 +166,28 @@ impl Parser {
     fn struct_decl(&mut self) -> PResult<StructDecl> {
         let pos = self.expect(&Tok::Struct, "`struct`")?.pos;
         let (_, name) = self.ident("struct name")?;
+        let mut params = Vec::new();
+        if self.eat(&Tok::LParen) {
+            while *self.peek() != Tok::RParen {
+                // Every struct parameter is compile-time; `comptime` is optional.
+                self.eat(&Tok::Comptime);
+                let (ppos, pname) = self.ident("parameter name")?;
+                self.expect(&Tok::Colon, "`:` and a parameter type")?;
+                let ty = self.type_expr()?;
+                params.push(Param { pos: ppos, comptime: true, name: pname, ty });
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect(&Tok::RParen, "`)`")?;
+        }
         let fields = self.braced_list(|p| {
             let (pos, name) = p.ident("field name")?;
             p.expect(&Tok::Colon, "`:` and a field type")?;
             let ty = p.type_expr()?;
             Ok(FieldDecl { pos, name, ty })
         })?;
-        Ok(StructDecl { pos, name, fields })
+        Ok(StructDecl { pos, name, params, fields })
     }
 
     fn fn_decl(&mut self) -> PResult<FnDecl> {
@@ -211,7 +226,40 @@ impl Parser {
             return Ok(TypeExpr { pos, kind: TypeExprKind::Array(Box::new(elem), Box::new(len)) });
         }
         let (pos, name) = self.ident("a type")?;
+        if self.same_line(&Tok::LParen) {
+            let args = self.call_args()?;
+            return Ok(TypeExpr { pos, kind: TypeExprKind::Generic(name, args) });
+        }
         Ok(TypeExpr { pos, kind: TypeExprKind::Named(name) })
+    }
+
+    /// `(a, b, ...)`
+    fn call_args(&mut self) -> PResult<Vec<Expr>> {
+        self.expect(&Tok::LParen, "`(`")?;
+        let args = self.with_struct_lit(true, |p| {
+            let mut args = Vec::new();
+            while *p.peek() != Tok::RParen {
+                args.push(p.expr()?);
+                if !p.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            Ok(args)
+        })?;
+        self.expect(&Tok::RParen, "`)`")?;
+        Ok(args)
+    }
+
+    /// `{ field: value, ... }` of a struct literal.
+    fn field_inits(&mut self) -> PResult<Vec<FieldInit>> {
+        self.with_struct_lit(true, |p| {
+            p.braced_list(|p| {
+                let (pos, name) = p.ident("a field name")?;
+                p.expect(&Tok::Colon, "`:`")?;
+                let value = p.expr()?;
+                Ok(FieldInit { pos, name, value })
+            })
+        })
     }
 
     // ---- statements ----
@@ -434,29 +482,18 @@ impl Parser {
             Tok::Ident(name) => {
                 self.bump();
                 if self.same_line(&Tok::LParen) {
-                    self.bump();
-                    let args = self.with_struct_lit(true, |p| {
-                        let mut args = Vec::new();
-                        while *p.peek() != Tok::RParen {
-                            args.push(p.expr()?);
-                            if !p.eat(&Tok::Comma) {
-                                break;
-                            }
-                        }
-                        Ok(args)
-                    })?;
-                    self.expect(&Tok::RParen, "`)`")?;
-                    ExprKind::Call(name, args)
+                    let args = self.call_args()?;
+                    // `Pair(i64) { ... }`: a literal of a generic struct. A call is
+                    // never directly followed by `{` otherwise.
+                    if self.same_line(&Tok::LBrace) && !self.no_struct_lit {
+                        let ty = TypeExpr { pos, kind: TypeExprKind::Generic(name, args) };
+                        ExprKind::StructLit(ty, self.field_inits()?)
+                    } else {
+                        ExprKind::Call(name, args)
+                    }
                 } else if self.same_line(&Tok::LBrace) && !self.no_struct_lit {
-                    let fields = self.with_struct_lit(true, |p| {
-                        p.braced_list(|p| {
-                            let (pos, name) = p.ident("a field name")?;
-                            p.expect(&Tok::Colon, "`:`")?;
-                            let value = p.expr()?;
-                            Ok(FieldInit { pos, name, value })
-                        })
-                    })?;
-                    ExprKind::StructLit(name, fields)
+                    let ty = TypeExpr { pos, kind: TypeExprKind::Named(name) };
+                    ExprKind::StructLit(ty, self.field_inits()?)
                 } else {
                     ExprKind::Var(name)
                 }
@@ -740,7 +777,8 @@ mod tests {
         assert_eq!(p.structs[0].fields.len(), 2);
         assert!(matches!(p.structs[0].fields[1].ty.kind, TypeExprKind::Ptr(_)));
         let Stmt::Let { value, .. } = &p.funcs[0].body.stmts[0] else { panic!() };
-        assert!(matches!(&value.kind, ExprKind::StructLit(name, f) if name == "P" && f.len() == 2));
+        assert!(matches!(&value.kind, ExprKind::StructLit(t, f)
+            if matches!(&t.kind, TypeExprKind::Named(n) if n == "P") && f.len() == 2));
     }
 
     #[test]
@@ -804,6 +842,21 @@ mod tests {
         assert!(parse("fn f() { let x = 0x1_0000_0000_0000_0000 }").unwrap_err().msg.contains("too large"));
         assert!(parse("fn f() { let x = 0xg }").unwrap_err().msg.contains("not a valid number"));
         assert!(parse("fn f() { let x = 12ab }").unwrap_err().msg.contains("not a valid number"));
+    }
+
+    #[test]
+    fn generic_structs() {
+        let p = parse("struct Pair(T: type, comptime N: i64) { a: [T; N] }\nfn f(p: *Pair(u8, 4)) -> Pair(i64, 1) { return Pair(i64, 1) { a: [0] } }")
+            .unwrap();
+        assert_eq!(p.structs[0].params.len(), 2);
+        assert!(p.structs[0].params.iter().all(|p| p.comptime));
+        let TypeExprKind::Ptr(inner) = &p.funcs[0].params[0].ty.kind else { panic!() };
+        assert!(matches!(&inner.kind, TypeExprKind::Generic(n, args) if n == "Pair" && args.len() == 2));
+        let Stmt::Return { value: Some(v), .. } = &p.funcs[0].body.stmts[0] else { panic!() };
+        assert!(matches!(&v.kind, ExprKind::StructLit(t, _) if matches!(t.kind, TypeExprKind::Generic(..))));
+        // In a condition, `f(x) { ... }` is a call followed by the body.
+        let s = body("if f(x) { g() }");
+        assert!(matches!(&s[0], Stmt::If { cond, .. } if matches!(cond.kind, ExprKind::Call(..))));
     }
 
     #[test]

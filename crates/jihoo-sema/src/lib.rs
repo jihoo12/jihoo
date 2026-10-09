@@ -49,8 +49,9 @@ pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
     }
 
     // Ask for every item; the lazy queries compute what each one needs.
+    // Generic structs only exist as instances, collected at the end.
     let mut structs = Vec::new();
-    for s in &prog.structs {
+    for s in prog.structs.iter().filter(|s| s.params.is_empty()) {
         match env.struct_fields(s.pos, &s.name).and_then(|f| env.check_acyclic(&s.name).map(|_| f)) {
             Ok(fields) => structs.push(ir::StructDef { name: s.name.clone(), fields: (*fields).clone() }),
             Err(e) => errors.push(e),
@@ -97,6 +98,14 @@ pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
     while let Some(name) = env.next_pending() {
         match env.function(&name) {
             Ok(func) => funcs.push((*func).clone()),
+            Err(e) => errors.push(e),
+        }
+    }
+
+    for name in env.struct_instance_names() {
+        let pos = Pos { line: 1, col: 1 };
+        match env.struct_fields(pos, &name).and_then(|f| env.check_acyclic(&name).map(|_| f)) {
+            Ok(fields) => structs.push(ir::StructDef { name, fields: (*fields).clone() }),
             Err(e) => errors.push(e),
         }
     }
@@ -514,7 +523,12 @@ impl<'a> FnCx<'a> {
             ExprKind::Binary(BinOp::Or, l, r) => self.short_circuit(false, l, r)?,
             ExprKind::Binary(op, l, r) => self.binary(e.pos, *op, l, r, expected)?,
             ExprKind::Call(name, args) => self.call(e.pos, name, args)?,
-            ExprKind::StructLit(name, inits) => self.struct_literal(e.pos, name, inits)?,
+            ExprKind::StructLit(t, inits) => {
+                let Type::Struct(name) = self.resolve(t)? else {
+                    return Err(Error::new(e.pos, "only structs can be built with `{ ... }`"));
+                };
+                self.struct_literal(e.pos, &name, inits)?
+            }
             ExprKind::ArrayLit(items) => self.array_literal(e.pos, items, expected)?,
             ExprKind::ArrayRepeat(value, n) => {
                 let hint = match expected {

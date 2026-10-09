@@ -150,11 +150,11 @@ impl Type {
         matches!(self, Type::Int(_) | Type::Ptr(_))
     }
 
-    /// How this type is spelled in JIR text (`*u8`, `$Point`).
+    /// How this type is spelled in JIR text (`*u8`, `$Point`, `$"Pair(i64)"`).
     pub fn jir(&self) -> String {
         match self {
             Type::Ptr(t) => format!("*{}", t.jir()),
-            Type::Struct(name) => format!("${name}"),
+            Type::Struct(name) => format!("${}", struct_name_jir(name)),
             Type::Array(elem, n) => format!("[{n} x {}]", elem.jir()),
             other => other.to_string(),
         }
@@ -175,6 +175,23 @@ impl fmt::Display for Type {
             Type::Expr => f.write_str("expr"),
         }
     }
+}
+
+/// A struct name as JIR spells it: bare if it is an identifier, else quoted (the
+/// instances of generic structs are named like `Pair(i64)`).
+pub fn struct_name_jir(name: &str) -> String {
+    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
+        return name.to_string();
+    }
+    let mut out = String::from("\"");
+    for c in name.chars() {
+        if c == '"' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
 }
 
 /// Type of a string literal in the given profile.

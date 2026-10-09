@@ -22,6 +22,9 @@ pub struct ConstDecl {
 pub struct StructDecl {
     pub pos: Pos,
     pub name: String,
+    /// `struct Pair(T: type)`: compile-time parameters, which make the struct
+    /// generic. Each distinct set of arguments is its own struct type.
+    pub params: Vec<Param>,
     pub fields: Vec<FieldDecl>,
 }
 
@@ -68,6 +71,9 @@ pub enum TypeExprKind {
     Ptr(Box<TypeExpr>),
     /// `[T; N]`, where `N` is evaluated at compile time.
     Array(Box<TypeExpr>, Box<Expr>),
+    /// `Pair(i64)`: an instance of a generic struct. Arguments are written as
+    /// expressions; type arguments are read back as types.
+    Generic(String, Vec<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -123,8 +129,8 @@ pub enum ExprKind {
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Call(String, Vec<Expr>),
-    /// `Point { x: 1, y: 2 }`
-    StructLit(String, Vec<FieldInit>),
+    /// `Point { x: 1, y: 2 }` or `Pair(i64) { a: 1, b: 2 }`
+    StructLit(TypeExpr, Vec<FieldInit>),
     /// `base.field`
     Field(Box<Expr>, String),
     /// `array[index]` or `ptr[index]`
@@ -236,10 +242,13 @@ pub fn set_pos(e: &mut Expr, pos: Pos) {
         ExprKind::Call(_, args) | ExprKind::ArrayLit(args) => args.iter_mut().for_each(|a| set_pos(a, pos)),
         ExprKind::Quote(_, holes) => holes.iter_mut().for_each(|a| set_pos(a, pos)),
         ExprKind::MacroCall(_, args) => args.iter_mut().for_each(|a| set_pos(&mut a.expr, pos)),
-        ExprKind::StructLit(_, fields) => fields.iter_mut().for_each(|f| {
-            f.pos = pos;
-            set_pos(&mut f.value, pos);
-        }),
+        ExprKind::StructLit(t, fields) => {
+            ty(t);
+            fields.iter_mut().for_each(|f| {
+                f.pos = pos;
+                set_pos(&mut f.value, pos);
+            })
+        }
         ExprKind::Cast(x, t) => {
             set_pos(x, pos);
             ty(t);
@@ -263,5 +272,6 @@ fn set_type_pos(t: &mut TypeExpr, pos: Pos) {
             set_type_pos(elem, pos);
             set_pos(n, pos);
         }
+        TypeExprKind::Generic(_, args) => args.iter_mut().for_each(|a| set_pos(a, pos)),
     }
 }
