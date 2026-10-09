@@ -25,8 +25,47 @@ use jihoo_syntax::{Error, Pos};
 use crate::env::Sig;
 use crate::FnCx;
 
+/// Something a lambda may capture.
+enum Capture {
+    /// A local variable.
+    Local(String),
+    /// A captured value of a closure this instance received as a comptime
+    /// argument (`f` in `fn each(comptime f: fn(i64), ...)`).
+    Closure(String),
+}
+
 impl FnCx<'_> {
     pub(crate) fn lambda(&mut self, pos: Pos, l: &Lambda, expected: Option<&Type>) -> Result<Reg, Error> {
+        let lifted = self.lift(l, expected)?;
+        if lifted.captured.is_empty() {
+            return Ok(self.emit_to(lifted.ty, |dst| Inst::FuncRef { dst, func: lifted.func }));
+        }
+        let what = format!("this function captures {}", lifted.names.join(", "));
+        self.closure_value(pos, &what, lifted.func, lifted.captured, lifted.ty)
+    }
+
+    /// A closure value: hosted only, since the captured values go to the GC
+    /// heap. `what` describes it in errors.
+    pub(crate) fn closure_value(
+        &mut self,
+        pos: Pos,
+        what: &str,
+        func: String,
+        captures: Vec<Reg>,
+        ty: Type,
+    ) -> Result<Reg, Error> {
+        if self.profile() != Profile::Hosted && !self.in_macro {
+            let msg = format!(
+                "{what}, so it is a closure; storing or passing a closure as a value needs the GC, which only \
+                 hosted mode has (in freestanding code, pass it to a `comptime` parameter, or pass the values as arguments)"
+            );
+            return Err(Error::new(pos, msg));
+        }
+        Ok(self.emit_to(ty, |dst| Inst::Closure { dst, func, captures }))
+    }
+
+    /// Lifts the lambda into a function of its own.
+    pub(crate) fn lift(&mut self, l: &Lambda, expected: Option<&Type>) -> Result<Lifted, Error> {
         // Types left out come from the expected function type.
         let want = match expected {
             Some(Type::Fn(ps, r)) if ps.len() == l.params.len() => Some((ps, r)),
@@ -49,12 +88,18 @@ impl FnCx<'_> {
             (None, None) => Type::Unit,
         };
 
-        // Every visible local (the innermost one of each name), ordered by name.
-        let mut outer: BTreeMap<String, Reg> = BTreeMap::new();
+        // Every visible local (the innermost one of each name), ordered by name,
+        // then the captured values of closures this instance received.
+        let mut locals: BTreeMap<String, Reg> = BTreeMap::new();
         for scope in &self.scopes {
-            outer.extend(scope.iter().map(|(n, r)| (n.clone(), *r)));
+            locals.extend(scope.iter().map(|(n, r)| (n.clone(), *r)));
         }
-        let outer: Vec<(String, Reg)> = outer.into_iter().collect();
+        let mut outer: Vec<(Capture, Reg)> = locals.into_iter().map(|(n, r)| (Capture::Local(n), r)).collect();
+        let mut closures: Vec<(&String, &Vec<Reg>)> = self.closure_regs.iter().collect();
+        closures.sort_by(|a, b| a.0.cmp(b.0));
+        for (n, regs) in closures {
+            outer.extend(regs.iter().map(|r| (Capture::Closure(n.clone()), *r)));
+        }
 
         let id = self.env.lambda_ids.get();
         self.env.lambda_ids.set(id + 1);
@@ -64,10 +109,15 @@ impl FnCx<'_> {
         cx.in_comptime = self.in_comptime;
         cx.in_macro = self.in_macro;
         cx.macro_depth = self.macro_depth;
-        for (n, r) in &outer {
+        for (capture, r) in &outer {
             let c = cx.new_reg(self.ty(*r).clone());
-            cx.scopes[0].insert(n.clone(), c);
-            cx.captured.insert(c);
+            match capture {
+                Capture::Local(n) => {
+                    cx.scopes[0].insert(n.clone(), c);
+                    cx.captured.insert(c);
+                }
+                Capture::Closure(n) => cx.closure_regs.entry(n.clone()).or_default().push(c),
+            }
         }
         let mut seen = HashSet::new();
         for ((p, n, _), t) in l.params.iter().zip(&params) {
@@ -81,25 +131,30 @@ impl FnCx<'_> {
         let mut f = cx.finish(&name, ret.clone(), l.body.end)?;
 
         let used = drop_unused_params(&mut f, outer.len());
-        let captured: Vec<&(String, Reg)> = outer.iter().zip(&used).filter(|(_, u)| **u).map(|(c, _)| c).collect();
+        let kept: Vec<&(Capture, Reg)> = outer.iter().zip(&used).filter(|(_, u)| **u).map(|(c, _)| c).collect();
+        let mut names: Vec<String> = Vec::new();
+        for (c, _) in &kept {
+            let (Capture::Local(n) | Capture::Closure(n)) = c;
+            let n = format!("`{n}`");
+            if !names.contains(&n) {
+                names.push(n);
+            }
+        }
+        let captured = kept.iter().map(|(_, r)| *r).collect();
         // Functions made inside macros only exist while compiling.
         self.env.add_lambda(f, !self.in_macro);
-
-        let ty = Type::Fn(params, Box::new(ret));
-        if captured.is_empty() {
-            return Ok(self.emit_to(ty, |dst| Inst::FuncRef { dst, func: name }));
-        }
-        if self.profile() != Profile::Hosted && !self.in_macro {
-            let names: Vec<String> = captured.iter().map(|(n, _)| format!("`{n}`")).collect();
-            let msg = format!(
-                "this function captures {}; closures that capture values need the GC and are only available in hosted mode (pass the values as arguments)",
-                names.join(", ")
-            );
-            return Err(Error::new(pos, msg));
-        }
-        let captures = captured.iter().map(|(_, r)| *r).collect();
-        Ok(self.emit_to(ty, |dst| Inst::Closure { dst, func: name, captures }))
+        Ok(Lifted { func: name, captured, names, ty: Type::Fn(params, Box::new(ret)) })
     }
+}
+
+/// A lambda lifted into a function.
+pub(crate) struct Lifted {
+    pub func: String,
+    /// The registers it captures, passed before its own arguments.
+    pub captured: Vec<Reg>,
+    /// What it captures, for messages: "`k`", "`f`".
+    pub names: Vec<String>,
+    pub ty: Type,
 }
 
 /// Drops those of the first `k` parameters of `f` that its code never uses, and

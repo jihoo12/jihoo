@@ -295,13 +295,13 @@ impl<'p> Env<'p> {
                     let msg = format!("{kind} `{name}` takes {} arguments, {} given", decl.params.len(), args.len());
                     return Err(Error::new(t.pos, msg));
                 }
-                let bindings = self.bind(name, dm, decl.params.iter().zip(args), b)?;
+                let bindings = self.bind(name, dm, decl.params.iter().zip(args), b, &mut |_, _| Ok(None))?;
                 Ok(named(decl, self.struct_instance(&key, bindings)))
             }
             TypeExprKind::Named(name) => {
                 match b.get(name) {
                     Some(Binding::Type(t)) => return Ok(t.clone()),
-                    Some(Binding::Value(..)) => {
+                    Some(Binding::Value(..) | Binding::Closure { .. }) => {
                         return Err(Error::new(t.pos, format!("`{name}` is a value, not a type")))
                     }
                     None => {}

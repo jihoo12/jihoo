@@ -285,6 +285,9 @@ struct FnCx<'a> {
     /// Registers holding captured values, in a closure body: they cannot be
     /// assigned.
     captured: HashSet<Reg>,
+    /// For each closure this instance received as a comptime argument, the
+    /// registers holding its captured values.
+    closure_regs: HashMap<String, Vec<Reg>>,
 }
 
 /// An integer literal, possibly negated: its type comes from context.
@@ -312,6 +315,7 @@ impl<'a> FnCx<'a> {
             regs: Vec::new(),
             scopes: vec![HashMap::new()],
             captured: HashSet::new(),
+            closure_regs: HashMap::new(),
         }
     }
 
@@ -329,6 +333,12 @@ impl<'a> FnCx<'a> {
             if self.scopes[0].insert(p.name.clone(), r).is_some() {
                 return Err(Error::new(p.pos, format!("duplicate parameter `{}`", p.name)));
             }
+        }
+        // Then the hidden parameters: the captured values of comptime closures.
+        let bindings = self.bindings.clone();
+        for (name, captures) in bindings.closures() {
+            let regs = captures.iter().map(|t| self.new_reg(t.clone())).collect();
+            self.closure_regs.insert(name.to_string(), regs);
         }
 
         self.block(&f.body)?;
@@ -482,6 +492,12 @@ impl<'a> FnCx<'a> {
             Some(Binding::Type(t)) => {
                 return Err(Error::new(pos, format!("`{name}` is a type ({t}), not a value")));
             }
+            // A closure used as a value, not called: make a closure value.
+            Some(Binding::Closure { ty, func, .. }) => {
+                let captures = self.closure_regs[name].clone();
+                let what = format!("`{name}` was given a function that captures values");
+                return self.closure_value(pos, &what, func, captures, ty);
+            }
             None => {}
         }
         let key = self.env.key_or_err(pos, &self.bindings, name)?;
@@ -523,12 +539,18 @@ impl<'a> FnCx<'a> {
     }
 
     /// The function that `name` names at compile time, if it is a comptime
-    /// parameter or a constant holding a function: `(JIR name, params, ret)`.
-    /// Calls to it are direct calls.
-    fn known_func(&self, pos: Pos, name: &str) -> Result<Option<(String, Vec<Type>, Type)>, Error> {
+    /// parameter or a constant holding a function: `(JIR name, arguments it
+    /// takes first, params, ret)`. The first arguments are the captured values
+    /// of a comptime closure. Calls to it are direct calls.
+    #[allow(clippy::type_complexity)]
+    fn known_func(&self, pos: Pos, name: &str) -> Result<Option<(String, Vec<Reg>, Vec<Type>, Type)>, Error> {
         let found = match self.bindings.get(name) {
             Some(Binding::Value(ty, v)) => Some((ty.clone(), v.clone())),
-            Some(Binding::Type(_)) => None,
+            Some(Binding::Closure { ty: Type::Fn(params, ret), func, .. }) => {
+                let first = self.closure_regs[name].clone();
+                return Ok(Some((func.clone(), first, params.clone(), (**ret).clone())));
+            }
+            Some(Binding::Type(_) | Binding::Closure { .. }) => None,
             None => {
                 let key = self.env.key_or_err(pos, &self.bindings, name)?;
                 match self.env.constant(&key) {
@@ -541,7 +563,7 @@ impl<'a> FnCx<'a> {
             }
         };
         Ok(match found {
-            Some((Type::Fn(params, ret), ConstValue::Func(f))) => Some((f, params, *ret)),
+            Some((Type::Fn(params, ret), ConstValue::Func(f))) => Some((f, vec![], params, *ret)),
             _ => None,
         })
     }
@@ -1100,9 +1122,9 @@ impl<'a> FnCx<'a> {
                 }
                 // A comptime parameter or constant naming a function: a direct call.
                 if self.local(name).is_none() {
-                    if let Some((func, params, ret)) = self.known_func(pos, name)? {
-                        let regs = self.call_args(pos, &format!("`{name}`"), &params, args)?;
-                        return Ok(self.emit_to(ret, |dst| Inst::Call { dst, func, args: regs }));
+                    if let Some((func, mut first, params, ret)) = self.known_func(pos, name)? {
+                        first.extend(self.call_args(pos, &format!("`{name}`"), &params, args)?);
+                        return Ok(self.emit_to(ret, |dst| Inst::Call { dst, func, args: first }));
                     }
                 }
                 let key = self.env.key_or_err(pos, &self.bindings, name)?;

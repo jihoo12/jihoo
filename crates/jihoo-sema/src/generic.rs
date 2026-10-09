@@ -23,7 +23,16 @@ use crate::FnCx;
 pub(crate) enum Binding {
     Type(Type),
     Value(Type, ConstValue),
+    /// A closure passed to a `comptime` function parameter: the lifted function
+    /// `func` and the types of its captured values. The instance receives the
+    /// captured values as hidden arguments after its own, and calls `func`
+    /// directly.
+    Closure { ty: Type, func: String, captures: Vec<Type> },
 }
+
+/// What [`Env::bind`] asks before evaluating a comptime argument of type `want`
+/// on the VM: a binding made some other way (a closure), if any.
+pub(crate) type BindHook<'h> = dyn FnMut(&Expr, &Type) -> Result<Option<Binding>, Error> + 'h;
 
 /// The scope that names are resolved in: the module the code is written in, and
 /// the comptime parameters of the instance being compiled, in declaration order.
@@ -50,6 +59,15 @@ impl Bindings {
         self.items.is_empty()
     }
 
+    /// The closures bound, in order, with the types of their captured values:
+    /// the hidden parameters of the instance.
+    pub fn closures(&self) -> impl Iterator<Item = (&str, &[Type])> {
+        self.items.iter().filter_map(|(n, b)| match b {
+            Binding::Closure { captures, .. } => Some((n.as_str(), captures.as_slice())),
+            _ => None,
+        })
+    }
+
     /// The bound values as they would be written as arguments: `i64, 4`.
     pub fn args(&self) -> String {
         let parts: Vec<String> = self
@@ -59,7 +77,7 @@ impl Bindings {
                 Binding::Type(t) => t.to_string(),
                 Binding::Value(_, ConstValue::Int(v)) => v.to_string(),
                 Binding::Value(_, ConstValue::Bool(v)) => v.to_string(),
-                Binding::Value(_, ConstValue::Func(f)) => f.clone(),
+                Binding::Value(_, ConstValue::Func(f)) | Binding::Closure { func: f, .. } => f.clone(),
                 Binding::Value(_, v) => format!("{v:?}"),
             })
             .collect();
@@ -74,6 +92,7 @@ impl Bindings {
             .map(|(_, b)| match b {
                 Binding::Type(t) => t.jir(),
                 Binding::Value(t, v) => format!("{}:{v:?}", t.jir()),
+                Binding::Closure { ty, func, .. } => format!("{}:closure {func}", ty.jir()),
             })
             .collect();
         parts.join(",")
@@ -87,7 +106,7 @@ impl Bindings {
             .map(|(n, b)| match b {
                 Binding::Type(t) => format!("{n} = {t}"),
                 Binding::Value(_, ConstValue::Int(v)) => format!("{n} = {v}"),
-                Binding::Value(_, ConstValue::Func(f)) => format!("{n} = {f}"),
+                Binding::Value(_, ConstValue::Func(f)) | Binding::Closure { func: f, .. } => format!("{n} = {f}"),
                 Binding::Value(_, v) => format!("{n} = {v:?}"),
             })
             .collect();
@@ -126,9 +145,16 @@ impl FnCx<'_> {
             ));
         }
 
-        // Comptime arguments first: they determine the instance.
+        // Comptime arguments first: they determine the instance. A closure is
+        // lowered here, where its captured locals are; its captured values
+        // become hidden arguments.
         let comptime = decl.params.iter().zip(args).filter(|(p, _)| p.comptime);
-        let b = self.env.bind(name, self.env.fn_module(key), comptime, &self.bindings)?;
+        let env = self.env;
+        let outer = self.bindings.clone();
+        let mut hidden = Vec::new();
+        let b = env.bind(name, env.fn_module(key), comptime, &outer, &mut |a, want| {
+            self.closure_arg(a, want, &mut hidden)
+        })?;
         let (instance, sig) = self.env.instance(pos, key, decl, b)?;
 
         let mut regs = Vec::new();
@@ -138,7 +164,38 @@ impl FnCx<'_> {
             self.expect(a.pos, r, want, &format!("argument `{}` of `{name}`", p.name))?;
             regs.push(r);
         }
+        regs.extend(hidden);
         Ok(self.emit_to(sig.ret.clone(), |dst| Inst::Call { dst, func: instance, args: regs }))
+    }
+
+    /// A comptime argument of function type `want` that is a closure: a lambda
+    /// written here, or a closure this instance received itself. Its captured
+    /// values are added to `hidden`. A lambda that captures nothing is an
+    /// ordinary function value.
+    fn closure_arg(&mut self, a: &Expr, want: &Type, hidden: &mut Vec<Reg>) -> Result<Option<Binding>, Error> {
+        if !matches!(want, Type::Fn(..)) {
+            return Ok(None);
+        }
+        match &a.kind {
+            ExprKind::Lambda(l) => {
+                let lifted = self.lift(l, Some(want))?;
+                if lifted.captured.is_empty() {
+                    return Ok(Some(Binding::Value(lifted.ty, ConstValue::Func(lifted.func))));
+                }
+                let captures = lifted.captured.iter().map(|r| self.ty(*r).clone()).collect();
+                hidden.extend(lifted.captured);
+                Ok(Some(Binding::Closure { ty: lifted.ty, func: lifted.func, captures }))
+            }
+            ExprKind::Var(n) if self.local(n).is_none() => match self.bindings.get(n) {
+                Some(b @ Binding::Closure { .. }) => {
+                    let b = b.clone();
+                    hidden.extend(self.closure_regs[n.as_str()].iter().copied());
+                    Ok(Some(b))
+                }
+                _ => Ok(None),
+            },
+            _ => Ok(None),
+        }
     }
 }
 
@@ -152,6 +209,7 @@ impl<'p> Env<'p> {
         owner_module: usize,
         params_args: impl Iterator<Item = (&'a Param, &'a Expr)>,
         outer: &Rc<Bindings>,
+        hook: &mut BindHook<'_>,
     ) -> Result<Bindings, Error> {
         // Parameter types are written in the owner's module; arguments in `outer`.
         let mut b = Bindings::in_module(owner_module);
@@ -162,12 +220,19 @@ impl<'p> Env<'p> {
             } else {
                 // The parameter's type may use earlier parameters: `comptime x: T`.
                 let want = self.resolve(&p.ty, &Rc::new(b.clone()))?;
-                let (ty, v) = self.comptime(a, Some(&want), outer)?;
-                if ty != want {
+                let binding = match hook(a, &want)? {
+                    Some(binding) => binding,
+                    None => {
+                        let (ty, v) = self.comptime(a, Some(&want), outer)?;
+                        Binding::Value(ty, v)
+                    }
+                };
+                let (Binding::Value(ty, _) | Binding::Closure { ty, .. }) = &binding else { unreachable!() };
+                if *ty != want {
                     let msg = format!("comptime argument `{}` of `{owner}` must be {want}, found {ty}", p.name);
                     return Err(Error::new(a.pos, msg));
                 }
-                b.push(&p.name, Binding::Value(ty, v));
+                b.push(&p.name, binding);
             }
         }
         Ok(b)
@@ -196,12 +261,14 @@ impl<'p> Env<'p> {
         let name = format!("{fn_key}.{n}");
         let b = Rc::new(b);
         let sig = (|| {
-            let params = decl
+            let mut params: Vec<Type> = decl
                 .params
                 .iter()
                 .filter(|p| !p.comptime)
                 .map(|p| self.resolve(&p.ty, &b))
                 .collect::<Result<_, _>>()?;
+            // The captured values of closures come last.
+            params.extend(b.closures().flat_map(|(_, captures)| captures.iter().cloned()));
             let ret = match &decl.ret {
                 Some(t) => self.resolve(t, &b)?,
                 None => Type::Unit,

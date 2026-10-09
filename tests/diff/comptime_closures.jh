@@ -1,0 +1,44 @@
+// Closures passed to `comptime` function parameters: each closure gets its own
+// instance, which receives the captured values as hidden arguments and calls
+// the closure directly. No GC is involved, so this works natively too.
+
+struct Acc {
+    sum: i64
+    count: u8
+}
+
+fn fold(comptime f: fn(Acc, i64) -> Acc, xs: [i64; 5], init: Acc) -> Acc {
+    let acc = init
+    let i = 0
+    while i < len(xs) {
+        acc = f(acc, xs[i])
+        i = i + 1
+    }
+    return acc
+}
+
+fn count_if(comptime keep: fn(i64) -> bool, xs: [i64; 5]) -> i64 {
+    // Passes `keep` on, wrapped in another closure that captures it.
+    let r = fold(fn(a, x) {
+        if keep(x) {
+            a.count = a.count + 1
+        }
+        return a
+    }, xs, Acc { sum: 0, count: 0 })
+    return r.count as i64
+}
+
+fn entry() -> i64 {
+    let xs = [3, 8, 1, 9, 4]
+    let scale = 10
+    let offset: u8 = 2
+    let total = fold(fn(a, x) {
+        a.sum = a.sum + x * scale
+        a.count = a.count + offset
+        return a
+    }, xs, Acc { sum: 0, count: 0 })                       // sum 250, count 10
+    let limit = 4
+    let big = count_if(fn(x) { return x > limit }, xs)     // 2
+    let small = count_if(fn(x) { return x <= limit }, xs)  // 3
+    return total.sum + (total.count as i64) + big * 100 + small * 1000  // 3460
+}

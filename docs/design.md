@@ -328,6 +328,29 @@ let sq = fn(x: i64) -> i64 { return x * x }
   `closure @fn.N(%captured...)`: a GC object on the VM, so hosted only.
 - A closure cannot call itself by name (it has none); use a named function.
 
+### Comptime closures
+
+```jihoo
+#![freestanding]
+fn each(comptime f: fn(i64), xs: [i64; 5]) { ... f(xs[i]) ... }
+
+let limit = 10
+each(fn(x) { if x > limit { io.print_int(x) } }, xs)   // no GC needed
+```
+
+- A closure passed to a `comptime` function parameter is not a value at run
+  time. The function gets an instance for that closure (like any other comptime
+  argument), and the instance takes the captured values as hidden arguments,
+  after its own; `f(x)` in it is a direct call `call @fn.N(captured..., x)`.
+  No heap, no indirect call: this is how Rust compiles `impl Fn` arguments.
+- So capturing closures work in freestanding code this way. Inside the
+  instance, the closure can be called, passed on to another `comptime`
+  parameter, or captured by another closure passed on. Using it as a value
+  (storing or returning it) makes a closure value, which needs the GC: fine in
+  hosted code, an error in freestanding code.
+- Each closure written in the source is its own instance, so a function called
+  with many different closures is compiled many times.
+
 ## Enums and `match`
 
 ```jihoo
@@ -617,8 +640,7 @@ free of LLVM.
 8. ~~Closures, captured by value and lifted into functions.~~
 9. ~~Tasks and channels on the VM: one OS thread, a deterministic scheduler.~~
    `select` over several channels.
-10. Comptime closures: closures passed as `comptime` arguments, specialized at
-    compile time, with their captures on the stack, so freestanding code can
-    use them without a GC.
+10. ~~Comptime closures: closures passed to `comptime` parameters, one
+    instance per closure, captured values as hidden arguments.~~
 11. Coroutines for freestanding code, as a library on top of function values
     and `asm`.

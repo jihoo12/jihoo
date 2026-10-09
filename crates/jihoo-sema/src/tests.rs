@@ -579,7 +579,7 @@ fn closures() {
     let e = err("fn g(f: fn(i64) -> i64) {}\nfn main() { g(fn(x) { print(x) }) }");
     assert!(e.contains("missing `return`"), "{e}");
     let e = err(&fs("fn f(k: i64) -> i64 { let g = fn(x: i64) -> i64 { return x + k }\n return g(1) }"));
-    assert!(e.contains("captures `k`") && e.contains("only available in hosted mode"), "{e}");
+    assert!(e.contains("captures `k`") && e.contains("only hosted mode has"), "{e}");
     let e = err("fn adder(n: i64) -> fn(i64) -> i64 { return fn(x) { return x + n } }\nconst A = adder(1)\nfn main() {}");
     assert!(e.contains("closure that captures values cannot be computed at compile time"), "{e}");
     assert!(err("fn main() { let f = fn(x: i64) }").contains("expected the body of the anonymous function"));
@@ -592,6 +592,32 @@ fn closures_in_freestanding_code() {
     let m = check(&fs("const SQ = fn(x: i64) -> i64 { return x * x }\nfn f() -> i64 { let g = fn(x: i64) -> i64 { return x + 1 }\n return g(SQ(3)) }")).unwrap();
     // `SQ` is a constant, so calling it is a direct call.
     assert!(m.to_string().contains("call @fn.0(") && m.to_string().contains("funcref @fn.1"), "{m}");
+}
+
+// ---- comptime closures ----
+
+#[test]
+fn comptime_closures() {
+    let src = "fn each(comptime f: fn(i64), xs: [i64; 2]) { f(xs[0])\n f(xs[1]) }\n\
+               fn twice(comptime f: fn(i64), xs: [i64; 2]) { each(f, xs)\n each(fn(x) { f(x + 1) }, xs) }\n\
+               fn f(k: i64, s: i64) { let xs = [1, 2]\n each(fn(x) { g(x * k) }, xs)\n each(fn(x) { g(x + k + s) }, xs)\n twice(fn(x) { g(x + s) }, xs) }\n\
+               fn g(x: i64) {}";
+    let m = check(&fs(src)).unwrap();
+    let text = m.to_string();
+    // One instance per closure; captured values are hidden arguments, and calls
+    // are direct: no closure values, no indirect calls.
+    assert!(text.contains("fn @each.0([2 x i64], i64) -> unit"), "{text}");
+    assert!(text.contains("fn @each.1([2 x i64], i64, i64) -> unit"), "{text}");
+    assert!(!text.contains("closure") && !text.contains("call %"), "{text}");
+
+    // Hosted code may keep a comptime closure as a value; freestanding code may not.
+    let keep = "fn keep(comptime f: fn(i64) -> i64) -> fn(i64) -> i64 { return f }\n";
+    check(&format!("{keep}fn main() {{ let k = 1\n print(keep(fn(x) {{ return x + k }})(1)) }}")).unwrap();
+    let e = err(&fs(&format!("{keep}fn h(k: i64) -> i64 {{ return keep(fn(x) {{ return x + k }})(1) }}")));
+    assert!(e.contains("`f` was given a function that captures values") && e.contains("in `keep` with f = fn."), "{e}");
+    // The closure's type must match the parameter's.
+    let e = err("fn each(comptime f: fn(i64), x: i64) { f(x) }\nfn main() { let k = 1\n each(fn(x: u8) { print(k) }, 1) }");
+    assert!(e.contains("comptime argument `f` of `each` must be fn(i64), found fn(u8)"), "{e}");
 }
 
 // ---- tasks and channels ----
