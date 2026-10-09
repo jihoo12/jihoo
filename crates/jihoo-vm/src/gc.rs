@@ -3,11 +3,21 @@
 //! Strings and aggregates (structs and arrays) live here. Aggregate objects are
 //! immutable: the VM implements value semantics by allocating a new object on every
 //! field or element update.
+//!
+//! Setting `JIHOO_GC_STRESS=1` collects before every allocation, so a value that
+//! is live but not reachable from the roots is freed at the first chance instead
+//! of once in a blue moon. Run the test suite this way after touching rooting.
 
 use crate::Value;
 
+/// A handle to a heap object: a slot index plus the slot's generation when the
+/// object was allocated. A freed slot moves to the next generation, so a stale
+/// handle is caught on use even after the slot is reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GcRef(u32);
+pub struct GcRef {
+    index: u32,
+    gen: u32,
+}
 
 #[derive(Debug)]
 enum Obj {
@@ -36,6 +46,7 @@ impl Obj {
 #[derive(Debug)]
 struct Slot {
     obj: Option<Obj>,
+    gen: u32,
     marked: bool,
 }
 
@@ -53,6 +64,8 @@ pub struct Heap {
     live_bytes: usize,
     next_gc: usize,
     collections: usize,
+    /// Collect before every allocation (`JIHOO_GC_STRESS`).
+    stress: bool,
 }
 
 const INITIAL_THRESHOLD: usize = 1 << 20;
@@ -65,6 +78,7 @@ impl Default for Heap {
             live_bytes: 0,
             next_gc: INITIAL_THRESHOLD,
             collections: 0,
+            stress: std::env::var_os("JIHOO_GC_STRESS").is_some_and(|v| !v.is_empty() && v != "0"),
         }
     }
 }
@@ -72,7 +86,12 @@ impl Default for Heap {
 impl Heap {
     /// True when the caller should run [`Heap::collect`] before allocating more.
     pub fn should_collect(&self) -> bool {
-        self.live_bytes >= self.next_gc
+        self.stress || self.live_bytes >= self.next_gc
+    }
+
+    /// Collects before every allocation from now on, whatever `JIHOO_GC_STRESS` says.
+    pub fn set_stress(&mut self, on: bool) {
+        self.stress = on;
     }
 
     pub fn alloc_str(&mut self, s: &str) -> GcRef {
@@ -85,32 +104,40 @@ impl Heap {
 
     fn alloc(&mut self, obj: Obj) -> GcRef {
         self.live_bytes += obj.size();
-        let slot = Slot { obj: Some(obj), marked: false };
         match self.free.pop() {
-            Some(i) => {
-                self.slots[i as usize] = slot;
-                GcRef(i)
+            Some(index) => {
+                let slot = &mut self.slots[index as usize];
+                slot.obj = Some(obj);
+                GcRef { index, gen: slot.gen }
             }
             None => {
-                self.slots.push(slot);
-                GcRef(self.slots.len() as u32 - 1)
+                self.slots.push(Slot { obj: Some(obj), gen: 0, marked: false });
+                GcRef { index: self.slots.len() as u32 - 1, gen: 0 }
             }
+        }
+    }
+
+    /// The live object `r` refers to. Panics on a freed object: that is a rooting
+    /// bug in the VM, never an error in the jihoo program.
+    fn obj(&self, r: GcRef) -> &Obj {
+        let slot = &self.slots[r.index as usize];
+        match &slot.obj {
+            Some(obj) if slot.gen == r.gen => obj,
+            _ => panic!("use of freed object {r:?}"),
         }
     }
 
     pub fn str(&self, r: GcRef) -> &str {
-        match &self.slots[r.0 as usize].obj {
-            Some(Obj::Str(s)) => s,
-            Some(_) => panic!("{r:?} is not a string"),
-            None => panic!("use of freed object {r:?}"),
+        match self.obj(r) {
+            Obj::Str(s) => s,
+            _ => panic!("{r:?} is not a string"),
         }
     }
 
     pub fn items(&self, r: GcRef) -> &[Value] {
-        match &self.slots[r.0 as usize].obj {
-            Some(Obj::Agg(f)) => f,
-            Some(_) => panic!("{r:?} is not an aggregate"),
-            None => panic!("use of freed object {r:?}"),
+        match self.obj(r) {
+            Obj::Agg(f) => f,
+            _ => panic!("{r:?} is not an aggregate"),
         }
     }
 
@@ -118,14 +145,13 @@ impl Heap {
         // Mark.
         let mut work: Vec<GcRef> = roots.into_iter().filter_map(Value::gc_ref).collect();
         while let Some(r) = work.pop() {
-            let slot = &mut self.slots[r.0 as usize];
+            let slot = &mut self.slots[r.index as usize];
+            assert!(slot.obj.is_some() && slot.gen == r.gen, "reachable value refers to freed object {r:?}");
             if slot.marked {
                 continue;
             }
             slot.marked = true;
-            if let Some(obj) = &slot.obj {
-                obj.children(&mut work);
-            }
+            slot.obj.as_ref().unwrap().children(&mut work);
         }
 
         // Sweep.
@@ -134,6 +160,7 @@ impl Heap {
                 slot.marked = false;
             } else if let Some(obj) = slot.obj.take() {
                 self.live_bytes -= obj.size();
+                slot.gen = slot.gen.wrapping_add(1);
                 self.free.push(i as u32);
             }
         }
@@ -148,5 +175,21 @@ impl Heap {
             live_bytes: self.live_bytes,
             collections: self.collections,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "use of freed object")]
+    fn stale_ref_is_caught_after_slot_reuse() {
+        let mut heap = Heap::default();
+        let old = heap.alloc_str("old");
+        heap.collect([]);
+        let new = heap.alloc_str("new");
+        assert_eq!(old.index, new.index, "the slot should be reused");
+        heap.str(old);
     }
 }

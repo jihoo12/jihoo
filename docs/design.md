@@ -375,9 +375,21 @@ most common use of asm.
 
 ## GC
 
-`crates/jihoo-vm/src/gc.rs` is a stop-the-world mark & sweep heap. The roots are the
-registers of every VM frame; a collection may happen at any allocation once the heap
-grows past twice the size that survived the last collection (1 MiB minimum).
+`crates/jihoo-vm/src/gc.rs` is a stop-the-world mark & sweep heap. A collection may
+happen at any allocation once the heap grows past twice the size that survived the
+last collection (1 MiB minimum).
+
+- The roots are gathered in one place, `Vm::roots`: the registers of every VM frame,
+  plus values handed out to the embedder (`Vm::alloc_string`, used for comptime
+  arguments), which stay alive as long as the VM. Future roots, such as the stacks
+  of other tasks or values waiting in a channel, go there too.
+- The invariant: whatever an instruction allocates from must already be reachable
+  from the roots. Values read from registers are; values held only in Rust locals
+  are not.
+- A `GcRef` is a slot index plus the slot's generation, so using a freed object
+  panics even after its slot has been reused, instead of reading the wrong object.
+- `JIHOO_GC_STRESS=1` collects before every allocation, which turns a missing
+  root into a panic on the first run instead of a rare heisenbug.
 
 ## Why the IR is a text file
 
@@ -392,6 +404,8 @@ free of LLVM.
 - Differential tests (`tests/diff/`): each program runs on the VM and as a native
   binary, and both must exit with the same status. This keeps the two backends
   honest about the semantics of JIR.
+- `JIHOO_GC_STRESS=1 cargo test` runs everything with a collection at every
+  allocation. Run it after any change to the VM that allocates or adds roots.
 
 ## Roadmap
 

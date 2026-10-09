@@ -60,6 +60,10 @@ pub struct Vm<'m> {
     fn_index: HashMap<&'m str, usize>,
     heap: Heap,
     stack: Vec<Frame>,
+    /// Values handed out to the embedder (`alloc_string`), kept alive for as long
+    /// as the VM lives: between allocating an argument and passing it to
+    /// `call_named`, no frame holds it.
+    pinned: Vec<Value>,
     /// Instructions left before execution is stopped, if limited.
     fuel: Option<u64>,
     /// The next number `unique` hands out.
@@ -74,7 +78,15 @@ pub fn run(module: &Module, out: &mut dyn Write) -> Result<i64, VmError> {
 impl<'m> Vm<'m> {
     pub fn new(module: &'m Module) -> Self {
         let fn_index = module.funcs.iter().enumerate().map(|(i, f)| (f.name.as_str(), i)).collect();
-        Vm { module, fn_index, heap: Heap::default(), stack: Vec::new(), fuel: None, uniques: 0 }
+        Vm {
+            module,
+            fn_index,
+            heap: Heap::default(),
+            stack: Vec::new(),
+            pinned: Vec::new(),
+            fuel: None,
+            uniques: 0,
+        }
     }
 
     /// Starts `unique` at `next`, so that several runs never repeat a name.
@@ -95,9 +107,12 @@ impl<'m> Vm<'m> {
         self
     }
 
-    /// Allocates a string on this VM's heap, to pass as an argument.
+    /// Allocates a string on this VM's heap, to pass as an argument. It stays
+    /// alive until the VM is dropped.
     pub fn alloc_string(&mut self, s: &str) -> Value {
-        Value::Str(self.alloc_str(s))
+        let v = Value::Str(self.alloc_str(s));
+        self.pinned.push(v);
+        v
     }
 
     /// Calls the function `name` with `args`, regardless of the module's profile.
@@ -112,6 +127,10 @@ impl<'m> Vm<'m> {
 
     pub fn heap(&self) -> &Heap {
         &self.heap
+    }
+
+    pub fn heap_mut(&mut self) -> &mut Heap {
+        &mut self.heap
     }
 
     pub fn run_main(&mut self, out: &mut dyn Write) -> Result<i64, VmError> {
@@ -412,7 +431,9 @@ impl<'m> Vm<'m> {
     }
 
     /// Allocates on the GC heap, collecting first if the heap is over its threshold.
-    /// Every live value is in some frame's registers, so the frames are the roots.
+    /// Whatever an instruction allocates from must already be reachable from
+    /// [`Vm::roots`]: values read from registers are, values only held in Rust
+    /// locals are not.
     fn alloc_str(&mut self, s: &str) -> GcRef {
         self.maybe_collect();
         self.heap.alloc_str(s)
@@ -425,8 +446,15 @@ impl<'m> Vm<'m> {
 
     fn maybe_collect(&mut self) {
         if self.heap.should_collect() {
-            self.heap.collect(self.stack.iter().flat_map(|f| f.regs.iter()));
+            let roots = Self::roots(&self.stack, &self.pinned);
+            self.heap.collect(roots);
         }
+    }
+
+    /// Every value the program can still reach without going through the heap.
+    /// New kinds of roots (more stacks, queued messages) belong here.
+    fn roots<'a>(stack: &'a [Frame], pinned: &'a [Value]) -> impl Iterator<Item = &'a Value> {
+        stack.iter().flat_map(|f| f.regs.iter()).chain(pinned)
     }
 
     fn bounds_check(&self, agg: GcRef, index: Reg) -> Result<usize, VmError> {
@@ -715,5 +743,42 @@ fn main() {
         let stats = vm.heap().stats();
         assert!(stats.collections > 0, "{stats:?}");
         assert!(stats.live_bytes < 4 << 20, "{stats:?}");
+    }
+
+    #[test]
+    fn arguments_survive_collection() {
+        // No frame holds the first argument while the second is allocated.
+        let m = compile("fn join(a: str, b: str) -> str { return a + b }\nfn main() {}");
+        let mut vm = Vm::new(&m);
+        vm.heap_mut().set_stress(true);
+        let a = vm.alloc_string("left ");
+        let b = vm.alloc_string("right");
+        let Value::Str(r) = vm.call_named("join", &[a, b], &mut Vec::new()).unwrap() else { panic!() };
+        assert_eq!(vm.heap().str(r), "left right");
+        assert!(vm.heap().stats().collections >= 2);
+    }
+
+    #[test]
+    fn programs_survive_stress_collection() {
+        let src = "
+struct Named { name: str, tags: [str; 2] }
+fn rename(n: Named, s: str) -> Named { n.name = s + n.name\n return n }
+fn main() {
+    let n = Named { name: \"a\", tags: [\"x\", \"y\"] }
+    let i = 0
+    while i < 50 {
+        n = rename(n, \"b\")
+        n.tags[1] = n.tags[0] + n.tags[1]
+        i = i + 1
+    }
+    print(n.tags[1])
+}";
+        let m = compile(src);
+        let mut vm = Vm::new(&m);
+        vm.heap_mut().set_stress(true);
+        let mut out = Vec::new();
+        vm.run_main(&mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), format!("{}y\n", "x".repeat(50)));
+        assert!(vm.heap().stats().collections > 100);
     }
 }
