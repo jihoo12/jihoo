@@ -19,7 +19,7 @@ impl Display for BlockId {
 impl Display for Module {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         writeln!(f, "; jihoo IR")?;
-        writeln!(f, "jir 0")?;
+        writeln!(f, "jir {JIR_VERSION}")?;
         writeln!(f, "profile {}", self.profile.as_str())?;
         for s in &self.structs {
             writeln!(f)?;

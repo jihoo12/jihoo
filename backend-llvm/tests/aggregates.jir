@@ -1,0 +1,61 @@
+; Structs, enums and arrays by value: building, reading and replacing parts,
+; nested paths, and passing a struct to a function (which gets a copy).
+; expect: exit 143
+jir 1
+profile freestanding
+
+struct $P { x: i64, y: i32 } size 16 align 8
+struct $Box { p: $P, items: [3 x i64] } size 40 align 8
+enum $E { A, B(i64, u8) } size 24 align 8
+
+; Changes its own copy of the struct only.
+fn @bump($P) -> i64 {
+  regs $P i64 i64
+bb0:
+  %1 = const 100
+  %0 = setfield %0, 0, %1
+  %2 = field %0, 0
+  ret %2
+}
+
+fn @_start() -> i64 {
+  regs i64 i64 i32 $P i64 [3 x i64] i64 $Box i64 i64 i64 i64 $E u32 u32 bool i64 u8 i64 i64 u8
+bb0:
+  %1 = const 1
+  %2 = const 2
+  %3 = struct $P(%1, %2)
+  %4 = call @bump(%3)
+  ; %3.x is still 1
+  %5 = array(%1, %1, %1)
+  %6 = const 2
+  %5 = setelem %5, %6, %4
+  ; [1, 1, 100]
+  %7 = struct $Box(%3, %5)
+  %8 = const 20
+  %7 = setpath %7, (field 1, elem %6), %8
+  %7 = setpath %7, (field 0, field 0), %8
+  ; Box { p: P { x: 20 }, items: [1, 1, 20] }
+  %9 = getpath %7, (field 1, elem %6)
+  %10 = getpath %7, (field 0, field 0)
+  %11 = elem %5, %6
+  ; 20 + 20 + 100 (the array was copied into the box)
+  %0 = add %9, %10
+  %0 = add %0, %11
+  %20 = const 2
+  %12 = variant 1(%1, %20)
+  %13 = tag %12
+  %14 = const 1
+  %15 = eq %13, %14
+  br %15, bb1, bb2
+bb1:
+  %16 = payload %12, 1, 0
+  %17 = payload %12, 1, 1
+  %18 = cast %17
+  ; + 1 + 2
+  %0 = add %0, %16
+  %0 = add %0, %18
+  ret %0
+bb2:
+  %19 = const 0
+  ret %19
+}

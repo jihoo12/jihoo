@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 0)
+# JIR — jihoo IR text format (version 1)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it. Both sides must agree on this
@@ -6,11 +6,34 @@ document; the Rust definitions live in `crates/jihoo-ir/src/lib.rs` and the C++ 
 in `backend-llvm/src/jir.h`. The typing rules are implemented once, in
 `crates/jihoo-ir/src/types.rs`, and checked by `crates/jihoo-ir/src/verify.rs`.
 
+## Versions
+
+A module starts with `jir N`, the version of this format it is written in, and
+`jihoo-llc` compiles only the one version it was built for
+(`jihoo-llc --version` prints it). A module of another version is refused at
+that first line, so a frontend and a backend from different builds never
+silently disagree about what a module means.
+
+The version goes up with every change that lets the two sides disagree: a new
+or removed instruction, type or header, a change of syntax, or a change of what
+something means (such as division by zero going from undefined to a trap). A
+change to this document that only clarifies it keeps the version.
+
+`JIR_VERSION` in `crates/jihoo-ir/src/lib.rs`, `jir::kVersion` in
+`backend-llvm/src/jir.h` and the title above must agree; the `version` tests in
+`crates/jihoo-ir` check that. They also keep a fingerprint of this document, so
+editing it fails a test until you decide whether the edit needs a new version.
+
+| version | change |
+|---------|--------|
+| 0 | every format before versions were kept, up to and including native division checks |
+| 1 | the first version that is bumped on change; the header must come first |
+
 ## Example
 
 ```
 ; jihoo IR
-jir 0
+jir 1
 profile freestanding
 
 struct $Node { value: i64, next: *$Node } size 16 align 8
@@ -56,7 +79,7 @@ bb3:
 ## Module
 
 ```
-jir 0                                ; format version, must come first
+jir 1                                ; format version, must come first
 profile hosted|native|freestanding   ; language profile
 struct ...                           ; zero or more structs
 enum ...                             ; zero or more enums

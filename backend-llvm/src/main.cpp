@@ -26,13 +26,15 @@ const char *kUsage =
     "options:\n"
     "  --emit-llvm        write textual LLVM IR instead of an object file\n"
     "  -O0 | -O1 | -O2 | -O3   optimization level (default -O2)\n"
-    "  --target <triple>  target triple (default: host)\n";
+    "  --target <triple>  target triple (default: host)\n"
+    "  --version          print the JIR version this backend reads\n";
 
 struct Options {
   std::string input, output;
   bool emit_llvm = false;
   int opt_level = 2;
   std::string triple;
+  bool version = false;
 };
 
 std::optional<Options> parse_args(int argc, char **argv) {
@@ -47,6 +49,9 @@ std::optional<Options> parse_args(int argc, char **argv) {
       o.emit_llvm = true;
     } else if (a.size() == 3 && a.rfind("-O", 0) == 0 && a[2] >= '0' && a[2] <= '3') {
       o.opt_level = a[2] - '0';
+    } else if (a == "--version") {
+      o.version = true;
+      return o;
     } else if (a == "-h" || a == "--help") {
       return std::nullopt;
     } else if (!a.empty() && a[0] != '-' && o.input.empty()) {
@@ -143,6 +148,10 @@ int main(int argc, char **argv) {
   if (!opts) {
     std::cerr << kUsage;
     return 2;
+  }
+  if (opts->version) {
+    std::cout << "jihoo-llc (JIR version " << jir::kVersion << ")\n";
+    return 0;
   }
   try {
     return run(*opts);

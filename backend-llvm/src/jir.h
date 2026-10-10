@@ -10,6 +10,10 @@
 
 namespace jir {
 
+// The one JIR version this backend reads, from the `jir N` header. It must
+// equal JIR_VERSION in crates/jihoo-ir/src/lib.rs (a Rust test checks this).
+constexpr int64_t kVersion = 1;
+
 enum class Profile { Hosted, Native, Freestanding };
 
 struct Type {

@@ -92,3 +92,4 @@ jihoo-llc prog.jir -o prog.ll --emit-llvm
 | `--emit-llvm` | write textual LLVM IR instead of an object file |
 | `-O0` … `-O3` | optimization level (default `-O2`) |
 | `--target <triple>` | target triple (default: the host) |
+| `--version` | print the [JIR version](../jir.md#versions) it reads; it refuses modules of any other |

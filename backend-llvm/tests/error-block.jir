@@ -1,0 +1,11 @@
+; Jumps go to blocks of the same function.
+; expect: error jump to missing block bb7
+jir 1
+profile freestanding
+
+fn @_start() -> i64 {
+  regs i64
+bb0:
+  %0 = const 0
+  jmp bb7
+}

@@ -32,3 +32,20 @@ else()
 endif()
 
 install(TARGETS jihoo-llc RUNTIME DESTINATION bin)
+
+# The backend's own tests: hand-written modules in tests/, independent of the
+# frontend (`ctest`, see tests/run-test.sh). Modules that run are linked with
+# ld.lld; without it, those tests are skipped.
+enable_testing()
+find_program(JIHOO_LD NAMES ld.lld)
+if(NOT JIHOO_LD)
+  set(JIHOO_LD "")
+endif()
+file(GLOB JIHOO_TESTS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.jir)
+foreach(test ${JIHOO_TESTS})
+  get_filename_component(name ${test} NAME_WE)
+  add_test(NAME ${name}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/run-test.sh
+      $<TARGET_FILE:jihoo-llc> "${JIHOO_LD}" ${test} ${CMAKE_CURRENT_BINARY_DIR}/tests)
+  set_tests_properties(${name} PROPERTIES SKIP_RETURN_CODE 77)
+endforeach()

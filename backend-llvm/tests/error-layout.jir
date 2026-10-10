@@ -1,0 +1,13 @@
+; The frontend's struct layout must be the target's.
+; expect: error layout mismatch for $P
+jir 1
+profile freestanding
+
+struct $P { a: u8, b: i64 } size 9 align 1
+
+fn @_start() -> i64 {
+  regs i64
+bb0:
+  %0 = const 0
+  ret %0
+}

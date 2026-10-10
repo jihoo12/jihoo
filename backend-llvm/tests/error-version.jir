@@ -1,0 +1,12 @@
+; A module in another version of the format is refused at its header, before
+; anything that may have changed is read.
+; expect: error this is JIR version 999, but this jihoo-llc reads version
+jir 999
+profile freestanding
+
+fn @_start() -> i64 {
+  regs i64
+bb0:
+  %0 = newer_instruction
+  ret %0
+}

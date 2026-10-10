@@ -7,7 +7,9 @@ then links the result.
 ## Steps
 
 1. **Parse** the `.jir` text (`backend-llvm/src/jir_parser.cpp`) into the C++
-   mirror of the IR (`backend-llvm/src/jir.h`).
+   mirror of the IR (`backend-llvm/src/jir.h`). The `jir N` header comes first,
+   and a module of any version but the backend's own (`jihoo-llc --version`) is
+   refused there ([Versions](../jir.md#versions)).
 2. **Generate LLVM IR** (`backend-llvm/src/codegen.cpp`). Every JIR register
    gets an `alloca`; `mem2reg` turns them into SSA values, so the JIR need not
    be SSA. Structs and enums become named LLVM structs, and the backend checks

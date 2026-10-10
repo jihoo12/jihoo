@@ -1,0 +1,53 @@
+; Control flow and calls: a loop that writes its registers again (JIR is not
+; SSA), recursion, and a call through a function value.
+; expect: exit 110
+jir 1
+profile freestanding
+
+; 1 + 2 + ... + n
+fn @sum(i64) -> i64 {
+  regs i64 i64 i64 bool i64
+bb0:
+  %1 = const 0
+  %2 = const 1
+  jmp bb1
+bb1:
+  %3 = le %2, %0
+  br %3, bb2, bb3
+bb2:
+  %1 = add %1, %2
+  %4 = const 1
+  %2 = add %2, %4
+  jmp bb1
+bb3:
+  ret %1
+}
+
+fn @fib(i64) -> i64 {
+  regs i64 i64 bool i64 i64 i64 i64
+bb0:
+  %1 = const 2
+  %2 = lt %0, %1
+  br %2, bb1, bb2
+bb1:
+  ret %0
+bb2:
+  %3 = const 1
+  %4 = sub %0, %3
+  %4 = call @fib(%4)
+  %5 = sub %0, %1
+  %5 = call @fib(%5)
+  %6 = add %4, %5
+  ret %6
+}
+
+fn @_start() -> i64 {
+  regs fn(i64) -> i64 i64 i64 i64 i64
+bb0:
+  %0 = funcref @sum
+  %1 = const 10
+  %2 = call %0(%1)
+  %3 = call @fib(%1)
+  %4 = add %2, %3
+  ret %4
+}

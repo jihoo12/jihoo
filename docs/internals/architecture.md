@@ -46,9 +46,10 @@ by a VM or compiled by LLVM.
 ## Why the IR is a text file
 
 The frontend (Rust) and the LLVM backend (C++) only talk through `.jir` files
-([JIR](../jir.md)). This keeps the IR an explicit, versioned contract, lets the
-backend be developed and tested on its own with hand-written `.jir`, and keeps
-the Rust build free of LLVM.
+([JIR](../jir.md)). This keeps the IR an explicit, versioned contract
+([Versions](../jir.md#versions)), lets the backend be developed and tested on
+its own with hand-written `.jir` ([Testing](testing.md#backend-tests)), and
+keeps the Rust build free of LLVM.
 
 ## Shared rules
 

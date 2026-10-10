@@ -22,6 +22,9 @@
           ./lib
           ./examples
           ./tests
+          # The JIR version tests compare these with the frontend.
+          ./docs/jir.md
+          ./backend-llvm/src/jir.h
         ];
       };
 
@@ -44,6 +47,17 @@
             src = ./backend-llvm;
             nativeBuildInputs = [ pkgs.cmake pkgs.ninja ];
             buildInputs = [ llvm.llvm ];
+
+            # The backend's own tests, with hand-written modules
+            # (backend-llvm/tests), independent of the frontend.
+            doCheck = true;
+            nativeCheckInputs = [ llvm.lld ];
+            checkPhase = ''
+              runHook preCheck
+              ctest --output-on-failure
+              runHook postCheck
+            '';
+
             meta = meta // {
               description = "LLVM backend of the jihoo compiler";
               mainProgram = "jihoo-llc";

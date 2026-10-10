@@ -441,8 +441,16 @@ Module parse(const std::string &text) {
     if (!fn) {
       // Module header and function headers.
       l.i++;
+      // The version comes first, so that a module in another version of the
+      // format is refused for that, not for the first line that changed.
+      if (!saw_version && !(first.kind == TokKind::Word && first.text == "jir"))
+        fail(no, "expected the `jir N` header first");
       if (first.kind == TokKind::Word && first.text == "jir") {
-        if (l.integer() != 0) fail(no, "unsupported JIR version");
+        if (saw_version) fail(no, "a second `jir` header");
+        int64_t v = l.integer();
+        if (v != kVersion)
+          fail(no, "this is JIR version " + std::to_string(v) + ", but this jihoo-llc reads version " +
+                       std::to_string(kVersion) + "; use the jihoo-llc that came with your jihoo");
         saw_version = true;
       } else if (first.kind == TokKind::Word && first.text == "profile") {
         const Tok &p = l.next("a profile");
@@ -526,7 +534,7 @@ Module parse(const std::string &text) {
         e.ret = l.type();
         m.externs.push_back(std::move(e));
       } else if (first.kind == TokKind::Word && first.text == "fn") {
-        if (!saw_version || !saw_profile) fail(no, "missing `jir 0` / `profile` header");
+        if (!saw_version || !saw_profile) fail(no, "missing `profile` header");
         const Tok &name = l.next("a function name");
         if (name.kind != TokKind::Global) fail(no, "expected a function like @name");
         m.funcs.push_back({});
@@ -615,7 +623,7 @@ Module parse(const std::string &text) {
     }
   }
   if (fn) fail(no, "unterminated function @" + fn->name);
-  if (!saw_version) fail(no, "missing `jir 0` header");
+  if (!saw_version) fail(no, "missing `jir N` header");
   return m;
 }
 
