@@ -32,7 +32,7 @@ impl FnCx<'_> {
             },
             ExprKind::Field(base, n) => match &base.kind {
                 ExprKind::Var(a) if self.local(a).is_none() && self.env.is_alias(self.bindings.module, a) => {
-                    format!("{a}.{n}")
+                    format!("{a}.{}", crate::hygiene::unqualified(n))
                 }
                 _ => return Ok(None),
             },
@@ -66,6 +66,7 @@ impl FnCx<'_> {
         args: Option<&[Expr]>,
         expected: Option<&Type>,
     ) -> Result<Reg, Error> {
+        let variant = crate::hygiene::unqualified(variant);
         let (ty, given) = match en {
             EnumRef::Known(t) => (t, None),
             EnumRef::Generic(key) => match expected {

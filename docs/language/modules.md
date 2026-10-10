@@ -28,13 +28,39 @@ import names unqualified.
 ## Visibility
 
 Items are private to their module unless marked `pub`: `pub fn`, `pub struct`,
-`pub enum`, `pub const`, `pub macro`, `pub extern fn`. A `pub` struct's fields
-are all public, and so are a `pub` enum's variants. Using a private item from
-another module is an error that names it:
+`pub enum`, `pub const`, `pub macro`, `pub extern fn`. A `pub`
+enum's variants are public too. Using a private item from another module is an
+error that names it:
 
 ```text
 error: main.jh:4:5: `alloc.helper` is private to module `alloc`
 ```
+
+### Fields
+
+A struct's fields are private to its module too, even in a `pub` struct,
+unless they are marked `pub` themselves:
+
+```jihoo
+pub struct Account {
+    id: i64              // only this module reads, writes or names it
+    pub balance: i64     // every module does
+}
+
+pub fn open(id: i64) -> Account {
+    return Account { id: id, balance: 0 }
+}
+```
+
+Another module can read and assign `a.balance`, but not `a.id`, and it cannot
+build an `Account` with a literal, which would have to name `id`; it calls
+`open` instead. A struct pattern may name only public fields there, and `..`
+skips the others. So a module can keep what its structs hold to itself and
+change it later, as `alloc.Vec(T)` does with its arena pointer.
+
+A macro's code may use the private fields of the module the macro is defined
+in, wherever it is expanded, just as it may use that module's private items
+([Macros](macros.md#scope-and-hygiene)); code the caller passes to the macro may not.
 
 ## Finding modules
 

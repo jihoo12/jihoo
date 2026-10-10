@@ -115,31 +115,31 @@ impl FnCx<'_> {
                 if matches!(&base.kind, ExprKind::Var(a) if self.local(a).is_none() && self.env.is_alias(self.bindings.module, a)) =>
             {
                 let ExprKind::Var(alias) = &base.kind else { unreachable!() };
-                let root = self.var(e.pos, &format!("{alias}.{item}"))?;
+                let root = self.var(e.pos, &format!("{alias}.{}", crate::hygiene::unqualified(item)))?;
                 Ok(Place::Reg { root, path: vec![], ty: self.ty(root).clone(), readonly: Some("a constant") })
             }
             ExprKind::Field(base, name) => {
                 let base = self.place(base)?;
                 match base.ty().clone() {
                     t @ Type::Struct(_) => {
-                        let (index, fty) = self.env.field(e.pos, &t, name)?;
+                        let (index, fty) = self.env.field(e.pos, &t, name, self.bindings.module)?;
                         Ok(self.step(base, Step::Field(index), fty))
                     }
                     // `p.x` with `p: *Struct` reads through the pointer, like Go.
                     Type::Ptr(inner) if matches!(*inner, Type::Struct(_)) => {
-                        let (index, fty) = self.env.field(e.pos, &inner, name)?;
+                        let (index, fty) = self.env.field(e.pos, &inner, name, self.bindings.module)?;
                         let ptr = self.read(base);
                         Ok(self.step_ptr(ptr, Step::Field(index), fty))
                     }
                     // `c.x` with `c: cell Struct` is a part of what the cell holds.
                     Type::Cell(inner) if matches!(*inner, Type::Struct(_)) => {
-                        let (index, fty) = self.env.field(e.pos, &inner, name)?;
+                        let (index, fty) = self.env.field(e.pos, &inner, name, self.bindings.module)?;
                         let cell = self.read(base);
                         Ok(Place::Cell { cell, path: vec![Step::Field(index)], ty: fty })
                     }
                     // `r.x` with `r: ref Struct` reads through the ref.
                     Type::Ref(inner) if matches!(*inner, Type::Struct(_)) => {
-                        let (index, fty) = self.env.field(e.pos, &inner, name)?;
+                        let (index, fty) = self.env.field(e.pos, &inner, name, self.bindings.module)?;
                         let target = self.deref(base);
                         Ok(self.step(target, Step::Field(index), fty))
                     }

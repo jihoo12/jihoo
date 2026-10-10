@@ -1136,12 +1136,13 @@ impl<'a> FnCx<'a> {
         let mut values: Vec<Option<Reg>> = vec![None; fields.len()];
         // Evaluate in source order, store in declaration order.
         for init in inits {
-            let (index, ty) = env.field(init.pos, &Type::Struct(name.to_string()), &init.name)?;
+            let (index, ty) = env.field(init.pos, &Type::Struct(name.to_string()), &init.name, self.bindings.module)?;
+            let field = &fields[index as usize].0;
             if values[index as usize].is_some() {
-                return Err(Error::new(init.pos, format!("field `{}` is given twice", init.name)));
+                return Err(Error::new(init.pos, format!("field `{field}` is given twice")));
             }
             let v = self.expr(&init.value, Some(&ty))?;
-            self.expect(init.value.pos, v, &ty, &format!("field `{}`", init.name))?;
+            self.expect(init.value.pos, v, &ty, &format!("field `{field}`"))?;
             values[index as usize] = Some(v);
         }
         let missing: Vec<&str> = fields

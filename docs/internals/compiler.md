@@ -55,9 +55,9 @@ Macros are hygienic ([Macros](../language/macros.md#scope-and-hygiene)), with
 code that stays text until it is parsed:
 
 1. When a macro is parsed, the names its templates write get a *mark*: the
-   template text keeps `tmp#` for `tmp` (`Parser::mark`). Only names in places
-   that declare or refer to something are marked, not fields, variants, item
-   names or built-in types, and never what a hole inserts.
+   template text keeps `tmp#` for `tmp` (`Parser::mark`). Names in places that
+   declare or refer to something are marked, and field names; not variants,
+   item names or built-in types, and never what a hole inserts.
 2. Each expansion numbers its marks, `tmp#` to `tmp#7`
    (`jihoo_syntax::number_marks`), with a number unique in the compilation. The
    lexer accepts such names only in macro output, so a program cannot write one.
@@ -66,8 +66,10 @@ code that stays text until it is parsed:
    name, which no other code can spell, so the scopes keep it apart from the
    caller's. Any other name becomes `#M:name`, read as if written in module M,
    the macro's own (`Env::key`, and `Env::viewer` for privacy), or the
-   caller's module if the macro's does not have it. Code passed on to another
-   macro as an argument is text, so its names are renamed the same way first.
+   caller's module if the macro's does not have it. A field name becomes
+   `#M:x` too: `Env::field` lets it reach the private fields of module M's
+   structs. Code passed on to another macro as an argument is text, so its
+   names are renamed the same way first.
 
 ## Closures
 

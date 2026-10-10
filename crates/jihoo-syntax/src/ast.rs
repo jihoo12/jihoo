@@ -41,7 +41,8 @@ pub struct ConstDecl {
 #[derive(Debug, Clone)]
 pub struct StructDecl {
     pub pos: Pos,
-    /// `pub`: usable from other modules, fields included.
+    /// `pub`: usable from other modules. Fields have a `pub` of their own; an
+    /// enum's variants are as visible as the enum.
     pub is_pub: bool,
     pub name: String,
     /// `struct Pair(T: type)`: compile-time parameters, which make the struct
@@ -78,6 +79,9 @@ pub struct VariantDecl {
 #[derive(Debug, Clone)]
 pub struct FieldDecl {
     pub pos: Pos,
+    /// `pub`: other modules may read, write and name the field. A field is
+    /// private to its struct's module otherwise, even in a `pub` struct.
+    pub is_pub: bool,
     pub name: String,
     pub ty: TypeExpr,
 }
@@ -671,17 +675,24 @@ pub enum NameRole {
     /// Not a name: the source text of a macro argument, code that the macro
     /// will get as text.
     Code,
+    /// A field name, in `s.x`, a struct literal or a struct pattern: not a
+    /// name in scope, but whether a private field may be used depends on
+    /// where the code was written.
+    Field,
 }
 
-/// Calls `f` on every name in `e` that declares or refers to something
-/// (field and variant names do not), with what it does. The compiler uses it
-/// for macro hygiene.
+/// Calls `f` on every name in `e` that declares or refers to something, and
+/// on every field name (variant names are neither), with what it does. The
+/// compiler uses it for macro hygiene.
 pub fn names_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut String, NameRole)) {
     match &mut e.kind {
         ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_) => {}
         ExprKind::Var(n) => f(n, NameRole::Uses),
+        ExprKind::Field(x, name) => {
+            names_in_expr(x, f);
+            f(name, NameRole::Field);
+        }
         ExprKind::Unary(_, x)
-        | ExprKind::Field(x, _)
         | ExprKind::Deref(x)
         | ExprKind::AddrOf(x)
         | ExprKind::NewRef(x)
@@ -740,7 +751,10 @@ pub fn names_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut String, NameRole)) {
         }
         ExprKind::StructLit(t, fields) => {
             names_in_type(t, f);
-            fields.iter_mut().for_each(|fi| names_in_expr(&mut fi.value, f));
+            for fi in fields {
+                f(&mut fi.name, NameRole::Field);
+                names_in_expr(&mut fi.value, f);
+            }
         }
         ExprKind::Cast(x, t) => {
             names_in_expr(x, f);
@@ -785,7 +799,10 @@ fn names_in_pattern(p: &mut Pattern, f: &mut dyn FnMut(&mut String, NameRole)) {
         PatternKind::Variant(_, args) | PatternKind::Or(args) => args.iter_mut().for_each(|a| names_in_pattern(a, f)),
         PatternKind::Struct(n, fields, _) => {
             f(n, NameRole::Uses);
-            fields.iter_mut().for_each(|(_, _, fp)| names_in_pattern(fp, f));
+            for (_, name, fp) in fields {
+                f(name, NameRole::Field);
+                names_in_pattern(fp, f);
+            }
         }
     }
 }

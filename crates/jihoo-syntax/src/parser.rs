@@ -100,10 +100,11 @@ impl Parser {
     /// hole): `tmp` becomes `tmp#` in the template, and each expansion numbers
     /// it (`tmp#7`, see `number_marks`). Names a template writes in these places
     /// are marked: variables, bindings, parameters, called functions and
-    /// macros, and types. Field names, variant names, item names and the
+    /// macros, types, and field names. Variant names, item names and the
     /// built-in types are not, and neither are names that holes insert. The
     /// compiler keeps marked locals apart from the caller's and resolves other
-    /// marked names where the macro is defined (`hygiene.rs` in the compiler).
+    /// marked names where the macro is defined (`hygiene.rs` in the compiler);
+    /// for a field, that decides whether a private one may be used.
     fn mark(&mut self) {
         self.mark_with("#".into());
     }
@@ -399,10 +400,11 @@ impl Parser {
             return Ok(StructDecl { pos, is_pub, name, params, fields: vec![], variants: Some(variants) });
         }
         let fields = self.braced_list(|p| {
+            let is_pub = p.eat(&Tok::Pub);
             let (pos, name) = p.ident("field name")?;
             p.expect(&Tok::Colon, "`:` and a field type")?;
             let ty = p.type_expr()?;
-            Ok(FieldDecl { pos, name, ty })
+            Ok(FieldDecl { pos, is_pub, name, ty })
         })?;
         Ok(StructDecl { pos, is_pub, name, params, fields, variants: None })
     }
@@ -534,6 +536,7 @@ impl Parser {
         self.with_struct_lit(true, |p| {
             p.braced_list(|p| {
                 let (pos, name) = p.ident("a field name")?;
+                p.mark();
                 p.expect(&Tok::Colon, "`:`")?;
                 let value = p.expr()?;
                 Ok(FieldInit { pos, name, value })
@@ -799,11 +802,13 @@ impl Parser {
                 return Ok(());
             }
             let (pos, field) = p.ident("a field name or `..`")?;
-            let pattern = if p.eat(&Tok::Colon) {
+            let pattern = if *p.peek() == Tok::Colon {
+                p.mark();
+                p.bump();
                 p.pattern()?
             } else {
-                // `x` is `x: x`; in a template, the binding is marked, the field not.
-                p.mark_with(format!(": {field}#"));
+                // `x` is `x: x`; in a template, the field and the binding are marked.
+                p.mark_with(format!("#: {field}#"));
                 Pattern { pos, kind: PatternKind::Name(field.clone()) }
             };
             fields.push((pos, field, pattern));
@@ -907,6 +912,7 @@ impl Parser {
             if self.same_line(&Tok::Dot) {
                 let pos = self.bump().pos;
                 let (_, field) = self.ident("a field name")?;
+                self.mark();
                 e = Expr { pos, kind: ExprKind::Field(Box::new(e), field) };
             } else if self.same_line(&Tok::LBracket) {
                 let pos = self.bump().pos;
@@ -1661,15 +1667,15 @@ mod tests {
 
     #[test]
     fn templates_mark_the_names_they_write() {
-        // Variables, bindings, parameters, called functions and macros, and
-        // types; not fields, variants, built-in types or what holes insert.
+        // Variables, bindings, parameters, called functions and macros, types
+        // and fields; not variants, built-in types or what holes insert.
         assert_eq!(
-            template("quote { let t: i64 = helper($a) + n.len + util.f(1) + m!(t)\n let p = P { x: t, y: $(b) }\n print(p.x) }"),
-            "let t#: i64 = helper#($) + n#.len + util#.f(1) + m#!(t#)\n let p# = P# { x: t#, y: $ }\n print#(p#.x)"
+            template("quote { let t: i64 = helper($a) + n.len + util.f(1) + m!(t)\n let p = P { x: t, y: $(b) }\n print(p.x + $q.z) }"),
+            "let t#: i64 = helper#($) + n#.len# + util#.f(1) + m#!(t#)\n let p# = P# { x#: t#, y#: $ }\n print#(p#.x# + $.z#)"
         );
         assert_eq!(
             template("quote { match v {\n Some(x) => {}\n P { x, y: yy } => {}\n None => {}\n k => {}\n } }"),
-            "match v# {\n Some(x#) => {}\n P# { x: x#, y: yy# } => {}\n None => {}\n k# => {}\n }"
+            "match v# {\n Some(x#) => {}\n P# { x#: x#, y#: yy# } => {}\n None => {}\n k# => {}\n }"
         );
         assert_eq!(
             template("quote(fn(k: [Point; 2], s: str) -> u8 { return $x })"),

@@ -12,7 +12,7 @@ attribute  = "#![" ("native" | "freestanding") "]"
 item       = "import" path ("as" NAME)?
            | "pub"? "fn" NAME "(" params ")" ("->" type)? block
            | "pub"? "extern" "fn" NAME "(" params ("," "...")? ")" ("->" type)?
-           | "pub"? "struct" NAME ("(" params ")")? "{" (NAME ":" type) sep* "}"
+           | "pub"? "struct" NAME ("(" params ")")? "{" ("pub"? NAME ":" type) sep* "}"
            | "pub"? "enum" NAME ("(" params ")")? "{" (NAME ("(" types ")")?) sep* "}"
            | "pub"? "const" NAME (":" type)? "=" expr
            | "pub"? "macro" NAME "(" params ")" "->" ("expr" | "stmts" | "items") block

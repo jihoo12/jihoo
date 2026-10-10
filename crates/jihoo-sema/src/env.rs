@@ -576,17 +576,29 @@ impl<'p> Env<'p> {
         Ok(())
     }
 
-    /// Index and type of field `name` of struct type `t`.
-    pub fn field(&self, pos: Pos, t: &Type, name: &str) -> Result<(u32, Type), Error> {
+    /// Index and type of field `name` of struct type `t`, written in module
+    /// `from`. A private field can only be used in its struct's module; a
+    /// macro's field names (`#3:x`, see `hygiene.rs`) are used from the module
+    /// the macro is defined in.
+    pub fn field(&self, pos: Pos, t: &Type, name: &str, from: usize) -> Result<(u32, Type), Error> {
+        let (from, name) = qualified(name).unwrap_or((from, name));
         let Type::Struct(s) = t else {
             return Err(Error::new(pos, format!("type {t} has no fields")));
         };
-        self.struct_fields(pos, s)?
+        let (index, ty) = self
+            .struct_fields(pos, s)?
             .iter()
             .enumerate()
             .find(|(_, (n, _))| n == name)
             .map(|(i, (_, t))| (i as u32, t.clone()))
-            .ok_or_else(|| Error::new(pos, format!("struct `{s}` has no field `{name}`")))
+            .ok_or_else(|| Error::new(pos, format!("struct `{s}` has no field `{name}`")))?;
+        let (decl, bindings) = self.struct_decl(pos, s)?;
+        if !decl.fields[index as usize].is_pub && bindings.module != from {
+            let module = &self.modules[bindings.module].name;
+            let msg = format!("field `{name}` of `{s}` is private to module `{module}` (mark it `pub` to use it here)");
+            return Err(Error::new(pos, msg));
+        }
+        Ok((index, ty))
     }
 
     /// Type of field `index` of `t`, which was already resolved.

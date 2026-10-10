@@ -16,6 +16,9 @@
 //! - A name the macro's module does not have is looked up at the call site,
 //!   but only among items (`#C:name` for the caller's module C), never the
 //!   caller's locals; builtins stay builtins.
+//! - A field name becomes `#M:field`: the field of whatever struct the code
+//!   reaches, used from module M, so a macro may use its module's private
+//!   fields (see `Env::field`).
 //!
 //! Macro arguments that produced code passes on to another macro are text, so
 //! their marked names are renamed the same way, before that macro sees them.
@@ -81,8 +84,24 @@ impl Expansion {
                     *n = new;
                 }
             }
+            NameRole::Field => {
+                if let Some(new) = self.rename_field(n) {
+                    *n = new;
+                }
+            }
             NameRole::Code => *n = jihoo_syntax::mark_names(n, &mut |name| rename(name)),
         });
+    }
+
+    /// What field name `name` becomes, if this expansion wrote it: `#M:x`,
+    /// which the compiler reads as field `x` used from module M, where the
+    /// macro is defined, so that its private fields are in reach.
+    fn rename_field(&self, name: &str) -> Option<String> {
+        let (base, mark) = name.split_once('#')?;
+        if base.is_empty() || mark.parse::<u32>().ok()? != self.id {
+            return None;
+        }
+        Some(format!("#{}:{base}", self.def))
     }
 
     /// What `name` becomes, if it is a marked name of this expansion that is
@@ -107,4 +126,10 @@ impl Expansion {
 pub(crate) fn qualified(name: &str) -> Option<(usize, &str)> {
     let (m, rest) = name.strip_prefix('#')?.split_once(':')?;
     Some((m.parse().ok()?, rest))
+}
+
+/// `name` without the module a macro gave it: `#3:x` is `x`. For field-like
+/// names that are not fields: `alias.CONST`, `Shape.Circle`.
+pub(crate) fn unqualified(name: &str) -> &str {
+    qualified(name).map_or(name, |(_, rest)| rest)
 }

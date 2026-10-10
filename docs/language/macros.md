@@ -72,6 +72,10 @@ apart.
   modules it imports, wherever it is called. A name the macro's module does not
   have is looked up among the caller's items (not its locals), which lets item
   macros refer to the items they produce.
+- **Fields the template names** (`p.x`, `P { x: 1 }`, `P { x, .. }`) are used
+  as the macro's module uses them: the template may use that module's private
+  fields ([Modules](modules.md#fields)), while the fields of code from holes
+  are checked where the macro was called.
 - **To declare a name the caller sees**, put it in a name position through a
   hole: `let $name`, `fn $name`, with a `str` or an `expr` that is a name.
 
@@ -104,8 +108,8 @@ pub macro scaled(x: expr) -> expr {
 }
 ```
 
-Field names, enum variant names, item names (`fn f` in an `items` template)
-and the built-in types are not affected. How it works is in
+Enum variant names, item names (`fn f` in an `items` template) and the
+built-in types are not affected. How it works is in
 [Compiler](../internals/compiler.md#macros).
 
 Errors in produced code point at the call and say which macro produced it.

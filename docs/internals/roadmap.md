@@ -29,10 +29,10 @@
     coroutines on libc's contexts.
 15. Macro hygiene: a template's locals are its own, and its other names
     resolve where the macro is defined.
+16. Field visibility: `pub` fields, also through macros.
 
 ## Next
 
-- **Language:** field visibility.
 - **Native code:** passing structs to C by value (per-target C ABI lowering);
   exporting jihoo functions under C names; a `print` for native code.
 - **Floats:** exact math builtins for every profile (`sqrt`, `floor`, ...,

@@ -22,7 +22,10 @@ fn main() {
 ## Declaring a struct
 
 `struct Name { field: Type ... }` lists the fields, separated by newlines or
-commas. A struct may contain other structs, enums and arrays by value, but not
+commas. A field marked `pub` (`pub x: i64`) can be used by other modules; the
+others only by the struct's own module ([Modules](modules.md#fields)).
+
+A struct may contain other structs, enums and arrays by value, but not
 itself — not even through other types — since its size would be infinite.
 Recursive data goes through a [`ref`](references.md) in hosted code or a
 [pointer](pointers.md) in compiled code:

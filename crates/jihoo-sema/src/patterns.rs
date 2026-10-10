@@ -293,9 +293,8 @@ impl FnCx<'_> {
                 let decl = self.env.struct_fields(p.pos, s)?;
                 let mut parts: Vec<Option<Pat>> = vec![None; decl.len()];
                 for (fpos, f, fp) in fields {
-                    let Some(i) = decl.iter().position(|(name, _)| name == f) else {
-                        return Err(Error::new(*fpos, format!("struct `{s}` has no field `{f}`")));
-                    };
+                    let i = self.env.field(*fpos, t, f, self.bindings.module)?.0 as usize;
+                    let f = &decl[i].0;
                     if parts[i].is_some() {
                         return Err(Error::new(*fpos, format!("field `{f}` appears twice in this pattern")));
                     }

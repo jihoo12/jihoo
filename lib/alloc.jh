@@ -19,8 +19,8 @@ pub const MAP_ANONYMOUS = 0x20
 // Hands out memory from one block; everything is freed at once by dropping it.
 pub struct Arena {
     base: *u8
-    used: i64
-    cap: i64
+    pub used: i64
+    pub cap: i64
 }
 
 // A new arena of `cap` bytes, or one with `cap == 0` if the kernel said no.
@@ -50,9 +50,9 @@ pub fn alloc_array(comptime T: type, a: *Arena, n: i64) -> *T {
 // ---- Vec(T) ----
 
 pub struct Vec(T: type) {
-    data: *T
-    len: i64
-    cap: i64
+    pub data: *T
+    pub len: i64
+    pub cap: i64
     arena: *Arena
 }
 

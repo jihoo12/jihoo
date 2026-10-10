@@ -46,9 +46,9 @@ struct ContextHead {
 
 pub struct Coro {
     // The value of the last `yield`; also how the resumer can pass a value in.
-    value: i64
+    pub value: i64
     // For the body to use as it likes, such as a pointer to more state.
-    data: *u8
+    pub data: *u8
     body: fn(*Coro)
     stack: *u8
     size: i64

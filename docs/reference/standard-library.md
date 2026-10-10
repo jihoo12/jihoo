@@ -92,7 +92,7 @@ dropping it.
 
 | item | description |
 |------|-------------|
-| `struct Arena { base: *u8, used: i64, cap: i64 }` | a block of `cap` bytes, of which `used` are handed out |
+| `struct Arena { base: *u8, pub used: i64, pub cap: i64 }` | a block of `cap` bytes, of which `used` are handed out |
 | `fn arena_new(cap: i64) -> Arena` | a new arena of `cap` bytes from `mmap`, or one with `cap == 0` if the kernel refused |
 | `fn alloc(a: *Arena, size: i64, align: i64) -> *u8` | `size` bytes aligned to `align` (a power of two), or null when the arena is full |
 | `fn alloc_array(comptime T: type, a: *Arena, n: i64) -> *T` | room for `n` values of type `T` |
@@ -105,7 +105,7 @@ the old storage stays in the arena until the arena is dropped.
 
 | item | description |
 |------|-------------|
-| `struct Vec(T: type) { data: *T, len: i64, cap: i64, arena: *Arena }` | `len` elements at `data`, room for `cap` |
+| `struct Vec(T: type) { pub data: *T, pub len: i64, pub cap: i64, arena: *Arena }` | `len` elements at `data`, room for `cap` |
 | `fn vec_new(comptime T: type, a: *Arena) -> Vec(T)` | an empty vector allocating from `a` |
 | `fn push(comptime T: type, v: *Vec(T), x: T) -> bool` | appends `x`; false if the arena has no room left |
 | `fn get(comptime T: type, v: *Vec(T), i: i64) -> T` | element `i` (not bounds-checked) |
@@ -166,7 +166,7 @@ fn main() -> i64 {
 
 | item | description |
 |------|-------------|
-| `struct Coro` | a coroutine; the fields meant for programs are `value: i64`, the last yielded value (also a way to pass one in), and `data: *u8`, for the body's own state; the others belong to the library |
+| `struct Coro` | a coroutine; its public fields are `value: i64`, the last yielded value (also a way to pass one in), and `data: *u8`, for the body's own state; the others are private to the library |
 | `fn new(body: fn(*Coro), size: i64) -> Coro` | a coroutine that will run `body` on a stack of `size` bytes; it starts on the first `resume`, and is done from the start if no stack could be had |
 | `fn resume(c: *Coro) -> bool` | runs `c` until it yields (true: `c.value` is the value) or its body returns (false); resuming a finished coroutine does nothing |
 | `fn yield(c: *Coro, v: i64)` | called by the body: hands `v` to the resumer, and returns when resumed |

@@ -1034,7 +1034,7 @@ fn modules_have_their_own_namespaces() {
     let m = check_files(&[
         ("main.jh", "import shapes\nimport util as u\nfn area() -> i64 { return 1 }\n\
                      fn main() {\n  let s = shapes.Square { side: u.SIDE }\n  print(shapes.area(s) + area() + u.area())\n}"),
-        ("shapes.jh", "pub struct Square { side: i64 }\npub fn area(s: Square) -> i64 { return s.side * s.side }"),
+        ("shapes.jh", "pub struct Square { pub side: i64 }\npub fn area(s: Square) -> i64 { return s.side * s.side }"),
         // The same names in another module do not clash.
         ("lib/util.jh", "pub const SIDE = 3\npub fn area() -> i64 { return 100 }"),
     ])
@@ -1053,7 +1053,7 @@ fn generics_and_macros_across_modules() {
         ("main.jh", "import box\nstruct P { x: i64 }\n\
                      fn main() {\n  let b = box.wrap(P, P { x: 7 })\n  let c = box.Box(i64) { item: box.twice!(21) }\n  print(b.item.x + c.item)\n}"),
         // Inside `box`, its own names need no prefix; `T` may be a type of the caller.
-        ("box.jh", "pub struct Box(T: type) { item: T }\n\
+        ("box.jh", "pub struct Box(T: type) { pub item: T }\n\
                     pub fn wrap(comptime T: type, x: T) -> Box(T) { return Box(T) { item: x } }\n\
                     pub macro twice(e: expr) -> expr { return quote($e * 2) }"),
     ])
@@ -1097,7 +1097,7 @@ fn module_errors() {
 #[test]
 fn private_items_stay_in_their_module() {
     let lib = "fn helper() -> i64 { return 1 }\nstruct Inner { x: i64 }\nconst K = 2\nmacro m() -> expr { return quote(3) }\n\
-               pub struct Outer { x: i64 }\n\
+               pub struct Outer { pub x: i64 }\n\
                pub fn api() -> i64 { let i = Inner { x: K }\n return helper() + i.x + m!() }";
     // Inside the module, private items are fine; outside, only `pub` ones.
     let ok = check_files(&[("main.jh", "import lib\nfn main() { let o = lib.Outer { x: 1 }\n print(lib.api() + o.x) }"), ("lib.jh", lib)]);
@@ -1112,6 +1112,42 @@ fn private_items_stay_in_their_module() {
         let e = check_files(&[("main.jh", &format!("import lib\nfn main() {{ {use_} }}")), ("lib.jh", lib)]).unwrap_err();
         assert!(e.contains(what), "{use_}: {e}");
     }
+}
+
+#[test]
+fn private_fields_stay_in_their_module() {
+    // `id` is private: only `acct` itself can read it, write it, or build an
+    // `Account`; `balance` is `pub`.
+    let lib = "pub struct Account { id: i64, pub balance: i64 }\n\
+               pub struct Box(T: type) { secret: T, pub open: T }\n\
+               pub fn open(id: i64) -> Account { return Account { id: id, balance: 0 } }\n\
+               pub fn id(a: Account) -> i64 { return a.id }\n\
+               pub fn boxed(x: i64) -> Box(i64) { return Box(i64) { secret: x, open: x + 1 } }\n\
+               pub macro id_of(a: expr) -> expr { return quote($a.id) }\n\
+               pub macro fresh(n: expr) -> expr { return quote(Account { id: $n, balance: 5 }) }\n\
+               pub macro secret_of(b: expr) -> expr { return quote(match $b { Box { secret, .. } => secret }) }";
+    let ok = "import acct\nfn main() {\n  let a = acct.open(7)\n  a.balance += 10\n\
+              print(a.balance + acct.id(a) + acct.boxed(1).open)\n\
+              match a { Account { balance, .. } => print(balance) }\n\
+              // A macro of `acct` may use the private fields; code given to it may not.\n\
+              print(acct.id_of!(a) + acct.id_of!(acct.fresh!(3)) + acct.secret_of!(acct.boxed(9)))\n}";
+    let m = check_files(&[("main.jh", ok), ("acct.jh", lib)]).unwrap();
+    let mut out = Vec::new();
+    jihoo_vm::run(&m, &mut out).unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "19\n10\n19\n");
+    for (use_, what) in [
+        ("print(acct.open(1).id)", "field `id` of `acct.Account` is private to module `acct`"),
+        ("let a = acct.open(1)\n a.id = 2", "field `id` of `acct.Account` is private"),
+        ("let a = acct.Account { id: 1, balance: 2 }", "field `id` of `acct.Account` is private"),
+        ("match acct.open(1) { Account { id, .. } => print(id) }", "field `id` of `acct.Account` is private"),
+        ("print(acct.boxed(1).secret)", "field `secret` of `acct.Box(i64)` is private"),
+        ("print(acct.id_of!(acct.open(1)) + acct.boxed(1).secret)", "field `secret` of `acct.Box(i64)` is private"),
+    ] {
+        let e = check_files(&[("main.jh", &format!("import acct\nfn main() {{\n {use_} }}")), ("acct.jh", lib)]).unwrap_err();
+        assert!(e.contains(what), "{use_}: {e}");
+    }
+    // Inside the struct's own module every field is in reach, `pub` or not.
+    assert_eq!(run("struct P { x: i64, pub y: i64 }\nfn main() { let p = P { x: 1, y: 2 }\n p.x = 3\n print(p.x + p.y) }"), "5\n");
 }
 
 // ---- statement and item macros ----
