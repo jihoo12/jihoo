@@ -51,8 +51,32 @@ element (`a[i]`), and in compiled code what a pointer points to (`*p`, `p[i]`,
 Places nest: `line.a.x = 1`, `grid[r][c] = 0`.
 
 Since structs and arrays are [values](structs.md#value-semantics), assigning to
-a part of one changes only that variable. There are no compound assignment
-operators: write `i = i + 1`.
+a part of one changes only that variable.
+
+## Compound assignment
+
+`place op= value` combines the place's value with `value` and stores the result
+back, for every arithmetic and bitwise operator:
+
+```jihoo
+i += 1                  // i = i + 1
+total -= cost
+grid[r][c] *= 2
+flags |= 0x4            // also &=, ^=, <<=, >>=, /= and %=
+name += "!"             // concatenation, on str
+```
+
+- It works on the same places as `=`, and follows the operator's rules: `+=`
+  on two `i32`s, on floats, on strings, and on a pointer and an `i64`
+  (`p += 1`); `&=`, `|=` and `^=` on bools too.
+- The value takes the place's type, so `x += 1` works for any integer `x`, and
+  the result must have the place's type again: `x += y` with `x: i32` and
+  `y: i64` is an error.
+- The place is evaluated once. In `a[next()] += 1`, `next` is called one time,
+  and the element is read before `value` is evaluated, as in
+  `a[i] = a[i] + value`.
+- It is a statement, like `=`, not an expression: `let y = x += 1` is an error.
+  There is no `++`, `&&=` or `||=`.
 
 ## `if`
 

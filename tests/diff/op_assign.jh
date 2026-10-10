@@ -1,0 +1,70 @@
+// Compound assignment (`+=` and the rest) must agree between the VM and LLVM,
+// on variables, fields, elements and nested places, with each place evaluated
+// once.
+
+struct Point { x: i64, y: i64 }
+struct Grid { cells: [[i64; 3]; 3], origin: Point }
+
+fn bump(xs: [i64; 4], i: i64) -> [i64; 4] {
+    xs[i] += 100
+    return xs
+}
+
+fn entry() -> i64 {
+    let score = 0
+
+    let x = 10
+    x += 5
+    x -= 3
+    x *= 4
+    x /= 6
+    x %= 5                                   // ((10 + 5 - 3) * 4 / 6) % 5
+    if x == 3 { score = score + 1 }
+
+    let b: u16 = 0b1100
+    b &= 0b1010
+    b |= 1
+    b ^= 0xffff
+    b <<= 2
+    b >>= 1
+    if b == 32748 { score = score + 2 }      // !9 is 65526; << 2 keeps 16 bits, then >> 1
+
+    let u: u8 = 250
+    u += 10                                  // wraps to 4
+    let s: i8 = -128
+    s -= 1                                   // wraps to 127
+    if u == 4 && s == 127 { score = score + 4 }
+
+    let g = Grid { cells: [[0; 3]; 3], origin: Point { x: 1, y: 2 } }
+    g.cells[1][2] += 7
+    g.cells[1][2] *= 6
+    g.origin.y <<= 3
+    if g.cells[1][2] == 42 && g.origin.y == 16 && g.cells[0][0] == 0 { score = score + 8 }
+
+    // The index is evaluated once: `i` is read before it changes.
+    let xs = [1, 2, 3, 4]
+    let i = 0
+    while i < 4 {
+        xs[i] *= xs[i]
+        i += 1
+    }
+    if xs[3] == 16 && bump(xs, 2)[2] == 109 && xs[2] == 9 { score = score + 16 }
+
+    let f = 1.5
+    f *= 4
+    f -= 0.5
+    f /= 2
+    if f == 2.75 { score = score + 32 }
+
+    let ok = true
+    ok &= x == 3
+    ok |= false
+    ok ^= false
+    if ok { score = score + 64 }
+
+    let d = -9223372036854775807 - 1
+    d /= -1                                  // wraps, as `/` does
+    if d == -9223372036854775807 - 1 { score = score + 128 }
+
+    return score % 256 // 255 when everything holds
+}

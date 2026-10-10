@@ -40,6 +40,7 @@ A statement ends at a newline, `;` or `}`.
 block = "{" stmt* "}"
 stmt  = "let" NAME (":" type)? "=" expr
       | place "=" expr
+      | place ("+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=") expr
       | "if" expr block ("else" (block | if-stmt))?
       | "while" expr block
       | "break" | "continue"                              ; inside a `while`

@@ -349,6 +349,30 @@ struct Loop {
     end: BlockId,
 }
 
+/// The JIR operator for a binary operator other than `&&` and `||`, and how it
+/// is written.
+fn ir_binop(op: BinOp) -> (ir::BinOp, &'static str) {
+    match op {
+        BinOp::Add => (ir::BinOp::Add, "+"),
+        BinOp::Sub => (ir::BinOp::Sub, "-"),
+        BinOp::Mul => (ir::BinOp::Mul, "*"),
+        BinOp::Div => (ir::BinOp::Div, "/"),
+        BinOp::Rem => (ir::BinOp::Rem, "%"),
+        BinOp::Eq => (ir::BinOp::Eq, "=="),
+        BinOp::Ne => (ir::BinOp::Ne, "!="),
+        BinOp::Lt => (ir::BinOp::Lt, "<"),
+        BinOp::Le => (ir::BinOp::Le, "<="),
+        BinOp::Gt => (ir::BinOp::Gt, ">"),
+        BinOp::Ge => (ir::BinOp::Ge, ">="),
+        BinOp::BitAnd => (ir::BinOp::And, "&"),
+        BinOp::BitOr => (ir::BinOp::Or, "|"),
+        BinOp::BitXor => (ir::BinOp::Xor, "^"),
+        BinOp::Shl => (ir::BinOp::Shl, "<<"),
+        BinOp::Shr => (ir::BinOp::Shr, ">>"),
+        BinOp::And | BinOp::Or => unreachable!("`&&` and `||` short-circuit"),
+    }
+}
+
 /// A number literal, possibly negated: its type comes from context.
 #[derive(Clone, Copy, PartialEq)]
 enum Literal {
@@ -706,6 +730,21 @@ impl<'a> FnCx<'a> {
 
     // ---- statements ----
 
+    /// Errors for assigning to a name that is not a variable.
+    fn check_assign_target(&self, target: &Expr) -> Result<(), Error> {
+        if let ExprKind::Var(name) = &target.kind {
+            if self.local(name).is_none() {
+                if self.bindings.get(name).is_some() {
+                    return Err(Error::new(target.pos, format!("cannot assign to comptime parameter `{name}`")));
+                }
+                if self.env.key(self.bindings.module, name).and_then(|k| self.env.constant(&k)).is_some() {
+                    return Err(Error::new(target.pos, format!("cannot assign to constant `{name}`")));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn block(&mut self, b: &Block) -> Result<(), Error> {
         self.scopes.push(HashMap::new());
         let r = b.stmts.iter().try_for_each(|s| self.stmt(s));
@@ -729,21 +768,32 @@ impl<'a> FnCx<'a> {
                 self.scopes.last_mut().unwrap().insert(name.clone(), dst);
             }
             Stmt::Assign { target, value } => {
-                if let ExprKind::Var(name) = &target.kind {
-                    if self.local(name).is_none() {
-                        if self.bindings.get(name).is_some() {
-                            return Err(Error::new(target.pos, format!("cannot assign to comptime parameter `{name}`")));
-                        }
-                        if self.env.key(self.bindings.module, name).and_then(|k| self.env.constant(&k)).is_some() {
-                            return Err(Error::new(target.pos, format!("cannot assign to constant `{name}`")));
-                        }
-                    }
-                }
+                self.check_assign_target(target)?;
                 let place = self.place(target)?;
                 let want = place.ty().clone();
                 let v = self.expr(value, Some(&want))?;
                 self.expect(value.pos, v, &want, "the assigned value")?;
                 self.write(target.pos, place, v)?;
+            }
+            // `a[f()] += 1` is `a[f()] = a[f()] + 1` with the place evaluated
+            // once: `f` runs one time, and the place is read before the value.
+            Stmt::OpAssign { pos, op, target, value } => {
+                self.check_assign_target(target)?;
+                let (op, sym) = ir_binop(*op);
+                let place = self.place(target)?;
+                let ty = place.ty().clone();
+                let current = self.read(place.clone());
+                // The value takes its type from the target; pointers move by an i64.
+                let hint = if matches!(ty, Type::Ptr(_)) { Type::I64 } else { ty.clone() };
+                let v = self.expr(value, Some(&hint))?;
+                let vt = self.ty(v).clone();
+                // The result must fit back into the target: `p += 1` on a pointer
+                // does, `x += p` on an integer does not.
+                let result = types::binary(op, &ty, &vt)
+                    .filter(|t| *t == ty)
+                    .ok_or_else(|| Error::new(*pos, format!("cannot apply `{sym}=` to {ty} and {vt}")))?;
+                let r = self.emit_to(result, |dst| Inst::Binary { dst, op, lhs: current, rhs: v });
+                self.write(target.pos, place, r)?;
             }
             Stmt::Return { pos, value } => {
                 let ret = self.sig.ret.clone();
@@ -991,25 +1041,7 @@ impl<'a> FnCx<'a> {
     }
 
     fn binary(&mut self, pos: Pos, op: BinOp, l: &Expr, r: &Expr, expected: Option<&Type>) -> Result<Reg, Error> {
-        let (op, sym) = match op {
-            BinOp::Add => (ir::BinOp::Add, "+"),
-            BinOp::Sub => (ir::BinOp::Sub, "-"),
-            BinOp::Mul => (ir::BinOp::Mul, "*"),
-            BinOp::Div => (ir::BinOp::Div, "/"),
-            BinOp::Rem => (ir::BinOp::Rem, "%"),
-            BinOp::Eq => (ir::BinOp::Eq, "=="),
-            BinOp::Ne => (ir::BinOp::Ne, "!="),
-            BinOp::Lt => (ir::BinOp::Lt, "<"),
-            BinOp::Le => (ir::BinOp::Le, "<="),
-            BinOp::Gt => (ir::BinOp::Gt, ">"),
-            BinOp::Ge => (ir::BinOp::Ge, ">="),
-            BinOp::BitAnd => (ir::BinOp::And, "&"),
-            BinOp::BitOr => (ir::BinOp::Or, "|"),
-            BinOp::BitXor => (ir::BinOp::Xor, "^"),
-            BinOp::Shl => (ir::BinOp::Shl, "<<"),
-            BinOp::Shr => (ir::BinOp::Shr, ">>"),
-            BinOp::And | BinOp::Or => unreachable!(),
-        };
+        let (op, sym) = ir_binop(op);
         let is_cmp = matches!(
             op,
             ir::BinOp::Eq | ir::BinOp::Ne | ir::BinOp::Lt | ir::BinOp::Le | ir::BinOp::Gt | ir::BinOp::Ge

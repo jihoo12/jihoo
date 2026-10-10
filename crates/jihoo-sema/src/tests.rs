@@ -71,6 +71,27 @@ fn returns_are_checked() {
 }
 
 #[test]
+fn compound_assignment() {
+    check("fn main() { let x = 1\n x += 2\n x <<= 1\n let s = \"a\"\n s += \"b\"\n let f = 1.5\n f *= 2 }").unwrap();
+    // The place is evaluated once: one call to `i`, one read and one write.
+    let m = check("fn i() -> i64 { return 0 }\nfn main() { let a = [1, 2]\n a[i()] += 1 }").unwrap();
+    let main = m.func("main").unwrap().to_string();
+    assert_eq!(main.matches("call @i").count(), 1, "{main}");
+    // The value takes the target's type; the result must fit back into it.
+    check("fn main() { let x: u8 = 1\n x += 200 }").unwrap();
+    assert!(err("fn main() { let x: u8 = 1\n x += 300 }").contains("300 does not fit in u8"));
+    assert!(err("fn main() { let x: i32 = 1\n let y = 2\n x += y }").contains("cannot apply `+=` to i32 and i64"));
+    assert!(err("fn main() { let b = true\n b += true }").contains("cannot apply `+=` to bool and bool"));
+    check(&fs("fn f(p: *i64) { p += 1\n *p -= 1 }")).unwrap();
+    // The same targets as `=`.
+    assert!(err("const N = 1\nfn main() { N += 1 }").contains("cannot assign to constant `N`"));
+    assert!(err("fn main() { let n = 1\n let f = fn() { n += 1 } }").contains("captured variable"));
+    // A statement, not an expression; and the operator must be on the target's line.
+    assert!(err("fn main() { let x = 1\n let y = x += 1 }").contains("end of statement"));
+    assert!(err("fn main() { let x = 1\n x\n += 1 }").contains("found `+=`"));
+}
+
+#[test]
 fn break_and_continue() {
     let m = check("fn main() {\n  let i = 0\n  while true {\n    i = i + 1\n    if i < 3 { continue }\n    break\n  }\n}").unwrap();
     // `continue` jumps to the condition block, `break` past the loop.

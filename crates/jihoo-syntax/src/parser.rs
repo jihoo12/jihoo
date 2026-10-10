@@ -156,6 +156,14 @@ impl Parser {
         Ok(Expr { pos, kind: ExprKind::Hole(Box::new(inner)) })
     }
 
+    /// The operator of a `+=`-style token on the same line as the previous token.
+    fn op_assign_follows(&self) -> Option<BinOp> {
+        match self.peek() {
+            Tok::OpAssign(op) if !self.cur().newline_before => Some(*op),
+            _ => None,
+        }
+    }
+
     /// True if the current token is `t` on the same line as the previous token.
     fn same_line(&self, t: &Tok) -> bool {
         self.peek() == t && !self.cur().newline_before
@@ -545,6 +553,10 @@ impl Parser {
                     self.bump();
                     let value = self.expr()?;
                     Ok(Stmt::Assign { target: e, value })
+                } else if let Some(op) = self.op_assign_follows() {
+                    let pos = self.bump().pos;
+                    let value = self.expr()?;
+                    Ok(Stmt::OpAssign { pos, op, target: e, value })
                 } else {
                     // A hole on its own is a place for statements.
                     if matches!(e.kind, ExprKind::Hole(_)) {
@@ -1225,6 +1237,19 @@ fn punct(t: &Tok) -> &'static str {
         Tok::Caret => "^",
         Tok::Shl => "<<",
         Tok::Shr => ">>",
+        Tok::OpAssign(op) => match op {
+            BinOp::Add => "+=",
+            BinOp::Sub => "-=",
+            BinOp::Mul => "*=",
+            BinOp::Div => "/=",
+            BinOp::Rem => "%=",
+            BinOp::BitAnd => "&=",
+            BinOp::BitOr => "|=",
+            BinOp::BitXor => "^=",
+            BinOp::Shl => "<<=",
+            BinOp::Shr => ">>=",
+            _ => "?=",
+        },
         Tok::Ident(_) | Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::InnerAttr(_) | Tok::Eof => "?",
     }
 }
@@ -1253,6 +1278,20 @@ mod tests {
         // `-1` does not continue `x` from the previous line, and `*p` is a new statement.
         assert_eq!(body("let x = 1\n-1").len(), 2);
         assert_eq!(body("let x = 1\n*p = 2").len(), 2);
+    }
+
+    #[test]
+    fn lexes_compound_assignment() {
+        let toks = |src: &str| -> Vec<Tok> { crate::lexer::lex(src, 0).unwrap().into_iter().map(|t| t.tok).collect() };
+        let x = || Tok::Ident("x".into());
+        assert_eq!(toks("x += 1"), [x(), Tok::OpAssign(BinOp::Add), Tok::Int(1), Tok::Eof]);
+        assert_eq!(toks("x<<=x"), [x(), Tok::OpAssign(BinOp::Shl), x(), Tok::Eof]);
+        assert_eq!(toks("x >>= 1"), [x(), Tok::OpAssign(BinOp::Shr), Tok::Int(1), Tok::Eof]);
+        assert_eq!(toks("x>=1"), [x(), Tok::Ge, Tok::Int(1), Tok::Eof]);
+        assert_eq!(toks("x && y"), [x(), Tok::AndAnd, Tok::Ident("y".into()), Tok::Eof]);
+        assert_eq!(toks("x -> -=")[1..3], [Tok::Arrow, Tok::OpAssign(BinOp::Sub)]);
+        let s = body("a[i].x |= 4");
+        assert!(matches!(&s[0], Stmt::OpAssign { op: BinOp::BitOr, .. }));
     }
 
     #[test]

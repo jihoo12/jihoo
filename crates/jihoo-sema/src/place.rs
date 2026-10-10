@@ -37,6 +37,7 @@ pub(crate) enum Step {
     Elem(Reg),
 }
 
+#[derive(Clone)]
 pub(crate) enum Place {
     Reg {
         root: Reg,

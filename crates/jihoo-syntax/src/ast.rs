@@ -159,6 +159,13 @@ pub enum Stmt {
         target: Expr,
         value: Expr,
     },
+    /// `target op= value`, such as `i += 1`: the target is evaluated once.
+    OpAssign {
+        pos: Pos,
+        op: BinOp,
+        target: Expr,
+        value: Expr,
+    },
     Return {
         pos: Pos,
         value: Option<Expr>,
@@ -539,6 +546,11 @@ pub fn set_stmt_pos(s: &mut Stmt, pos: Pos) {
             set_pos(value, pos);
         }
         Stmt::Assign { target, value } => {
+            set_pos(target, pos);
+            set_pos(value, pos);
+        }
+        Stmt::OpAssign { pos: p, target, value, .. } => {
+            *p = pos;
             set_pos(target, pos);
             set_pos(value, pos);
         }

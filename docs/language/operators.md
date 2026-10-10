@@ -84,6 +84,11 @@ is `x`, on the VM and natively alike.
 
 ## Not operators
 
-There are no compound assignments (`+=`), no increment (`++`), no ternary
-`?:` (use a [`match` expression](patterns.md#match-expressions)), and no
-operator overloading.
+Assignment is a statement, not an operator: `=` and the compound assignments
+`+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=` and `>>=`
+([Variables and control flow](control-flow.md#compound-assignment)) cannot be
+used inside expressions.
+
+There is no increment (`++`), no ternary `?:` (use a
+[`match` expression](patterns.md#match-expressions)), and no operator
+overloading.

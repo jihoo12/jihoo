@@ -1,3 +1,4 @@
+use crate::ast::BinOp;
 use crate::{Error, Pos};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -10,6 +11,8 @@ pub enum Tok {
     Str(String),
     /// `#![name]`
     InnerAttr(String),
+    /// `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`: `a op= b`.
+    OpAssign(BinOp),
 
     Fn,
     Let,
@@ -105,6 +108,15 @@ impl<'a> Lexer<'a> {
 
     fn peek2(&self) -> u8 {
         self.src.get(self.i + 1).copied().unwrap_or(0)
+    }
+
+    /// Consumes a `=` right after an operator, as in `+=`.
+    fn eat_eq(&mut self) -> bool {
+        let eq = self.peek() == b'=';
+        if eq {
+            self.bump();
+        }
+        eq
     }
 
     /// Decimal digits, which may be separated by `_`.
@@ -211,15 +223,21 @@ impl<'a> Lexer<'a> {
             b':' => Tok::Colon,
             b';' => Tok::Semi,
             b'$' => Tok::Dollar,
+            b'+' if self.eat_eq() => Tok::OpAssign(BinOp::Add),
             b'+' => Tok::Plus,
+            b'*' if self.eat_eq() => Tok::OpAssign(BinOp::Mul),
             b'*' => Tok::Star,
+            b'/' if self.eat_eq() => Tok::OpAssign(BinOp::Div),
             b'/' => Tok::Slash,
+            b'%' if self.eat_eq() => Tok::OpAssign(BinOp::Rem),
             b'%' => Tok::Percent,
+            b'^' if self.eat_eq() => Tok::OpAssign(BinOp::BitXor),
             b'^' => Tok::Caret,
             b'-' if self.peek() == b'>' => {
                 self.bump();
                 Tok::Arrow
             }
+            b'-' if self.eat_eq() => Tok::OpAssign(BinOp::Sub),
             b'-' => Tok::Minus,
             b'=' if self.peek() == b'=' => {
                 self.bump();
@@ -237,11 +255,11 @@ impl<'a> Lexer<'a> {
             b'!' => Tok::Bang,
             b'<' if self.peek() == b'<' => {
                 self.bump();
-                Tok::Shl
+                if self.eat_eq() { Tok::OpAssign(BinOp::Shl) } else { Tok::Shl }
             }
             b'>' if self.peek() == b'>' => {
                 self.bump();
-                Tok::Shr
+                if self.eat_eq() { Tok::OpAssign(BinOp::Shr) } else { Tok::Shr }
             }
             b'<' if self.peek() == b'=' => {
                 self.bump();
@@ -257,11 +275,13 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 Tok::AndAnd
             }
+            b'&' if self.eat_eq() => Tok::OpAssign(BinOp::BitAnd),
             b'&' => Tok::Amp,
             b'|' if self.peek() == b'|' => {
                 self.bump();
                 Tok::OrOr
             }
+            b'|' if self.eat_eq() => Tok::OpAssign(BinOp::BitOr),
             b'|' => Tok::Pipe,
             b'"' => Tok::Str(self.string(pos)?),
             b'#' if self.peek() == b'!' && self.peek2() == b'[' => {
