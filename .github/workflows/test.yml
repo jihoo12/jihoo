@@ -1,0 +1,36 @@
+# Builds the toolchain with Nix and runs every test: `nix flake check` builds
+# the frontend (running cargo test, with the differential tests against the
+# real LLVM backend and C compiler) and then builds and runs the examples with
+# the packaged toolchain. Clippy runs in the dev shell.
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request cancels the older run.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flake-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - name: nix flake check
+        run: nix flake check -L
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - name: cargo clippy
+        run: nix develop -c cargo clippy --all-targets --locked -- -D warnings
