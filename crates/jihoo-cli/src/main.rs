@@ -29,9 +29,20 @@ environment:
 `import a.b` loads `a/b.jh` from the importing file's directory, the -I
 directories, JIHOO_PATH, and finally the standard library (`lib/`).";
 
+/// Stack for the compiler, which walks the syntax tree recursively. The parser
+/// bounds how deep the tree nests; this is enough for that bound even in a
+/// debug build.
+const STACK_SIZE: usize = 256 << 20;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match dispatch(&args) {
+    let result = std::thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(move || dispatch(&args))
+        .expect("cannot start the compiler thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    match result {
         Ok(code) => code,
         Err(msg) => {
             eprintln!("error: {msg}");

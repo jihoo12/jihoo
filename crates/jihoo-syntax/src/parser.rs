@@ -66,14 +66,43 @@ struct Parser {
     /// Set while parsing a quote template: the holes found so far, with their
     /// byte ranges in the source and where they sit.
     holes: Option<Vec<(usize, usize, Expr, HoleKind)>>,
+    /// How deeply the syntax tree being built is nested here (see `MAX_NESTING`).
+    depth: u32,
 }
 
 type PResult<T> = Result<T, Error>;
 
+/// How deeply expressions, blocks, types and patterns may nest, counting each
+/// operand of an operator chain like `1 + 1 + 1` as one level deeper than the
+/// last. Every later stage walks the tree recursively, so this keeps a program
+/// from running the compiler out of stack.
+const MAX_NESTING: u32 = 1000;
+
 impl Parser {
     fn new(src: &str, file: u16) -> Result<Self, Error> {
         let toks = lex(src, file)?;
-        Ok(Parser { src: src.to_string(), toks, i: 0, no_struct_lit: false, holes: None })
+        Ok(Parser { src: src.to_string(), toks, i: 0, no_struct_lit: false, holes: None, depth: 0 })
+    }
+
+    /// Goes one level deeper into the tree; `shallower` comes back up.
+    fn deeper(&mut self) -> PResult<()> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err(Error::new(self.pos(), format!("code is nested too deeply (more than {MAX_NESTING} levels)")));
+        }
+        Ok(())
+    }
+
+    fn shallower(&mut self, levels: u32) {
+        self.depth -= levels;
+    }
+
+    /// Runs `f` one level deeper.
+    fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+        self.deeper()?;
+        let r = f(self);
+        self.shallower(1);
+        r
     }
 
     /// Byte offset where the previous token ended.
@@ -383,6 +412,10 @@ impl Parser {
     }
 
     fn type_expr(&mut self) -> PResult<TypeExpr> {
+        self.nested(|p| p.type_expr_body())
+    }
+
+    fn type_expr_body(&mut self) -> PResult<TypeExpr> {
         let pos = self.pos();
         if self.eat(&Tok::Fn) {
             self.expect(&Tok::LParen, "`(` and parameter types")?;
@@ -471,6 +504,10 @@ impl Parser {
     // ---- statements ----
 
     fn block(&mut self) -> PResult<Block> {
+        self.nested(|p| p.block_body())
+    }
+
+    fn block_body(&mut self) -> PResult<Block> {
         self.expect(&Tok::LBrace, "`{`")?;
         self.with_struct_lit(true, |p| {
             let mut stmts = Vec::new();
@@ -656,6 +693,10 @@ impl Parser {
     }
 
     fn single_pattern(&mut self) -> PResult<Pattern> {
+        self.nested(|p| p.single_pattern_body())
+    }
+
+    fn single_pattern_body(&mut self) -> PResult<Pattern> {
         let pos = self.pos();
         let negative = self.eat(&Tok::Minus);
         let kind = match self.peek().clone() {
@@ -727,7 +768,7 @@ impl Parser {
         let then = self.block()?;
         let els = if self.eat(&Tok::Else) {
             if *self.peek() == Tok::If {
-                let inner = self.if_stmt()?;
+                let inner = self.nested(|p| p.if_stmt())?;
                 let end = self.toks[self.i - 1].pos;
                 Some(Block { stmts: vec![inner], end })
             } else {
@@ -747,6 +788,7 @@ impl Parser {
 
     fn binary(&mut self, min_prec: u8) -> PResult<Expr> {
         let mut lhs = self.cast()?;
+        let mut levels = 0;
         loop {
             if self.cur().newline_before {
                 break;
@@ -755,21 +797,28 @@ impl Parser {
             if prec < min_prec {
                 break;
             }
+            self.deeper()?;
+            levels += 1;
             let pos = self.bump().pos;
             let rhs = self.binary(prec + 1)?;
             lhs = Expr { pos, kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)) };
         }
+        self.shallower(levels);
         Ok(lhs)
     }
 
     /// `unary (as T)*` — binds tighter than any binary operator, like in Rust.
     fn cast(&mut self) -> PResult<Expr> {
         let mut e = self.unary()?;
+        let mut levels = 0;
         while self.same_line(&Tok::As) {
+            self.deeper()?;
+            levels += 1;
             let pos = self.bump().pos;
             let ty = self.type_expr()?;
             e = Expr { pos, kind: ExprKind::Cast(Box::new(e), ty) };
         }
+        self.shallower(levels);
         Ok(e)
     }
 
@@ -785,13 +834,26 @@ impl Parser {
             _ => return self.postfix(),
         };
         self.bump();
-        let inner = self.unary()?;
+        let inner = self.nested(|p| p.unary())?;
         Ok(Expr { pos, kind: wrap(Box::new(inner)) })
     }
 
     fn postfix(&mut self) -> PResult<Expr> {
-        let mut e = self.primary()?;
+        let e = self.nested(|p| p.primary())?;
+        let depth = self.depth;
+        let r = self.postfix_ops(e);
+        self.depth = depth;
+        r
+    }
+
+    /// The field accesses, indexes and calls after `e`.
+    fn postfix_ops(&mut self, mut e: Expr) -> PResult<Expr> {
         loop {
+            let postfix = [Tok::Dot, Tok::LBracket, Tok::LParen].iter().any(|t| self.same_line(t));
+            if !postfix {
+                return Ok(e);
+            }
+            self.deeper()?;
             if self.same_line(&Tok::Dot) {
                 let pos = self.bump().pos;
                 let (_, field) = self.ident("a field name")?;
@@ -801,12 +863,10 @@ impl Parser {
                 let index = self.with_struct_lit(true, |p| p.expr())?;
                 self.expect(&Tok::RBracket, "`]`")?;
                 e = Expr { pos, kind: ExprKind::Index(Box::new(e), Box::new(index)) };
-            } else if self.same_line(&Tok::LParen) {
+            } else {
                 let pos = self.pos();
                 let args = self.call_args()?;
                 e = Expr { pos, kind: ExprKind::CallExpr(Box::new(e), args) };
-            } else {
-                return Ok(e);
             }
         }
     }
@@ -1374,6 +1434,35 @@ mod tests {
         let params = &p.funcs[0].params;
         assert!(params[0].comptime && !params[1].comptime);
         assert!(matches!(&params[0].ty.kind, TypeExprKind::Named(n) if n == "type"));
+    }
+
+    #[test]
+    fn nesting_is_bounded() {
+        // As in the CLI: the default stack of a test thread is too small for
+        // the deepest trees allowed in a debug build.
+        std::thread::Builder::new().stack_size(256 << 20).spawn(check_nesting).unwrap().join().unwrap();
+    }
+
+    fn check_nesting() {
+        let deep = |open: &str, mid: &str, close: &str, n: usize| {
+            format!("fn f() -> i64 {{ {}{mid}{} }}", open.repeat(n), close.repeat(n))
+        };
+        let too_deep = |src: String| parse(&src).unwrap_err().msg.contains("nested too deeply");
+        // Up to the limit parses; past it is an error, not a stack overflow.
+        assert!(parse(&deep("(", "1", ")", 900)).is_ok());
+        assert!(too_deep(deep("(", "1", ")", 5000)));
+        assert!(too_deep(deep("-", "1", "", 5000)));
+        assert!(too_deep(deep("", "1", " + 1", 5000)));
+        assert!(too_deep(deep("", "x", ".y", 5000)));
+        assert!(too_deep(deep("if c { ", "", "}", 5000)));
+        assert!(too_deep(format!("fn f(p: {}i64) {{}}", "*".repeat(5000))));
+    }
+
+    #[test]
+    fn non_ascii_characters_in_errors() {
+        assert!(parse("fn 한() {}").unwrap_err().msg.contains("unexpected character `한`"));
+        assert!(parse("fn f() { let s = \"\\é\" }").unwrap_err().msg.contains("unknown escape `\\é`"));
+        assert!(parse("fn f() { let s = \"\\").unwrap_err().msg.contains("unterminated string"));
     }
 
     #[test]

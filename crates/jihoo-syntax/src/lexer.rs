@@ -110,6 +110,13 @@ impl<'a> Lexer<'a> {
         self.src.get(self.i + 1).copied().unwrap_or(0)
     }
 
+    /// The character whose first byte was just consumed, for error messages.
+    fn prev_char(&self) -> char {
+        let start = self.i - 1;
+        let bytes = self.src.get(start..(start + 4).min(self.src.len())).unwrap_or_default();
+        String::from_utf8_lossy(bytes).chars().next().unwrap_or('\u{fffd}')
+    }
+
     /// Consumes a `=` right after an operator, as in `+=`.
     fn eat_eq(&mut self) -> bool {
         let eq = self.peek() == b'=';
@@ -174,6 +181,9 @@ impl<'a> Lexer<'a> {
                 b'"' => break,
                 b'\\' => {
                     let esc_pos = self.pos();
+                    if self.i >= self.src.len() {
+                        return Err(Error::new(start, "unterminated string literal"));
+                    }
                     let b = match self.bump() {
                         b'n' => b'\n',
                         b't' => b'\t',
@@ -181,10 +191,10 @@ impl<'a> Lexer<'a> {
                         b'0' => 0,
                         b'\\' => b'\\',
                         b'"' => b'"',
-                        c => {
+                        _ => {
                             return Err(Error::new(
                                 esc_pos,
-                                format!("unknown escape `\\{}`", c as char),
+                                format!("unknown escape `\\{}`", self.prev_char()),
                             ))
                         }
                     };
@@ -393,10 +403,10 @@ impl<'a> Lexer<'a> {
                     _ => Tok::Ident(word.to_string()),
                 }
             }
-            c => {
+            _ => {
                 return Err(Error::new(
                     pos,
-                    format!("unexpected character `{}`", c as char),
+                    format!("unexpected character `{}`", self.prev_char()),
                 ))
             }
         };
