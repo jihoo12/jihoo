@@ -54,20 +54,43 @@ bb3:
 ## Module
 
 ```
-jir 0                          ; format version, must come first
-profile hosted|freestanding    ; language profile
-struct ...                     ; zero or more structs
-enum ...                       ; zero or more enums
-fn ...                         ; zero or more functions
+jir 0                                ; format version, must come first
+profile hosted|native|freestanding   ; language profile
+struct ...                           ; zero or more structs
+enum ...                             ; zero or more enums
+extern ...                           ; zero or more C functions (native only)
+fn ...                               ; zero or more functions
 ```
 
-| profile        | runs on | GC  | allowed builtins | pointers |
-|----------------|---------|-----|------------------|----------|
-| `hosted`       | VM      | yes | `print`          | no       |
-| `freestanding` | LLVM    | no  | `syscall`        | yes      |
+| profile        | runs on        | GC  | allowed builtins | pointers | C functions |
+|----------------|----------------|-----|------------------|----------|-------------|
+| `hosted`       | VM             | yes | `print`          | no       | no          |
+| `native`       | LLVM + libc    | no  | `syscall`, `asm` | yes      | `extern`    |
+| `freestanding` | LLVM, no libc  | no  | `syscall`, `asm` | yes      | no          |
 
-The entry point is `@main` for hosted modules and `@_start` for freestanding ones.
-It takes no parameters and returns `unit` or `i64`.
+The entry point is `@main` for hosted and native modules and `@_start` for
+freestanding ones. It returns `unit` or `i64` and takes no parameters, except
+that a native `@main` may take C's `(i32, **u8)` (argc and argv).
+
+### Extern functions
+
+```
+extern @puts(*u8) -> i32
+extern @printf(*u8, ...) -> i32
+```
+
+A C function the module calls, by its symbol name, with the C calling
+convention. `call` and `funcref` name it like any other function, and a module
+cannot have a function and an extern function of the same name. Its parameter
+and result types are integers, `bool`, pointers and function types made of
+those, and a `unit` result (C's `void`); structs, enums and arrays go by
+pointer. Integers narrower than 32 bits and bools are sign- or zero-extended as
+the C ABI requires.
+
+With `...`, the function takes more arguments after the listed ones, like
+`printf`. A `call` may pass any integer, `bool`, pointer or function value
+there, and they get C's default promotions (bools and integers narrower than 32
+bits widen to 32). A variadic extern cannot be a `funcref`.
 
 ## Types
 
@@ -78,7 +101,7 @@ It takes no parameters and returns `unit` or `i64`.
 | `i8` … `i64`      | signed integers                          | `i8` … `i64`  |
 | `u8` … `u64`      | unsigned integers                        | `i8` … `i64`  |
 | `str`             | GC-managed string, hosted only           | —             |
-| `*T`              | raw pointer to `T`, freestanding only    | `ptr`         |
+| `*T`              | raw pointer to `T`, native and freestanding only | `ptr` |
 | `$Name`           | struct or enum, by value                 | named struct  |
 | `expr`, `stmts`, `items` | code, inside macros; compile time only | —        |
 | `[N x T]`         | array of `N` `T`s, by value              | `[N x T]`     |
@@ -162,7 +185,7 @@ The result type is what the destination register must be declared as.
 |---------------------------------|-----------------------|--------|---------|
 | `%d = const N`                  |                       | int or `bool` | constant; `bool` is 0 or 1 |
 | `%d = unit`                     |                       | `unit` | the unit value |
-| `%d = str "..."`                |                       | `str` (hosted) / `*u8` (freestanding) | string literal; freestanding strings are NUL-terminated constant bytes |
+| `%d = str "..."`                |                       | `str` (hosted) / `*u8` (native, freestanding) | string literal; compiled strings are NUL-terminated constant bytes |
 | `%d = copy %a`                  | `T`                   | `T`    | copy |
 | `%d = neg %a`                   | signed int            | same   | wrapping negation |
 | `%d = not %a`                   | `bool` or int         | same   | logical not, or bitwise not of an integer |
@@ -250,7 +273,7 @@ runtime error and native code traps.
 | `%d = elem %a, %i`                  | `[N x T], i64`        | `T`    | read an element |
 | `%d = setelem %a, %i, %v`           | `[N x T], i64, T`     | `[N x T]` | copy of `%a` with element `%i` replaced |
 
-### Memory (freestanding only)
+### Memory (native and freestanding only)
 
 | syntax                          | operands              | result | meaning |
 |---------------------------------|-----------------------|--------|---------|
@@ -264,11 +287,11 @@ runtime error and native code traps.
 
 | syntax                          | operands              | result | meaning |
 |---------------------------------|-----------------------|--------|---------|
-| `%d = syscall(%n, %a, ...)`     | int or `*T`, 1 to 7 operands | `i64` | freestanding only: raw Linux syscall `%n` |
+| `%d = syscall(%n, %a, ...)`     | int or `*T`, 1 to 7 operands | `i64` | native and freestanding only: raw Linux syscall `%n` |
 | `print %a`                      | int, `bool` or `str`  |        | hosted only: print the value and a newline |
 | `%d = to_str %a`                | int or `bool`         | `str`  | hosted (and macros): the value as text |
 | `%d = unique %p`                | `str`                 | `str`  | compile time only: `p` plus a number unique in this compilation |
-| `%d = asm "tmpl", "cons"(%a, ...)` | int, `bool` or `*T` | int, `*T` or `unit` | freestanding only: inline assembly |
+| `%d = asm "tmpl", "cons"(%a, ...)` | int, `bool` or `*T` | int, `*T` or `unit` | native and freestanding only: inline assembly |
 | `%d = quote ["p0", "p1", ...](kind %h, ...)` | see below | `expr`, `stmts` or `items` | compile time only: code from template pieces and holes |
 
 Each `quote` hole has a kind: `expr` (code in parentheses, or an int, bool or
@@ -312,8 +335,19 @@ arguments. The frontend names the functions it lifts out of anonymous functions
 `jihoo-llc` passes aggregates (structs and arrays) by pointer: the caller passes
 the address of its copy and the callee copies it into its own storage, and an
 aggregate result is written through a hidden first parameter. Aggregates are
-moved with `memcpy`; the module defines weak `memcpy`, `memmove` and `memset`
-because freestanding programs have no libc.
+moved with `memcpy`; a freestanding module defines weak `memcpy`, `memmove` and
+`memset` because it has no libc, and a native one uses libc's.
+
+This is not the C ABI for aggregates, which is why extern functions only take
+scalars. Scalars and pointers are passed the C way, so a jihoo function whose
+parameters and result are integers of at least 32 bits, pointers or `unit` can
+be handed to C as a callback (as `qsort`'s comparator, say).
+
+In a native module the program's functions are internal symbols named
+`jihoo.<name>`, so they never clash with C symbols, and the module defines C's
+`int main(int argc, char **argv)`, which calls `jihoo.main` and returns its
+result truncated to `int` (0 for `unit`). Native objects are position
+independent, since the C compiler that links them usually makes a PIE.
 
 ## Planned
 

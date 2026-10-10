@@ -224,22 +224,22 @@ impl Parser {
                     macro_calls.push(ItemMacro { pos, name, args });
                 }
                 Tok::Import => imports.push(self.import()?),
-                Tok::Fn | Tok::Macro => funcs.push(self.fn_decl(false)?),
+                Tok::Fn | Tok::Macro | Tok::Extern => funcs.push(self.fn_decl(false)?),
                 Tok::Struct | Tok::Enum => structs.push(self.struct_decl(false)?),
                 Tok::Const => consts.push(self.const_decl(false)?),
                 Tok::Pub => {
                     self.bump();
                     match self.peek() {
-                        Tok::Fn | Tok::Macro => funcs.push(self.fn_decl(true)?),
+                        Tok::Fn | Tok::Macro | Tok::Extern => funcs.push(self.fn_decl(true)?),
                         Tok::Struct | Tok::Enum => structs.push(self.struct_decl(true)?),
                         Tok::Const => consts.push(self.const_decl(true)?),
-                        _ => return Err(self.unexpected("`fn`, `macro`, `struct`, `enum` or `const` after `pub`")),
+                        _ => return Err(self.unexpected("`fn`, `extern`, `macro`, `struct`, `enum` or `const` after `pub`")),
                     }
                 }
                 Tok::InnerAttr(_) => {
                     return Err(Error::new(self.pos(), "`#![...]` must come before any item"))
                 }
-                _ => return Err(self.unexpected("`fn`, `macro`, `struct`, `enum`, `const` or `import`")),
+                _ => return Err(self.unexpected("`fn`, `extern`, `macro`, `struct`, `enum`, `const` or `import`")),
             }
         }
         Ok(Program { attrs: vec![], imports, structs, consts, funcs, macro_calls })
@@ -334,14 +334,28 @@ impl Parser {
         Ok(StructDecl { pos, is_pub, name, params, fields, variants: None })
     }
 
+    /// `fn`, `macro`, or `extern fn` (a C function: no body, and `...` may end
+    /// its parameters).
     fn fn_decl(&mut self, is_pub: bool) -> PResult<FnDecl> {
         let is_macro = *self.peek() == Tok::Macro;
-        let pos = self.bump().pos; // `fn` or `macro`
+        let is_extern = *self.peek() == Tok::Extern;
+        let pos = self.bump().pos; // `fn`, `macro` or `extern`
+        if is_extern {
+            self.expect(&Tok::Fn, "`fn` after `extern`")?;
+        }
         let (_, name) = self.ident("function name")?;
         self.expect(&Tok::LParen, "`(`")?;
         let mut params = Vec::new();
+        let mut variadic = false;
         while *self.peek() != Tok::RParen {
+            if is_extern && self.eat(&Tok::Ellipsis) {
+                variadic = true;
+                break;
+            }
             let comptime = self.eat(&Tok::Comptime);
+            if comptime && is_extern {
+                return Err(Error::new(self.pos(), "extern functions cannot have `comptime` parameters"));
+            }
             let (ppos, pname) = self.ident("parameter name")?;
             self.expect(&Tok::Colon, "`:` and a parameter type")?;
             let ty = self.type_expr()?;
@@ -352,8 +366,12 @@ impl Parser {
         }
         self.expect(&Tok::RParen, "`)`")?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
+        if is_extern {
+            let body = Block { stmts: vec![], end: pos };
+            return Ok(FnDecl { pos, is_pub, is_macro, is_extern, variadic, name, params, ret, body });
+        }
         let body = self.block()?;
-        Ok(FnDecl { pos, is_pub, is_macro, name, params, ret, body })
+        Ok(FnDecl { pos, is_pub, is_macro, is_extern, variadic, name, params, ret, body })
     }
 
     fn type_expr(&mut self) -> PResult<TypeExpr> {
@@ -1161,6 +1179,8 @@ fn punct(t: &Tok) -> &'static str {
         Tok::Quote => "quote",
         Tok::Import => "import",
         Tok::Pub => "pub",
+        Tok::Extern => "extern",
+        Tok::Ellipsis => "...",
         Tok::Dollar => "$",
         Tok::LParen => "(",
         Tok::RParen => ")",

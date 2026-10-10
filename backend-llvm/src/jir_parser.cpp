@@ -100,6 +100,9 @@ std::vector<Tok> tokenize(int line, const std::string &src) {
       } else {
         out.push_back({c == '@' ? TokKind::Global : TokKind::StructName, name});
       }
+    } else if (src.compare(i, 3, "...") == 0) {
+      out.push_back({TokKind::Punct, "..."});
+      i += 3;
     } else if (c == '-' && i + 1 < src.size() && src[i + 1] == '>') {
       out.push_back({TokKind::Punct, "->"});
       i += 2;
@@ -413,6 +416,7 @@ Module parse(const std::string &text) {
       } else if (first.kind == TokKind::Word && first.text == "profile") {
         const Tok &p = l.next("a profile");
         if (p.text == "hosted") m.profile = Profile::Hosted;
+        else if (p.text == "native") m.profile = Profile::Native;
         else if (p.text == "freestanding") m.profile = Profile::Freestanding;
         else fail(no, "unknown profile `" + p.text + "`");
         saw_profile = true;
@@ -470,6 +474,26 @@ Module parse(const std::string &text) {
           def.has_layout = true;
         }
         m.enums.push_back(std::move(def));
+      } else if (first.kind == TokKind::Word && first.text == "extern") {
+        // extern @name(T, U[, ...]) -> R
+        const Tok &name = l.next("a function name");
+        if (name.kind != TokKind::Global) fail(no, "expected a function like @name");
+        ExternFn e;
+        e.name = name.text;
+        l.punct("(");
+        while (!l.peek_punct(")")) {
+          if (l.peek_punct("...")) {
+            l.i++;
+            e.variadic = true;
+            break;
+          }
+          e.params.push_back(l.type());
+          if (!l.peek_punct(")")) l.punct(",");
+        }
+        l.punct(")");
+        l.punct("->");
+        e.ret = l.type();
+        m.externs.push_back(std::move(e));
       } else if (first.kind == TokKind::Word && first.text == "fn") {
         if (!saw_version || !saw_profile) fail(no, "missing `jir 0` / `profile` header");
         const Tok &name = l.next("a function name");
@@ -491,7 +515,7 @@ Module parse(const std::string &text) {
         l.punct("{");
         need_regs = true;
       } else {
-        fail(no, "expected `jir`, `profile`, `struct`, `enum`, or `fn`");
+        fail(no, "expected `jir`, `profile`, `struct`, `enum`, `extern`, or `fn`");
       }
       l.end();
       continue;

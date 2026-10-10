@@ -11,6 +11,7 @@ use crate::*;
 struct Cx<'m> {
     profile: Profile,
     funcs: HashMap<&'m str, &'m Function>,
+    externs: HashMap<&'m str, &'m ExternFn>,
     structs: HashMap<&'m str, &'m StructDef>,
     enums: HashMap<&'m str, &'m EnumDef>,
 }
@@ -19,6 +20,7 @@ pub fn verify(m: &Module) -> Result<(), String> {
     let cx = Cx {
         profile: m.profile,
         funcs: m.funcs.iter().map(|f| (f.name.as_str(), f)).collect(),
+        externs: m.externs.iter().map(|e| (e.name.as_str(), e)).collect(),
         structs: m.structs.iter().map(|s| (s.name.as_str(), s)).collect(),
         enums: m.enums.iter().map(|e| (e.name.as_str(), e)).collect(),
     };
@@ -47,9 +49,28 @@ pub fn verify(m: &Module) -> Result<(), String> {
         cx.check_acyclic(&e.name, &mut Vec::new())?;
     }
 
+    if cx.externs.len() != m.externs.len() {
+        return Err("duplicate extern functions".into());
+    }
+    for e in &m.externs {
+        if m.profile != Profile::Native {
+            return Err(format!("extern @{}: extern functions are only available in native mode", e.name));
+        }
+        if cx.funcs.contains_key(e.name.as_str()) {
+            return Err(format!("@{} is both a function and an extern function", e.name));
+        }
+        for (t, is_ret) in e.params.iter().map(|t| (t, false)).chain([(&e.ret, true)]) {
+            cx.check_type(t).map_err(|err| format!("in extern @{}: {err}", e.name))?;
+            if !types::c_compatible(t, is_ret) {
+                return Err(format!("in extern @{}: {} cannot be passed to or from C", e.name, t.jir()));
+            }
+        }
+    }
+
     let entry = m.profile.entry();
+    let args_ok = |f: &Function| f.params.is_empty() || (m.profile == Profile::Native && types::is_main_args(&f.params));
     match cx.funcs.get(entry) {
-        Some(f) if f.params.is_empty() && matches!(f.ret, Type::Unit | Type::I64) => {}
+        Some(f) if args_ok(f) && matches!(f.ret, Type::Unit | Type::I64) => {}
         Some(_) => return Err(format!("entry function `{entry}` must be `fn {entry}()` returning unit or i64")),
         None => {
             return Err(format!(
@@ -66,6 +87,15 @@ pub fn verify(m: &Module) -> Result<(), String> {
 }
 
 impl Cx<'_> {
+    /// The parameters, result, and whether it is variadic, of the function or
+    /// extern function `name`.
+    fn callee(&self, name: &str) -> Option<(&[Type], &Type, bool)> {
+        match self.funcs.get(name) {
+            Some(f) => Some((&f.params, &f.ret, false)),
+            None => self.externs.get(name).map(|e| (&e.params[..], &e.ret, e.variadic)),
+        }
+    }
+
     fn check_type(&self, t: &Type) -> Result<(), String> {
         if !t.available_in(self.profile) {
             return Err(format!("type `{}` is not available in {} mode", t.jir(), self.profile.as_str()));
@@ -173,11 +203,11 @@ impl Cx<'_> {
                 Err(format!("{r} has type {}, expected {}", got.jir(), want.jir()))
             }
         };
-        let freestanding = |what: &str| {
-            if profile == Profile::Freestanding {
+        let compiled = |what: &str| {
+            if profile.is_compiled() {
                 Ok(())
             } else {
-                Err(format!("`{what}` is only available in freestanding mode"))
+                Err(format!("`{what}` is only available in native and freestanding mode"))
             }
         };
 
@@ -214,23 +244,29 @@ impl Cx<'_> {
                         }
                     }
                     Inst::Call { dst, func, args } => {
-                        let callee = self
-                            .funcs
-                            .get(func.as_str())
+                        let (params, ret, variadic) = self
+                            .callee(func)
                             .ok_or_else(|| format!("call to unknown function @{func}"))?;
-                        if callee.params.len() != args.len() {
-                            Err(format!("@{func} takes {} arguments, {} given", callee.params.len(), args.len()))
+                        if args.len() < params.len() || (!variadic && args.len() != params.len()) {
+                            Err(format!("@{func} takes {} arguments, {} given", params.len(), args.len()))
                         } else {
-                            args.iter().zip(&callee.params).try_for_each(|(a, t)| expect(a, t))?;
-                            expect(dst, &callee.ret)
+                            args.iter().zip(params).try_for_each(|(a, t)| expect(a, t))?;
+                            for a in &args[params.len()..] {
+                                if !types::c_compatible(ty(a)?, false) {
+                                    return Err(at(format!("{} cannot be passed to C", ty(a)?.jir())));
+                                }
+                            }
+                            expect(dst, ret)
                         }
                     }
                     Inst::FuncRef { dst, func } => {
-                        let callee = self
-                            .funcs
-                            .get(func.as_str())
+                        let (params, ret, variadic) = self
+                            .callee(func)
                             .ok_or_else(|| format!("funcref to unknown function @{func}"))?;
-                        expect(dst, &Type::Fn(callee.params.clone(), Box::new(callee.ret.clone())))
+                        if variadic {
+                            return Err(at(format!("variadic @{func} cannot be a function value")));
+                        }
+                        expect(dst, &Type::Fn(params.to_vec(), Box::new(ret.clone())))
                     }
                     Inst::Closure { dst, func, captures } => {
                         if profile != Profile::Hosted {
@@ -347,21 +383,21 @@ impl Cx<'_> {
                         expect(dst, ty(src)?)
                     }
                     Inst::Load { dst, ptr } => {
-                        freestanding("load")?;
+                        compiled("load")?;
                         let pointee = ty(ptr)?.pointee().ok_or_else(|| format!("{ptr} is not a pointer"))?;
                         expect(dst, pointee)
                     }
                     Inst::Store { ptr, value } => {
-                        freestanding("store")?;
+                        compiled("store")?;
                         let pointee = ty(ptr)?.pointee().ok_or_else(|| format!("{ptr} is not a pointer"))?;
                         expect(value, pointee)
                     }
                     Inst::Addr { dst, src } => {
-                        freestanding("addr")?;
+                        compiled("addr")?;
                         expect(dst, &Type::ptr(ty(src)?.clone()))
                     }
                     Inst::FieldPtr { dst, ptr, index } => {
-                        freestanding("fieldptr")?;
+                        compiled("fieldptr")?;
                         let pointee = ty(ptr)?.pointee().ok_or_else(|| format!("{ptr} is not a pointer"))?;
                         expect(dst, &Type::ptr(self.field(pointee, *index)?.clone()))
                     }
@@ -413,7 +449,7 @@ impl Cx<'_> {
                         t => Err(format!("{} is not an array", t.jir())),
                     },
                     Inst::ElemPtr { dst, ptr, index } => {
-                        freestanding("elemptr")?;
+                        compiled("elemptr")?;
                         match ty(ptr)?.pointee() {
                             Some(Type::Array(elem, _)) => {
                                 expect(index, &Type::I64)?;
@@ -423,7 +459,7 @@ impl Cx<'_> {
                         }
                     }
                     Inst::Syscall { dst, args } => {
-                        freestanding("syscall")?;
+                        compiled("syscall")?;
                         if args.is_empty() || args.len() > 7 {
                             Err("`syscall` takes 1 to 7 arguments".into())
                         } else {
@@ -436,7 +472,7 @@ impl Cx<'_> {
                         }
                     }
                     Inst::Asm { dst, constraints, args, .. } => {
-                        freestanding("asm")?;
+                        compiled("asm")?;
                         // Inputs are the entries that are neither outputs nor clobbers.
                         let inputs = constraints
                             .split(',')
@@ -469,7 +505,7 @@ impl Cx<'_> {
                     Inst::Unique { .. } => Err("`unique` only exists at compile time".into()),
                     Inst::Print { src } => {
                         if profile != Profile::Hosted {
-                            Err("`print` needs std and is not available in freestanding mode".into())
+                            Err(format!("`print` needs std and is not available in {} mode", profile.as_str()))
                         } else if !ty(src)?.is_printable() {
                             Err(format!("cannot print {}", ty(src)?.jir()))
                         } else {

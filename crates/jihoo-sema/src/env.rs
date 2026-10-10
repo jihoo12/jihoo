@@ -6,7 +6,7 @@
 //! that (directly or indirectly) asks for itself is a cycle and becomes an error.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use jihoo_ir as ir;
@@ -116,6 +116,8 @@ pub(crate) struct Env<'p> {
     struct_instances: RefCell<Vec<(String, String, Rc<Bindings>)>>,
     instance_keys: RefCell<HashMap<String, String>>,
     pending: RefCell<VecDeque<String>>,
+    /// The C symbols of the extern functions code uses (see `ir_name`).
+    used_externs: RefCell<HashSet<String>>,
 }
 
 impl<'p> Env<'p> {
@@ -153,6 +155,7 @@ impl<'p> Env<'p> {
             struct_instances: RefCell::new(Vec::new()),
             instance_keys: RefCell::new(HashMap::new()),
             pending: RefCell::new(VecDeque::new()),
+            used_externs: RefCell::new(HashSet::new()),
         };
         for (m, module) in mods.iter().enumerate() {
             let prog = &module.program;
@@ -164,6 +167,12 @@ impl<'p> Env<'p> {
                 }
             }
             for f in &prog.funcs {
+                if f.is_extern && profile != Profile::Native {
+                    let msg = format!("extern functions call C code and need native mode (`#![native]`), not {}", profile.as_str());
+                    errors.push(Error::new(f.pos, msg));
+                } else if f.is_extern && f.name == "main" {
+                    errors.push(Error::new(f.pos, "`main` is the program's own entry point and cannot be extern"));
+                }
                 if is_builtin(&f.name) {
                     errors.push(Error::new(f.pos, format!("`{}` is a builtin and cannot be redefined", f.name)));
                 } else if env.fn_decls.insert(env.item_key(m, &f.name), (m, f)).is_some() {
@@ -253,12 +262,12 @@ impl<'p> Env<'p> {
     }
 
     /// Like `resolve`; `in_macro` also allows the types that only exist while
-    /// compiling: `expr`, and `str` in freestanding programs.
+    /// compiling: `expr`, and `str` in compiled programs.
     pub fn resolve_in(&self, t: &TypeExpr, b: &Rc<Bindings>, in_macro: bool) -> Result<Type, Error> {
         match &t.kind {
             TypeExprKind::Ptr(inner) => {
-                if self.profile != Profile::Freestanding {
-                    return Err(Error::new(t.pos, "pointer types are only available in freestanding mode"));
+                if !self.profile.is_compiled() {
+                    return Err(Error::new(t.pos, "pointer types are only available in native and freestanding mode"));
                 }
                 Ok(Type::ptr(self.resolve_in(inner, b, in_macro)?))
             }
@@ -338,10 +347,13 @@ impl<'p> Env<'p> {
                     };
                 }
                 if let Some(ty) = Type::from_name(name) {
-                    if ty == Type::Str && self.profile == Profile::Freestanding && !in_macro {
+                    if ty == Type::Str && self.profile.is_compiled() && !in_macro {
                         return Err(Error::new(
                             t.pos,
-                            "type `str` is garbage collected and is not available in freestanding mode (use `*u8`)",
+                            format!(
+                                "type `str` is garbage collected and is not available in {} mode (use `*u8`)",
+                                self.profile.as_str()
+                            ),
                         ));
                     }
                     Ok(ty)
@@ -579,6 +591,34 @@ impl<'p> Env<'p> {
         self.fn_decls.get(key).map(|&(_, d)| d).filter(|d| !d.is_macro && d.params.iter().any(|p| p.comptime))
     }
 
+    /// The declaration of `key` if it is an extern (C) function. Its JIR name is
+    /// its C symbol, `decl.name`, whatever module declares it.
+    pub fn extern_decl(&self, key: &str) -> Option<&'p FnDecl> {
+        self.fn_decls.get(key).map(|&(_, d)| d).filter(|d| d.is_extern)
+    }
+
+    /// True if JIR name `name` is the C symbol of an extern function.
+    pub fn is_extern_symbol(&self, name: &str) -> bool {
+        self.fn_decls.values().any(|(_, d)| d.is_extern && d.name == name)
+    }
+
+    /// The JIR name of function `key`, for code that calls it or takes it as
+    /// a value. Notes the C functions used this way.
+    pub fn ir_name(&self, key: &str) -> String {
+        match self.extern_decl(key) {
+            Some(d) => {
+                self.used_externs.borrow_mut().insert(d.name.clone());
+                d.name.clone()
+            }
+            None => key.to_string(),
+        }
+    }
+
+    /// True if code calls C function `symbol` or takes it as a value.
+    pub fn extern_used(&self, symbol: &str) -> bool {
+        self.used_externs.borrow().contains(symbol)
+    }
+
     /// The declaration of `key` if it is a macro.
     pub fn macro_decl(&self, key: &str) -> Option<&'p FnDecl> {
         self.fn_decls.get(key).map(|&(_, d)| d).filter(|d| d.is_macro)
@@ -626,6 +666,18 @@ impl<'p> Env<'p> {
                                 format!("macro parameters must be `expr`, integers, bools or `str`, not {t}"),
                             ));
                         }
+                    }
+                }
+                if decl.is_extern {
+                    for (p, t) in decl.params.iter().zip(&params) {
+                        if !ir::types::c_compatible(t, false) {
+                            let msg = format!("{t} cannot be passed to C; pass a pointer to it");
+                            return Err(Error::new(p.ty.pos, msg));
+                        }
+                    }
+                    if !ir::types::c_compatible(&ret, true) {
+                        let msg = format!("{ret} cannot be returned from C; return it through a pointer");
+                        return Err(Error::new(decl.ret.as_ref().map_or(decl.pos, |t| t.pos), msg));
                     }
                 }
                 Ok(Rc::new(Sig { params, ret }))
@@ -742,7 +794,14 @@ impl<'p> Env<'p> {
             return Err(Error::new(pos, format!("{} program needs `fn {entry}()`", self.profile.as_str())));
         };
         let sig = self.signature(entry).unwrap()?;
-        if !sig.params.is_empty() {
+        if decl.is_extern {
+            return Err(Error::new(decl.pos, format!("`{entry}` must be defined in the program")));
+        }
+        if self.profile == Profile::Native && !sig.params.is_empty() && !ir::types::is_main_args(&sig.params) {
+            let msg = format!("`{entry}` must take no parameters or `(argc: i32, argv: **u8)`");
+            return Err(Error::new(decl.pos, msg));
+        }
+        if self.profile != Profile::Native && !sig.params.is_empty() {
             return Err(Error::new(decl.pos, format!("`{entry}` must not take parameters")));
         }
         if !matches!(sig.ret, Type::Unit | Type::I64) {

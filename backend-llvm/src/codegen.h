@@ -16,7 +16,7 @@ struct CodegenError : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
 
-// Lowers a freestanding JIR module to LLVM IR for the given target. Throws if a
+// Lowers a native or freestanding JIR module to LLVM IR for the given target. Throws if a
 // struct's layout in JIR disagrees with `dl`.
 std::unique_ptr<llvm::Module> codegen(const jir::Module &m, llvm::LLVMContext &ctx,
                                       const llvm::Triple &triple, const llvm::DataLayout &dl);

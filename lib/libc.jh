@@ -1,0 +1,44 @@
+#![native]
+// The C standard library, for native programs (64-bit Linux and macOS).
+//
+//   import libc
+//   libc.printf("%s is %ld\n", "answer", 42)
+//
+// C types map to jihoo types as: int -> i32, long and ssize_t -> i64,
+// size_t -> u64, char and unsigned char -> u8 (bytes), any pointer -> *T
+// (`void *` is written `*u8`), void -> no result.
+
+// stdio
+pub extern fn printf(fmt: *u8, ...) -> i32
+pub extern fn snprintf(buf: *u8, size: u64, fmt: *u8, ...) -> i32
+pub extern fn puts(s: *u8) -> i32
+pub extern fn putchar(c: i32) -> i32
+pub extern fn getchar() -> i32
+pub extern fn fflush(stream: *u8) -> i32
+
+// stdlib
+pub extern fn malloc(size: u64) -> *u8
+pub extern fn calloc(n: u64, size: u64) -> *u8
+pub extern fn realloc(p: *u8, size: u64) -> *u8
+pub extern fn free(p: *u8)
+pub extern fn exit(status: i32)
+pub extern fn abort()
+pub extern fn atoi(s: *u8) -> i32
+pub extern fn strtol(s: *u8, end: **u8, base: i32) -> i64
+pub extern fn getenv(name: *u8) -> *u8
+pub extern fn qsort(base: *u8, n: u64, size: u64, cmp: fn(*u8, *u8) -> i32)
+
+// string
+pub extern fn strlen(s: *u8) -> u64
+pub extern fn strcmp(a: *u8, b: *u8) -> i32
+pub extern fn strncmp(a: *u8, b: *u8, n: u64) -> i32
+pub extern fn strchr(s: *u8, c: i32) -> *u8
+pub extern fn memcpy(dst: *u8, src: *u8, n: u64) -> *u8
+pub extern fn memmove(dst: *u8, src: *u8, n: u64) -> *u8
+pub extern fn memset(dst: *u8, c: i32, n: u64) -> *u8
+pub extern fn memcmp(a: *u8, b: *u8, n: u64) -> i32
+
+// unistd
+pub extern fn read(fd: i32, buf: *u8, n: u64) -> i64
+pub extern fn write(fd: i32, buf: *u8, n: u64) -> i64
+pub extern fn close(fd: i32) -> i32

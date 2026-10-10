@@ -43,16 +43,20 @@ fn vm_and_native_agree() {
         let vm = exit_code(Command::new(JIHOO).arg("run").arg(&hosted));
 
         if native {
-            let src = work.join(format!("{name}.native.jh"));
-            let bin = work.join(&name);
-            std::fs::write(
-                &src,
-                format!("#![freestanding]\n{body}\nfn _start() -> i64 {{ return entry() }}\n"),
-            )
-            .unwrap();
-            assert_eq!(exit_code(Command::new(JIHOO).arg("build").arg(&src).arg("-o").arg(&bin)), 0);
-            let nat = exit_code(&mut Command::new(&bin));
-            assert_eq!(vm, nat, "{name}: VM exited with {vm}, native with {nat}");
+            // Both compiled profiles: freestanding (`_start`, no libc) and
+            // native (C's `main`, linked with libc).
+            for (profile, entry) in [("freestanding", "_start"), ("native", "main")] {
+                let src = work.join(format!("{name}.{profile}.jh"));
+                let bin = work.join(format!("{name}.{profile}"));
+                std::fs::write(
+                    &src,
+                    format!("#![{profile}]\n{body}\nfn {entry}() -> i64 {{ return entry() }}\n"),
+                )
+                .unwrap();
+                assert_eq!(exit_code(Command::new(JIHOO).arg("build").arg(&src).arg("-o").arg(&bin)), 0);
+                let nat = exit_code(&mut Command::new(&bin));
+                assert_eq!(vm, nat, "{name}: VM exited with {vm}, {profile} build with {nat}");
+            }
         }
         eprintln!("{name}: {vm}");
     }
@@ -150,5 +154,92 @@ fn errors_in_imported_modules_name_their_file() {
     std::fs::write(dir.join("lib/util.jh"), "pub fn twice(x: i64) -> i64 { return x * 2 }\n").unwrap();
     let out = Command::new(JIHOO).arg("run").arg(dir.join("main.jh")).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "4\n");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A native program links with libc: printf, malloc, qsort calling back into
+/// jihoo, and C's argc/argv.
+#[test]
+fn native_example_runs() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let bin = std::env::temp_dir().join(format!("jihoo-native-{}", std::process::id()));
+    let src = repo_root().join("examples/native.jh");
+    assert_eq!(exit_code(Command::new(JIHOO).arg("build").arg(&src).arg("-o").arg(&bin)), 0);
+    let out = Command::new(&bin).args(["one", "two"]).output().unwrap();
+    std::fs::remove_file(&bin).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "hello from native jihoo, with 2 argument(s)\n  argv[1] = one\n  argv[2] = two\n\
+         -49 -29 -20 -2 20 37 \np = (3, 4), len(\"jihoo\") = 5\n"
+    );
+    assert_eq!(out.status.code(), Some(49));
+}
+
+/// `jihoo build` compiles and links C files given with the program, and the
+/// two call each other: narrow integers and bools cross with C's extensions.
+#[test]
+fn native_programs_link_c_files() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("jihoo-ffi-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("ffi.c"),
+        "#include <stdbool.h>\n#include <stdint.h>\n\
+         int64_t widen(int8_t a, uint8_t b, int16_t c) { return (int64_t)a * 1000000 + b * 1000 + c; }\n\
+         bool is_odd(int32_t n) { return n & 1; }\n\
+         int64_t apply(int64_t (*f)(int64_t), int64_t x) { return f(f(x)); }\n\
+         void bump(int64_t *p) { *p += 1; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.jh"),
+        "#![native]\n\
+         extern fn widen(a: i8, b: u8, c: i16) -> i64\n\
+         extern fn is_odd(n: i32) -> bool\n\
+         extern fn apply(f: fn(i64) -> i64, x: i64) -> i64\n\
+         extern fn bump(p: *i64)\n\
+         fn triple(x: i64) -> i64 { return x * 3 }\n\
+         fn main() -> i64 {\n\
+           if widen(-2, 200, -300) != -1800300 { return 1 }\n\
+           if !is_odd(7) || is_odd(8) { return 2 }\n\
+           if apply(triple, 5) != 45 { return 3 }\n\
+           let n = 41\n\
+           bump(&n)\n\
+           return n\n\
+         }\n",
+    )
+    .unwrap();
+    let bin = dir.join("main");
+    let status = Command::new(JIHOO)
+        .arg("build")
+        .arg(dir.join("main.jh"))
+        .arg(dir.join("ffi.c"))
+        .arg("-o")
+        .arg(&bin)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(exit_code(&mut Command::new(&bin)), 42);
+
+    // Freestanding programs link nothing else.
+    std::fs::write(dir.join("fs.jh"), "#![freestanding]\nfn _start() {}\n").unwrap();
+    let out = Command::new(JIHOO).arg("build").arg(dir.join("fs.jh")).arg(dir.join("ffi.c")).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("use `#![native]` to link with C"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn native_programs_do_not_run_on_the_vm() {
+    let dir = std::env::temp_dir().join(format!("jihoo-native-vm-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("n.jh"), "#![native]\nfn main() {}\n").unwrap();
+    let out = Command::new(JIHOO).arg("run").arg(dir.join("n.jh")).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("native programs do not run on the VM"));
     std::fs::remove_dir_all(&dir).unwrap();
 }

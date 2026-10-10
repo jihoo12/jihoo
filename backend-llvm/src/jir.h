@@ -10,7 +10,7 @@
 
 namespace jir {
 
-enum class Profile { Hosted, Freestanding };
+enum class Profile { Hosted, Native, Freestanding };
 
 struct Type {
   enum Kind { Unit, Bool, Int, Str, Ptr, Struct, Array, Fn } kind = Unit;
@@ -99,6 +99,15 @@ struct EnumDef {
   uint64_t size = 0, align = 0;
 };
 
+// A C function the program calls (native only). Its types are integers, bools,
+// pointers, functions, and `unit` for a void result.
+struct ExternFn {
+  std::string name;  // the C symbol
+  std::vector<Type> params;
+  Type ret;
+  bool variadic = false;  // takes more arguments after `params`, like printf
+};
+
 enum class Op {
   Const, Unit, Str, Copy, Neg, Not,
   Add, Sub, Mul, Div, Rem, Eq, Ne, Lt, Le, Gt, Ge, And, Or, Xor, Shl, Shr,
@@ -149,6 +158,7 @@ struct Module {
   Profile profile = Profile::Hosted;
   std::vector<StructDef> structs;
   std::vector<EnumDef> enums;
+  std::vector<ExternFn> externs;
   std::vector<Function> funcs;
 };
 

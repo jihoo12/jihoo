@@ -198,7 +198,8 @@ impl<'m> Vm<'m> {
     pub fn run_main(&mut self, out: &mut dyn Write) -> Result<i64, VmError> {
         let err = |msg: &str| VmError { func: "main".into(), msg: msg.into() };
         if self.module.profile != Profile::Hosted {
-            return Err(err("freestanding modules cannot run on the VM; use `jihoo build`"));
+            let msg = format!("{} modules cannot run on the VM; use `jihoo build`", self.module.profile.as_str());
+            return Err(err(&msg));
         }
         let main = *self.fn_index.get("main").ok_or_else(|| err("no `main` function"))?;
         match self.call(main, &[], out)? {

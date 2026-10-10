@@ -72,10 +72,10 @@ fn returns_are_checked() {
 #[test]
 fn profile_rules() {
     assert!(err("#![freestanding]\nfn _start() { print(1) }").contains("not available in freestanding"));
-    assert!(err("fn main() { syscall(60, 0) }").contains("only available in freestanding"));
+    assert!(err("fn main() { syscall(60, 0) }").contains("only available in native and freestanding"));
     assert!(err(&fs("fn f(s: str) {}")).contains("garbage collected"));
-    assert!(err("fn f(p: *u8) {}\nfn main() {}").contains("only available in freestanding"));
-    assert!(err("fn main() { let x = 1\n let p = &x }").contains("only available in freestanding"));
+    assert!(err("fn f(p: *u8) {}\nfn main() {}").contains("only available in native and freestanding"));
+    assert!(err("fn main() { let x = 1\n let p = &x }").contains("only available in native and freestanding"));
     assert!(err(&fs("fn f(p: ptr) {}")).contains("written `*u8`"));
     assert!(err("fn start() {}").contains("needs `fn main()`"));
     assert!(err("fn main() -> bool { return true }").contains("must return nothing or i64"));
@@ -799,7 +799,7 @@ fn inline_asm_lowering() {
     assert!(text.contains(r#"asm "mov ${0}, ${1}\nbswap ${0}", "=r,r"(%0)"#), "{text}");
     // `cc` is implied; the rest become LLVM clobbers.
     assert!(text.contains(r#""{rax},{rdi},~{rcx},~{r11},~{memory}""#), "{text}");
-    assert!(err("fn main() { asm(\"nop\") }").contains("only available in freestanding"));
+    assert!(err("fn main() { asm(\"nop\") }").contains("only available in native and freestanding"));
     assert!(err(&fs("fn f() -> bool { return asm(\"nop\", out(reg) bool) }")).contains("output must be an integer or a pointer"));
     assert!(err(&fs("fn f() { asm(\"mov {0}, {1}\", in(reg) 1) }")).contains("only 1 inputs"));
     // A function value is a code pointer, so asm can call it.
@@ -1116,4 +1116,78 @@ fn unique_names_and_to_str() {
     assert!(err("macro m() -> expr { return ident(\"1x\") }\nfn main() { print(m!()) }").contains("`1x` is not a valid name"));
     assert!(err(&fs("fn f() { let s = to_str(1) }")).contains("only available in hosted programs and macros"));
     assert!(err("fn main() { print(to_str(\"s\")) }").contains("takes an integer or a bool"));
+}
+
+/// Wraps `body` in a native program.
+fn native(body: &str) -> String {
+    format!("#![native]\n{body}\nfn main() {{}}")
+}
+
+#[test]
+fn native_programs_call_c() {
+    let m = check(&native("extern fn printf(fmt: *u8, ...) -> i32\nextern fn abs(n: i32) -> i32\n\
+                           fn f() -> i32 { printf(\"%d %s\\n\", 1 as u8, \"x\")\n return abs(-3) }"))
+    .unwrap();
+    assert_eq!(m.profile, Profile::Native);
+    let printf = m.extern_fn("printf").unwrap();
+    assert!(printf.variadic && printf.params == [Type::ptr(Type::U8)]);
+    let text = m.to_string();
+    assert!(text.contains("extern @printf(*u8, ...) -> i32"), "{text}");
+    assert!(text.contains("call @abs("), "{text}");
+    // Pointers, `&`, syscall and asm work as in freestanding code; GC types do not.
+    check(&native("fn f() -> i64 { let x = 1\n let p = &x\n return *p + syscall(39) }")).unwrap();
+    assert!(err(&native("fn f(s: str) {}")).contains("not available in native mode"));
+    assert!(err(&native("fn f() { print(1) }")).contains("not available in native mode"));
+    // `main` may take C's argc and argv.
+    check("#![native]\nfn main(argc: i32, argv: **u8) -> i64 { return argc as i64 }").unwrap();
+    assert!(err("#![native]\nfn main(n: i64) {}").contains("(argc: i32, argv: **u8)"));
+    assert!(err("#![freestanding]\nfn _start(argc: i32, argv: **u8) {}").contains("must not take parameters"));
+}
+
+#[test]
+fn extern_rules() {
+    assert!(err("extern fn puts(s: *u8) -> i32\nfn main() {}").contains("need native mode"));
+    assert!(err("#![freestanding]\nextern fn puts(s: *u8) -> i32\nfn _start() {}").contains("need native mode"));
+    let e = err(&native("struct P { x: i64 }\nextern fn f(p: P)"));
+    assert!(e.contains("cannot be passed to C; pass a pointer"), "{e}");
+    assert!(err(&native("extern fn f() -> [u8; 4]")).contains("cannot be returned from C"));
+    assert!(err(&native("extern fn f(cb: fn([u8; 2]))")).contains("cannot be passed to C"));
+    let e = err(&native("struct P { x: i64 }\nextern fn printf(fmt: *u8, ...) -> i32\nfn f() { printf(\"\", P { x: 1 }) }"));
+    assert!(e.contains("cannot be passed to C"), "{e}");
+    assert!(err(&native("extern fn puts(s: *u8) -> i32\nfn f() { puts(1) }")).contains("must be *u8, found i64"));
+    let e = err(&native("extern fn printf(fmt: *u8, ...) -> i32\nfn f() { let p = printf }"));
+    assert!(e.contains("variable arguments"), "{e}");
+    // A non-variadic C function is a function value like any other.
+    check(&native("extern fn abs(n: i32) -> i32\nfn f() -> i32 { let g = abs\n return g(-1) }")).unwrap();
+    assert!(err(&native("extern fn f(comptime n: i64)")).contains("cannot have `comptime`"));
+    let e = err(&native("extern fn abs(n: i32) -> i32\nconst X = abs(-1)"));
+    assert!(e.contains("it is a C function"), "{e}");
+    assert!(err("#![native]\nextern fn main()").contains("cannot be extern"));
+    assert!(err("#![native]\n#![freestanding]\nfn main() {}").contains("already native"));
+}
+
+#[test]
+fn extern_declarations_across_modules() {
+    let libc = "#![native]\npub extern fn puts(s: *u8) -> i32";
+    // Declared in a module, named by its C symbol in JIR.
+    let m = check_files(&[("main.jh", "#![native]\nimport c\nfn main() { c.puts(\"hi\") }"), ("lib/c.jh", libc)]).unwrap();
+    assert!(m.to_string().contains("call @puts("), "{m}");
+    // Several declarations of one C function must agree.
+    let same = "#![native]\nimport c\nextern fn puts(s: *u8) -> i32\nfn main() { puts(\"a\")\n c.puts(\"b\") }";
+    assert_eq!(check_files(&[("main.jh", same), ("lib/c.jh", libc)]).unwrap().externs.len(), 1);
+    let differ = "#![native]\nimport c\nextern fn puts(s: *u8) -> i64\nfn main() {}";
+    let e = check_files(&[("main.jh", differ), ("lib/c.jh", libc)]).unwrap_err();
+    assert!(e.contains("different signature"), "{e}");
+    // Only the C functions the program uses are in it...
+    let unused = "#![native]\nimport c\nfn puts(s: *u8) -> i32 { return 0 }\nfn main() { puts(\"a\") }";
+    assert!(check_files(&[("main.jh", unused), ("lib/c.jh", libc)]).unwrap().externs.is_empty());
+    // ...and a used one cannot share its name with one of the program's functions.
+    let clash = "#![native]\nimport c\nfn puts(s: *u8) -> i32 { return 0 }\nfn main() { c.puts(\"a\") }";
+    let e = check_files(&[("main.jh", clash), ("lib/c.jh", libc)]).unwrap_err();
+    assert!(e.contains("same name as the function `puts`"), "{e}");
+    // Freestanding libraries work in native programs; native ones need native.
+    let io = "#![freestanding]\npub fn f() -> i64 { return syscall(39) }";
+    check_files(&[("main.jh", "#![native]\nimport io\nfn main() { io.f() }"), ("lib/io.jh", io)]).unwrap();
+    let e = check_files(&[("main.jh", "#![freestanding]\nimport c\nfn _start() {}"), ("lib/c.jh", libc)]).unwrap_err();
+    assert!(e.contains("module `c` is native-only, but the program is freestanding"), "{e}");
 }

@@ -1,4 +1,4 @@
-// jihoo-llc: compiles a freestanding JIR module (.jir) to a native object file.
+// jihoo-llc: compiles a native or freestanding JIR module (.jir) to an object file.
 
 #include <fstream>
 #include <iostream>
@@ -106,8 +106,11 @@ int run(const Options &o) {
     std::cerr << "jihoo-llc: " << err << "\n";
     return 1;
   }
+  // Native programs are linked by the C compiler, usually into a position
+  // independent executable; freestanding ones are linked statically.
+  auto reloc = jm.profile == jir::Profile::Native ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
   std::unique_ptr<llvm::TargetMachine> tm(target->createTargetMachine(
-      triple, "generic", "", llvm::TargetOptions(), llvm::Reloc::Static));
+      triple, "generic", "", llvm::TargetOptions(), reloc));
 
   llvm::LLVMContext ctx;
   auto mod = jihoo::codegen(jm, ctx, triple, tm->createDataLayout());

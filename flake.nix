@@ -1,5 +1,5 @@
 {
-  description = "jihoo: an easy language with a GC'd VM and freestanding LLVM builds";
+  description = "jihoo: an easy language with a GC'd VM and native and freestanding LLVM builds";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -82,7 +82,7 @@
             {
               nativeBuildInputs = [ pkgs.makeWrapper ];
               meta = meta // {
-                description = "jihoo toolchain: VM, LLVM backend, linker and standard library";
+                description = "jihoo toolchain: VM, LLVM backend, linkers and standard library";
                 mainProgram = "jihoo";
               };
             }
@@ -92,7 +92,8 @@
               ln -s ${jihoo-llc}/bin/jihoo-llc $out/bin/jihoo-llc
               makeWrapper ${jihoo-frontend}/bin/jihoo $out/bin/jihoo \
                 --set-default JIHOO_LLC ${jihoo-llc}/bin/jihoo-llc \
-                --set-default JIHOO_LD ${llvm.lld}/bin/ld.lld
+                --set-default JIHOO_LD ${llvm.lld}/bin/ld.lld \
+                --set-default JIHOO_CC ${llvm.clang}/bin/clang
             '';
 
           default = jihoo;
@@ -124,6 +125,10 @@
             cp ${./examples}/*.jh .
             jihoo run hello.jh > hello.out
             grep -qx "Hello, jihoo!" hello.out
+            jihoo build native.jh -o native
+            ./native one > native.out && status=0 || status=$?
+            test "$status" = 49
+            grep -qx "  argv\[1\] = one" native.out
           '' + lib.optionalString pkgs.stdenv.hostPlatform.isx86_64 ''
             jihoo build freestanding.jh -o freestanding
             ./freestanding > /dev/null && status=0 || status=$?

@@ -51,21 +51,36 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
 
     let mut profile = Profile::Hosted;
     for (pos, attr) in &mods[0].program.attrs {
-        match attr.as_str() {
-            "freestanding" => profile = Profile::Freestanding,
-            other => errors.push(Error::new(*pos, format!("unknown attribute `#![{other}]`"))),
+        let chosen = match attr.as_str() {
+            "native" => Profile::Native,
+            "freestanding" => Profile::Freestanding,
+            other => {
+                errors.push(Error::new(*pos, format!("unknown attribute `#![{other}]`")));
+                continue;
+            }
+        };
+        if profile != Profile::Hosted {
+            let msg = format!("the program is already {}; it cannot also be {}", profile.as_str(), chosen.as_str());
+            errors.push(Error::new(*pos, msg));
         }
+        profile = chosen;
     }
-    // A library may say it needs freestanding mode; it cannot choose the mode.
+    // A library may say what it needs; it cannot choose the mode. A
+    // freestanding library (no GC, no libc) also works in native programs; a
+    // native one needs libc.
     for m in &mods[1..] {
         for (pos, attr) in &m.program.attrs {
-            match attr.as_str() {
-                "freestanding" if profile == Profile::Freestanding => {}
-                "freestanding" => errors.push(Error::new(
-                    *pos,
-                    format!("module `{}` is freestanding-only, but the program is hosted", m.name),
-                )),
-                other => errors.push(Error::new(*pos, format!("unknown attribute `#![{other}]`"))),
+            let ok = match attr.as_str() {
+                "freestanding" => profile.is_compiled(),
+                "native" => profile == Profile::Native,
+                other => {
+                    errors.push(Error::new(*pos, format!("unknown attribute `#![{other}]`")));
+                    continue;
+                }
+            };
+            if !ok {
+                let msg = format!("module `{}` is {attr}-only, but the program is {}", m.name, profile.as_str());
+                errors.push(Error::new(*pos, msg));
             }
         }
     }
@@ -119,10 +134,29 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
     // Generic functions are compiled per instance; macros only run while compiling.
     let mut plain = Vec::new();
     let mut macros = Vec::new();
+    let mut externs: Vec<(Pos, ir::ExternFn)> = Vec::new();
     for (m, module) in mods.iter().enumerate() {
         for f in &module.program.funcs {
             let key = env.key(m, &f.name).unwrap();
-            if f.is_macro {
+            if f.is_extern {
+                match env.signature(&key) {
+                    Some(Ok(sig)) => {
+                        let (params, ret) = (sig.params.clone(), sig.ret.clone());
+                        let e = ir::ExternFn { name: f.name.clone(), params, ret, variadic: f.variadic };
+                        // Several modules may declare the same C function, the same way.
+                        match externs.iter().find(|(_, x)| x.name == e.name) {
+                            Some((_, x)) if *x == e => {}
+                            Some(_) => {
+                                let msg = format!("C function `{}` is declared elsewhere with a different signature", f.name);
+                                errors.push(Error::new(f.pos, msg));
+                            }
+                            None => externs.push((f.pos, e)),
+                        }
+                    }
+                    Some(Err(e)) => errors.push(e),
+                    None => {}
+                }
+            } else if f.is_macro {
                 macros.push(key);
             } else if env.generic(&key).is_none() {
                 plain.push(key);
@@ -171,8 +205,20 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
         define(t, Pos::new(1, 1), &mut errors);
     }
 
+    // Only the C functions the program uses are part of it, so declaring a
+    // library of them (`lib/libc.jh`) costs nothing and takes no names.
+    externs.retain(|(_, e)| env.extern_used(&e.name));
+    // A C symbol and a jihoo function would share one JIR name.
+    for (pos, e) in &externs {
+        if funcs.iter().any(|f| f.name == e.name) {
+            let msg = format!("C function `{}` has the same name as the function `{}`; rename the function", e.name, e.name);
+            errors.push(Error::new(*pos, msg));
+        }
+    }
+    let externs = externs.into_iter().map(|(_, e)| e).collect();
+
     if errors.is_empty() {
-        Ok(ir::Module { profile, structs, enums, funcs })
+        Ok(ir::Module { profile, structs, enums, externs, funcs })
     } else {
         // One failing item can surface as the same error through several others.
         let mut seen = std::collections::HashSet::new();
@@ -534,8 +580,12 @@ impl<'a> FnCx<'a> {
         };
         self.env.check_visible(pos, self.bindings.module, key)?;
         let sig = sig?;
+        if self.env.extern_decl(key).is_some_and(|d| d.variadic) {
+            return Err(Error::new(pos, format!("`{name}` takes variable arguments, so it cannot be used as a value")));
+        }
         let ty = Type::Fn(sig.params.clone(), Box::new(sig.ret.clone()));
-        let r = self.hoist(|cx| cx.emit_to(ty, |dst| Inst::FuncRef { dst, func: key.to_string() }));
+        let func = self.env.ir_name(key);
+        let r = self.hoist(|cx| cx.emit_to(ty, |dst| Inst::FuncRef { dst, func }));
         self.const_regs.insert(name.to_string(), r);
         Ok(r)
     }
@@ -844,8 +894,8 @@ impl<'a> FnCx<'a> {
                 self.emit_to(ty, |dst| Inst::Ref { dst, src })
             }
             ExprKind::AddrOf(inner) => {
-                if self.profile() != Profile::Freestanding {
-                    return Err(Error::new(e.pos, "`&` makes a pointer; pointers are only available in freestanding mode"));
+                if !self.profile().is_compiled() {
+                    return Err(Error::new(e.pos, "`&` makes a pointer; pointers are only available in native and freestanding mode"));
                 }
                 let place = self.place(inner)?;
                 self.addr_of(e.pos, place)?
@@ -1007,7 +1057,8 @@ impl<'a> FnCx<'a> {
         match name {
             "print" => {
                 if self.profile() != Profile::Hosted {
-                    return Err(Error::new(pos, "`print` needs std and is not available in freestanding mode"));
+                    let msg = format!("`print` needs std and is not available in {} mode", self.profile().as_str());
+                    return Err(Error::new(pos, msg));
                 }
                 let [arg] = args else {
                     return Err(Error::new(pos, "`print` takes exactly 1 argument"));
@@ -1102,8 +1153,8 @@ impl<'a> FnCx<'a> {
                 Ok(self.konst(Type::I64, n))
             }
             "syscall" => {
-                if self.profile() != Profile::Freestanding {
-                    return Err(Error::new(pos, "`syscall` is only available in freestanding mode"));
+                if !self.profile().is_compiled() {
+                    return Err(Error::new(pos, "`syscall` is only available in native and freestanding mode"));
                 }
                 if args.is_empty() || args.len() > 7 {
                     return Err(Error::new(pos, "`syscall` takes 1 to 7 arguments"));
@@ -1159,9 +1210,25 @@ impl<'a> FnCx<'a> {
                     Some(r) => Error::new(pos, format!("`{name}` is not a function; it has type {}", self.ty(r))),
                     None => Error::new(pos, format!("unknown function `{name}`")),
                 })??;
-                let regs = self.call_args(pos, &format!("`{name}`"), &sig.params, args)?;
+                let variadic = self.env.extern_decl(&key).is_some_and(|d| d.variadic);
+                let regs = if variadic && args.len() >= sig.params.len() {
+                    let (fixed, rest) = args.split_at(sig.params.len());
+                    let mut regs = self.call_args(pos, &format!("`{name}`"), &sig.params, fixed)?;
+                    for a in rest {
+                        let r = self.expr(a, None)?;
+                        if !ir::types::c_compatible(self.ty(r), false) {
+                            let msg = format!("{} cannot be passed to C; pass a pointer to it", self.ty(r));
+                            return Err(Error::new(a.pos, msg));
+                        }
+                        regs.push(r);
+                    }
+                    regs
+                } else {
+                    self.call_args(pos, &format!("`{name}`"), &sig.params, args)?
+                };
                 let ret = sig.ret.clone();
-                Ok(self.emit_to(ret, |dst| Inst::Call { dst, func: key, args: regs }))
+                let func = self.env.ir_name(&key);
+                Ok(self.emit_to(ret, |dst| Inst::Call { dst, func, args: regs }))
             }
         }
     }

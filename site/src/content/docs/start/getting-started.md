@@ -74,13 +74,43 @@ fn main() {
 jihoo run hello.jh
 ```
 
+## A native program
+
+Add `#![native]` and the same language compiles, through LLVM, to an ordinary
+program for your operating system: no GC, linked with libc, and able to call any
+C function. `main` may take C's `argc` and `argv`, and what it returns is the
+exit status.
+
+```jihoo title="args.jh"
+#![native]
+import libc                            // printf, malloc, qsort, ...
+
+extern fn labs(n: i64) -> i64          // any other C function
+
+fn main(argc: i32, argv: **u8) -> i64 {
+    let i: i32 = 0
+    while i < argc {
+        libc.printf("argv[%d] = %s\n", i, argv[i as i64])
+        i = i + 1
+    }
+    return labs(-7)
+}
+```
+
+```sh
+jihoo build args.jh -o args
+./args hello; echo $?                  # 7
+```
+
+C files and libraries can be linked in too: `jihoo build main.jh util.c -lz`.
+
 ## A freestanding program
 
-Add `#![freestanding]` and the same language compiles to a native binary with no
-GC and no libc. The program starts at `_start`; returning from it exits the
+Add `#![freestanding]` instead and it compiles to a static binary with no GC and
+no libc at all. The program starts at `_start`; returning from it exits the
 process. The standard library has an allocator and output for such programs.
 
-```jihoo title="native.jh"
+```jihoo title="bare.jh"
 #![freestanding]
 import alloc
 import io
@@ -99,8 +129,8 @@ fn _start() -> i64 {
 ```
 
 ```sh
-jihoo build native.jh -o native
-./native
+jihoo build bare.jh -o bare
+./bare
 ```
 
 ## Commands
@@ -108,7 +138,7 @@ jihoo build native.jh -o native
 | Command | What it does |
 |---|---|
 | `jihoo run file.jh` | Run a hosted program on the VM. |
-| `jihoo build file.jh -o out` | Compile a freestanding program to a static binary. |
+| `jihoo build file.jh -o out` | Compile a native program (linked with libc), or a freestanding one to a static binary. |
 | `jihoo emit-ir file.jh` | Print the program's [JIR](../../reference/jir/), the IR both backends share. |
 
 `-I dir` adds a directory to search for imported modules, as does `JIHOO_PATH`.

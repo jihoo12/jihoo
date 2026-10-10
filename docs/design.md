@@ -6,8 +6,8 @@ a VM or compiled by LLVM.
 
 ```
                ┌─────────────── Rust ───────────────┐      ┌──── C++ ─────┐
- source.jh ──► │ jihoo-syntax ─► jihoo-sema ──► JIR │ ──►  │  jihoo-llc   │ ──► .o ──► ld.lld ──► ELF
-               │   (parse)      (typecheck    │    │ .jir │ (LLVM 21)    │
+ source.jh ──► │ jihoo-syntax ─► jihoo-sema ──► JIR │ ──►  │  jihoo-llc   │ ──► .o ─┬─► cc + libc ──► program  (native)
+               │   (parse)      (typecheck    │    │ .jir │ (LLVM 21)    │         └─► ld.lld ─────► static ELF (freestanding)
                │                 + lower)     ▼    │      └──────────────┘
                │                           jihoo-vm│
                └────────────────────────────────────┘
@@ -15,21 +15,66 @@ a VM or compiled by LLVM.
 
 ## Profiles
 
-A program chooses its profile with a file attribute.
+A program chooses its profile with a file attribute. There are three, one per
+place a program can run: on the VM, on an operating system, or on bare metal.
 
-|                 | hosted (default)        | freestanding (`#![freestanding]`) |
-|-----------------|-------------------------|-----------------------------------|
-| backend         | VM                      | LLVM, native static binary        |
-| memory          | GC, managed by the VM   | manual                            |
-| library         | std (strings, `print`…) | core only                         |
-| pointers        | no                      | `*T`, `&x`, `*p`, `p[i]`          |
-| syscalls / asm  | no                      | yes                               |
-| entry point     | `fn main()`             | `fn _start()`                     |
+|                 | hosted (default)        | native (`#![native]`)          | freestanding (`#![freestanding]`) |
+|-----------------|-------------------------|--------------------------------|-----------------------------------|
+| runs on         | the jihoo VM            | an OS, as a normal program     | anything: no OS libraries at all  |
+| backend         | VM                      | LLVM, linked by `cc` with libc | LLVM, static binary via `ld.lld`  |
+| memory          | GC, managed by the VM   | manual (`malloc`, or `alloc`)  | manual (`alloc` over `mmap`)      |
+| library         | std (strings, `print`…) | core + C (`import libc`)       | core only                         |
+| C functions     | no                      | `extern fn`, C files, `-l`     | no                                |
+| pointers        | no                      | `*T`, `&x`, `*p`, `p[i]`       | `*T`, `&x`, `*p`, `p[i]`          |
+| syscalls / asm  | no                      | yes                            | yes                               |
+| entry point     | `fn main()`             | `fn main()` or `fn main(argc: i32, argv: **u8)` | `fn _start()`    |
+
+Native and freestanding code are the same language: no GC, raw pointers,
+`syscall` and inline asm. They differ in what is around the program. A native
+program is an ordinary process: the C runtime starts it and calls `main`, it
+can call any C function, and its exit status is what `main` returns. A
+freestanding program brings everything itself, starting at `_start`. This
+mirrors Rust's `std` vs `no_std` / `no_main`; jihoo's hosted profile sits above
+both, like a managed language.
 
 The profile is a property of the program, not a command line switch. Code that
-uses GC features is rejected in freestanding mode at compile time (see
+uses GC features is rejected in native and freestanding mode at compile time (see
 `crates/jihoo-ir/src/verify.rs`), so a program never silently changes meaning
-between modes. This mirrors Rust's `no_std` / `no_main`.
+between modes.
+
+### Calling C (native)
+
+```jihoo
+#![native]
+import libc                               // lib/libc.jh: printf, malloc, qsort, ...
+
+extern fn labs(n: i64) -> i64             // or declare a C function yourself
+extern fn printf(fmt: *u8, ...) -> i32    // `...`: variable arguments
+
+fn main(argc: i32, argv: **u8) -> i64 {
+    libc.printf("%s has %d arguments\n", argv[0], argc - 1)
+    return labs(-3)
+}
+```
+
+- `extern fn` declares a C function; calls use the C calling convention. Only
+  integers, `bool`, pointers and functions made of those cross into C, and
+  `unit` as C's `void`. Structs, enums and arrays go by pointer (`&p`), since
+  each C ABI passes them differently.
+- C types map as `int` → `i32`, `long`/`ssize_t` → `i64`, `size_t` → `u64`,
+  `char` → `u8`, `T *` → `*T`, `void *` → `*u8`. String literals are already
+  NUL-terminated `*u8`s.
+- Arguments past `...` get C's default promotions (narrow integers and bools
+  widen to 32 bits), so pass `i64` with `%ld`.
+- A jihoo function is a C function pointer: `libc.qsort(p, n, 8, compare)`.
+  Callbacks should take and return integers of at least 32 bits, pointers, or
+  nothing.
+- Several modules may declare the same C function if they agree on its
+  signature. Only the C functions a program uses are part of it, so a library of
+  declarations such as `lib/libc.jh` costs nothing.
+- C functions cannot run at compile time: `comptime` and macros run on the VM.
+- `jihoo build prog.jh util.c -lz` compiles and links C files and libraries in;
+  `JIHOO_CC` picks the C compiler (default `cc`).
 
 ### Planned library layers
 
@@ -55,8 +100,8 @@ fn area(w: i64, h: i64) -> i64 {   // signatures are written out
 
 - Types: `unit`, `bool`, `i8`…`i64`, `u8`…`u64`, structs, enums, arrays, function types
   `fn(A, B) -> R`, plus `str`, `ref T`, `cell T` and `chan T` (hosted only,
-  garbage collected) and `*T` (freestanding only, raw pointer). A string literal
-  is a `str` when hosted and a `*u8` to constant bytes when freestanding.
+  garbage collected) and `*T` (native and freestanding, raw pointer). A string literal
+  is a `str` when hosted and a `*u8` to constant NUL-terminated bytes when compiled.
 - Bitwise operators `&`, `|`, `^`, `<<`, `>>` work on integers, and `!` flips
   every bit of an integer. `>>` is arithmetic for signed types and logical for
   unsigned ones; shift amounts are taken modulo the bit width, so `x << 64` on an
@@ -168,11 +213,13 @@ fn _start() -> i64 {
   `alloc.Vec(i64)`); the root module's items keep their plain names. Inside a
   generic, names resolve in the module that declares it, while type arguments can
   come from the caller: `alloc.Vec(Point)` holds the caller's `Point`.
-- The root file chooses the profile. A library marked `#![freestanding]` can only
-  be imported by freestanding programs.
+- The root file chooses the profile. A library marked `#![freestanding]` needs no GC
+  and no libc, so native and freestanding programs can import it; one marked
+  `#![native]` (such as `libc`) only native programs.
 - Source positions carry a file number, so errors name the file they are in.
 
-The standard library so far, all freestanding and x86_64 Linux only: `alloc` (an
+The standard library so far: `libc` (C functions, native only), and, usable from
+native and freestanding programs on x86_64 Linux, `alloc` (an
 arena over `mmap` and `Vec(T)`), `io` (`puts`, `print_int`, `write`, `exit`) and
 `coro` (coroutines; see below).
 
@@ -689,7 +736,7 @@ fn bswap(x: u64) -> u64 {
   compiler choose, and `in(out) x` starts the output register with `x` (for
   instructions such as `xchg` or `inc` that update a register in place).
   `clobber(...)` lists registers and `"memory"`; the flags are always clobbered.
-- Freestanding only. Like `syscall`, asm cannot run at compile time.
+- Native and freestanding only. Like `syscall`, asm cannot run at compile time.
 
 The `syscall` builtin stays as a portable shortcut (x86_64 and aarch64) for the
 most common use of asm. A function value can be an input too: it is a code
@@ -797,3 +844,7 @@ free of LLVM.
     instance per closure, captured values as hidden arguments.~~
 11. ~~Coroutines for freestanding code, as a library on top of function values
     and `asm`.~~
+12. ~~A native profile: LLVM-compiled programs for an OS, linked with libc,
+    calling C through `extern fn`.~~ Passing structs to C by value (per-target
+    C ABI lowering); exporting jihoo functions under C names; a `print` for
+    native code.

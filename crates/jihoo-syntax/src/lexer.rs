@@ -32,6 +32,7 @@ pub enum Tok {
     Quote,
     Import,
     Pub,
+    Extern,
 
     LParen,
     RParen,
@@ -40,6 +41,8 @@ pub enum Tok {
     LBracket,
     RBracket,
     Dot,
+    /// `...`: the variable arguments of a C function.
+    Ellipsis,
     Comma,
     Colon,
     Semi,
@@ -186,6 +189,11 @@ impl<'a> Lexer<'a> {
             b'}' => Tok::RBrace,
             b'[' => Tok::LBracket,
             b']' => Tok::RBracket,
+            b'.' if self.peek() == b'.' && self.peek2() == b'.' => {
+                self.bump();
+                self.bump();
+                Tok::Ellipsis
+            }
             b'.' => Tok::Dot,
             b',' => Tok::Comma,
             b':' => Tok::Colon,
@@ -317,6 +325,7 @@ impl<'a> Lexer<'a> {
                     "quote" => Tok::Quote,
                     "import" => Tok::Import,
                     "pub" => Tok::Pub,
+                    "extern" => Tok::Extern,
                     _ => Tok::Ident(word.to_string()),
                 }
             }

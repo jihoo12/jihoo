@@ -47,6 +47,16 @@ impl Display for Module {
             }
             writeln!(f)?;
         }
+        if !self.externs.is_empty() {
+            writeln!(f)?;
+        }
+        for e in &self.externs {
+            let mut params: Vec<String> = e.params.iter().map(Type::jir).collect();
+            if e.variadic {
+                params.push("...".into());
+            }
+            writeln!(f, "extern @{}({}) -> {}", e.name, params.join(", "), e.ret.jir())?;
+        }
         for func in &self.funcs {
             writeln!(f)?;
             write!(f, "{func}")?;

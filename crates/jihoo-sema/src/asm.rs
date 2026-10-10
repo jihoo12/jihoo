@@ -1,4 +1,4 @@
-//! Inline assembly (freestanding only).
+//! Inline assembly (native and freestanding only).
 //!
 //! `asm("bswap {out}", out(reg) u64, in(reg) x)` becomes one JIR `asm`
 //! instruction with an LLVM template and constraint string:
@@ -13,7 +13,7 @@
 //!
 //! On x86_64 the template uses Intel syntax.
 
-use jihoo_ir::{Inst, Profile, Reg, Type};
+use jihoo_ir::{Inst, Reg, Type};
 use jihoo_syntax::ast::{AsmExpr, AsmReg};
 use jihoo_syntax::{Error, Pos};
 
@@ -72,8 +72,8 @@ fn translate(pos: Pos, template: &str, inputs: usize, has_out: bool) -> Result<S
 
 impl FnCx<'_> {
     pub(crate) fn inline_asm(&mut self, pos: Pos, a: &AsmExpr) -> Result<Reg, Error> {
-        if self.profile() != Profile::Freestanding {
-            return Err(Error::new(pos, "inline asm is only available in freestanding mode"));
+        if !self.profile().is_compiled() {
+            return Err(Error::new(pos, "inline asm is only available in native and freestanding mode"));
         }
 
         let mut constraints = Vec::new();

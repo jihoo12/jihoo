@@ -1,0 +1,64 @@
+#![native]
+// Native program: compiled with LLVM like a freestanding one, but for the
+// operating system. It links with libc and calls C functions directly.
+//   jihoo build examples/native.jh -o out/native && ./out/native a b; echo $?
+//
+// `main` may take C's `argc` and `argv`; what it returns is the exit status.
+
+import libc
+
+// A C function can be declared anywhere, not only in `lib/libc.jh`.
+extern fn labs(n: i64) -> i64
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+// C calls this back through a function pointer.
+fn by_value(a: *u8, b: *u8) -> i32 {
+    let x = *(a as *i64)
+    let y = *(b as *i64)
+    if x < y {
+        return -1
+    }
+    if x > y {
+        return 1
+    }
+    return 0
+}
+
+fn main(argc: i32, argv: **u8) -> i64 {
+    libc.printf("hello from native jihoo, with %d argument(s)\n", argc - 1)
+    let i: i32 = 1
+    while i < argc {
+        libc.printf("  argv[%d] = %s\n", i, argv[i as i64])
+        i = i + 1
+    }
+
+    // Memory from malloc, sorted by qsort.
+    let n = 6
+    let xs = libc.malloc(n as u64 * size_of(i64) as u64) as *i64
+    let seed = 7
+    let j = 0
+    while j < n {
+        seed = (seed * 37 + 11) % 100
+        xs[j] = seed - 50
+        j = j + 1
+    }
+    libc.qsort(xs as *u8, n as u64, size_of(i64) as u64, by_value)
+    j = 0
+    while j < n {
+        libc.printf("%ld ", xs[j])
+        j = j + 1
+    }
+    libc.printf("\n")
+    let smallest = labs(xs[0])
+    libc.free(xs as *u8)
+
+    // Structs work as in freestanding code; C sees them through pointers.
+    let p = Point { x: 3, y: 4 }
+    let q = &p
+    libc.printf("p = (%ld, %ld), len(\"jihoo\") = %lu\n", q.x, q.y, libc.strlen("jihoo"))
+    return smallest
+}

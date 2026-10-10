@@ -12,14 +12,19 @@
 // handles large first-class aggregates very poorly (a 64 KiB array copy takes
 // minutes to compile). Instead they are copied with `llvm.memcpy`, accessed with
 // GEPs, passed to functions by pointer (the callee copies), and returned through
-// a hidden `sret` pointer. Weak `memcpy`/`memmove`/`memset` definitions are added
-// to the module, since there is no libc to provide them.
+// a hidden `sret` pointer. Freestanding modules get weak `memcpy`/`memmove`/
+// `memset` definitions, since there is no libc to provide them.
+//
+// Native modules link with libc: `extern` functions are declared with the C
+// calling convention, the program's functions are named `jihoo.<name>` so they
+// cannot clash with C symbols, and C's `main` calls `jihoo.main`.
 //
 // Array element access is bounds-checked and traps (`llvm.trap`) when out of
 // range; raw pointer arithmetic is not checked.
 
 #include "codegen.h"
 
+#include <algorithm>
 #include <unordered_map>
 
 #include <llvm/IR/Constants.h>
@@ -219,10 +224,15 @@ InlineAsm *syscall_asm(LLVMContext &ctx, const Triple &triple, size_t nargs) {
 
 class FnGen {
  public:
+  // `fns` holds every function and extern function by JIR name; `externs` says
+  // which are extern. With `exit_on_return`, returning exits the process (for
+  // a freestanding `_start`).
   FnGen(const jir::Function &f, Function *llfn, Module &mod, const Types &types,
-        const std::unordered_map<std::string, Function *> &fns, const Triple &triple)
-      : f_(f), fn_(llfn), mod_(mod), types_(types), fns_(fns), triple_(triple),
-        ctx_(mod.getContext()), b_(ctx_), i64_(Type::getInt64Ty(ctx_)) {}
+        const std::unordered_map<std::string, Function *> &fns,
+        const std::unordered_map<std::string, const jir::ExternFn *> &externs, const Triple &triple,
+        bool exit_on_return)
+      : f_(f), fn_(llfn), mod_(mod), types_(types), fns_(fns), externs_(externs), triple_(triple),
+        exit_on_return_(exit_on_return), ctx_(mod.getContext()), b_(ctx_), i64_(Type::getInt64Ty(ctx_)) {}
 
   void run() {
     auto *entry = BasicBlock::Create(ctx_, "entry", fn_);
@@ -256,7 +266,9 @@ class FnGen {
   Module &mod_;
   const Types &types_;
   const std::unordered_map<std::string, Function *> &fns_;
+  const std::unordered_map<std::string, const jir::ExternFn *> &externs_;
   const Triple &triple_;
+  bool exit_on_return_;
   LLVMContext &ctx_;
   IRBuilder<> b_;
   Type *i64_;
@@ -284,6 +296,32 @@ class FnGen {
     }
     Value *result = b_.CreateCall(ty, callee, args);
     if (!sret) store(inst.dst, result);
+  }
+
+  // Calls C function `e` (declared as `fn`) with the operands of `inst`.
+  // Arguments past the fixed parameters get C's default promotions: bools and
+  // integers narrower than `int` widen to 32 bits.
+  void call_extern(const jir::ExternFn &e, Function *fn, const jir::Inst &inst) {
+    size_t n = inst.args.size();
+    if (n < e.params.size() || (!e.variadic && n != e.params.size()))
+      fail(f_.name, "wrong number of arguments to @" + e.name);
+    std::vector<Value *> args;
+    for (size_t i = 0; i < n; i++) {
+      const jir::Type &t = type(inst.args[i]);
+      Value *v = load(inst.args[i]);
+      if (i >= e.params.size()) {
+        if (t.kind == jir::Type::Bool) v = b_.CreateZExt(v, b_.getInt32Ty());
+        else if (t.kind == jir::Type::Int && t.bits < 32) v = b_.CreateIntCast(v, b_.getInt32Ty(), t.is_signed);
+        else if (t.kind != jir::Type::Int && t.kind != jir::Type::Ptr && t.kind != jir::Type::Fn)
+          fail(f_.name, t.str() + " cannot be passed to C");
+      } else if (t != e.params[i]) {
+        fail(f_.name, "argument " + std::to_string(i + 1) + " to @" + e.name + " has the wrong type");
+      }
+      args.push_back(v);
+    }
+    CallInst *c = b_.CreateCall(fn->getFunctionType(), fn, args);
+    c->setAttributes(fn->getAttributes());  // the sign/zero extensions the C ABI wants
+    store(inst.dst, e.ret.kind == jir::Type::Unit ? unit() : c);
   }
 
   void memcopy(Value *dst, Value *src, const jir::Type &t) {
@@ -464,7 +502,7 @@ class FnGen {
       }
       case Op::Unit: store(inst.dst, unit()); return;
       case Op::Str:
-        // Freestanding strings are addresses of NUL-terminated constant bytes.
+        // Compiled strings are addresses of NUL-terminated constant bytes.
         store(inst.dst, b_.CreateGlobalString(inst.text, ".str", 0, &mod_));
         return;
       case Op::Copy: copy_reg(inst.dst, arg_reg(0)); return;
@@ -517,7 +555,10 @@ class FnGen {
       case Op::Call: {
         auto it = fns_.find(inst.text);
         if (it == fns_.end()) fail(f_.name, "call to unknown function @" + inst.text);
-        call(it->second->getFunctionType(), it->second, inst, 0, "@" + inst.text);
+        if (auto e = externs_.find(inst.text); e != externs_.end())
+          call_extern(*e->second, it->second, inst);
+        else
+          call(it->second->getFunctionType(), it->second, inst, 0, "@" + inst.text);
         return;
       }
       case Op::FuncRef: {
@@ -680,7 +721,7 @@ class FnGen {
         store(inst.dst, has_out ? result : unit());
         return;
       }
-      case Op::Print: fail(f_.name, "`print` is not available in freestanding mode");
+      case Op::Print: fail(f_.name, "`print` needs the VM and cannot be compiled natively");
     }
   }
 
@@ -694,7 +735,7 @@ class FnGen {
       case jir::TermKind::Unreachable: b_.CreateUnreachable(); return;
       case jir::TermKind::Ret:
         if (type(t.reg) != f_.ret) fail(f_.name, "returned value has the wrong type");
-        if (f_.name == "_start") {
+        if (exit_on_return_) {
           // There is nothing to return to: returning from `_start` means exit(value).
           Value *code = f_.ret.kind == jir::Type::Int ? load(t.reg) : b_.getInt64(0);
           int64_t exit_nr = triple_.getArch() == Triple::aarch64 ? 93 : 60;
@@ -764,28 +805,86 @@ void define_mem_function(Module &m, const std::string &kind) {
   b.CreateRet(dst);
 }
 
+// Declares C function `e`, with the extensions the C ABI wants for narrow
+// integers and bools.
+Function *declare_extern(Module &m, const Types &types, const jir::ExternFn &e) {
+  LLVMContext &ctx = m.getContext();
+  auto scalar = [&](const jir::Type &t) {
+    if (t.kind != jir::Type::Bool && t.kind != jir::Type::Int && t.kind != jir::Type::Ptr && t.kind != jir::Type::Fn)
+      throw CodegenError("extern @" + e.name + ": " + t.str() + " cannot be passed to or from C");
+    return types.lower(t);
+  };
+  std::vector<Type *> params;
+  for (const auto &t : e.params) params.push_back(scalar(t));
+  Type *ret = e.ret.kind == jir::Type::Unit ? Type::getVoidTy(ctx) : scalar(e.ret);
+  auto *fn = Function::Create(FunctionType::get(ret, params, e.variadic), GlobalValue::ExternalLinkage, e.name, m);
+  if (fn->getName() != e.name) throw CodegenError("extern @" + e.name + " clashes with another symbol");
+  auto ext = [](const jir::Type &t) {
+    if (t.kind == jir::Type::Bool) return Attribute::ZExt;
+    if (t.kind == jir::Type::Int && t.bits < 32) return t.is_signed ? Attribute::SExt : Attribute::ZExt;
+    return Attribute::None;
+  };
+  for (unsigned i = 0; i < e.params.size(); i++)
+    if (ext(e.params[i]) != Attribute::None) fn->addParamAttr(i, ext(e.params[i]));
+  if (ext(e.ret) != Attribute::None) fn->addRetAttr(ext(e.ret));
+  return fn;
+}
+
+// Defines C's `int main(int argc, char **argv)`, which calls the program's
+// `main` (with argc and argv if it takes them) and returns its result.
+void define_c_main(Module &m, Function *jihoo_main, const jir::Function &f) {
+  LLVMContext &ctx = m.getContext();
+  Type *i32 = Type::getInt32Ty(ctx);
+  auto *ty = FunctionType::get(i32, {i32, PointerType::get(ctx, 0)}, false);
+  auto *fn = Function::Create(ty, GlobalValue::ExternalLinkage, "main", m);
+  IRBuilder<> b(BasicBlock::Create(ctx, "entry", fn));
+  std::vector<Value *> args;
+  if (f.params.size() == 2) args = {fn->getArg(0), fn->getArg(1)};
+  Value *result = b.CreateCall(jihoo_main, args);
+  b.CreateRet(f.ret.kind == jir::Type::Int ? b.CreateTrunc(result, i32) : b.getInt32(0));
+}
+
 }  // namespace
 
 std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, const Triple &triple,
                                       const DataLayout &dl) {
-  if (m.profile != jir::Profile::Freestanding)
-    throw CodegenError("only freestanding modules can be compiled natively (for now)");
+  if (m.profile == jir::Profile::Hosted)
+    throw CodegenError("hosted modules run on the VM and cannot be compiled natively");
+  bool native = m.profile == jir::Profile::Native;
+  if (!native && !m.externs.empty()) throw CodegenError("extern functions need a native module");
 
   auto mod = std::make_unique<Module>("jihoo", ctx);
   mod->setDataLayout(dl);
+  if (native) {
+    // Linked by the system C compiler, which usually makes a position
+    // independent executable.
+    mod->setPICLevel(PICLevel::BigPIC);
+    mod->setPIELevel(PIELevel::Large);
+  }
   Types types(ctx, m, dl);
 
   // Declare everything first so calls can refer to any function.
   std::unordered_map<std::string, Function *> fns;
+  std::unordered_map<std::string, const jir::ExternFn *> externs;
+  for (const auto &e : m.externs) {
+    if (fns.count(e.name)) throw CodegenError("duplicate extern @" + e.name);
+    fns[e.name] = declare_extern(*mod, types, e);
+    externs[e.name] = &e;
+  }
+  const std::string entry_name = native ? "main" : "_start";
   for (const auto &f : m.funcs) {
     if (fns.count(f.name)) throw CodegenError("duplicate function @" + f.name);
-    bool is_entry = f.name == "_start";
+    bool is_start = !native && f.name == "_start";
+    // Natively, the program's own functions get a prefix so they cannot clash
+    // with C symbols (C's `main` is defined below and calls `jihoo.main`).
     auto *fn = Function::Create(types.signature(f),
-                                is_entry ? GlobalValue::ExternalLinkage : GlobalValue::InternalLinkage,
-                                f.name, mod.get());
-    // No libc to fall back on: never turn loops into memcpy/memset calls.
-    fn->addFnAttr("no-builtins");
-    if (is_entry) {
+                                is_start ? GlobalValue::ExternalLinkage : GlobalValue::InternalLinkage,
+                                native ? "jihoo." + f.name : f.name, mod.get());
+    if (!native) {
+      // No libc to fall back on: never turn loops into memcpy/memset calls.
+      fn->addFnAttr("no-builtins");
+    }
+    if (is_start) {
       fn->addFnAttr(Attribute::NoReturn);
       // The kernel enters `_start` with a 16-byte aligned stack, not the
       // "just called" alignment the ABI promises to normal functions.
@@ -793,12 +892,17 @@ std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, co
     }
     fns[f.name] = fn;
   }
-  auto entry = fns.find("_start");
-  if (entry == fns.end()) throw CodegenError("freestanding module needs @_start");
-  if (entry->second->arg_size() != 0) throw CodegenError("@_start must take no parameters");
+  auto entry = std::find_if(m.funcs.begin(), m.funcs.end(), [&](const jir::Function &f) { return f.name == entry_name; });
+  if (entry == m.funcs.end()) throw CodegenError(std::string(native ? "native" : "freestanding") + " module needs @" + entry_name);
+  if (!entry->params.empty() && !native) throw CodegenError("@_start must take no parameters");
 
-  for (const auto &f : m.funcs) FnGen(f, fns[f.name], *mod, types, fns, triple).run();
-  for (const char *kind : {"memcpy", "memmove", "memset"}) define_mem_function(*mod, kind);
+  for (const auto &f : m.funcs)
+    FnGen(f, fns[f.name], *mod, types, fns, externs, triple, !native && f.name == "_start").run();
+  if (native) {
+    define_c_main(*mod, fns["main"], *entry);
+  } else {
+    for (const char *kind : {"memcpy", "memmove", "memset"}) define_mem_function(*mod, kind);
+  }
 
   std::string err;
   raw_string_ostream os(err);

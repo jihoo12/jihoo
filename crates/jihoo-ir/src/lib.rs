@@ -15,12 +15,17 @@ mod verify;
 pub use types::{IntTy, Type};
 pub use verify::verify;
 
-/// Language profile, selected with `#![freestanding]` at the top of a source file.
+/// Language profile, selected with `#![native]` or `#![freestanding]` at the
+/// top of a source file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
     /// Default: runs on the VM, garbage collected, std available.
     Hosted,
-    /// No GC, core only, `syscall`/asm allowed. Compiled natively via LLVM.
+    /// Compiled natively via LLVM to a program for the operating system: links
+    /// with libc, calls C functions (`extern fn`), starts at a C `main`. No GC.
+    Native,
+    /// Compiled natively via LLVM with no OS libraries at all: core only,
+    /// `syscall`/asm, starts at `_start`. No GC.
     Freestanding,
 }
 
@@ -28,6 +33,7 @@ impl Profile {
     pub fn as_str(self) -> &'static str {
         match self {
             Profile::Hosted => "hosted",
+            Profile::Native => "native",
             Profile::Freestanding => "freestanding",
         }
     }
@@ -35,9 +41,15 @@ impl Profile {
     /// Name of the entry function.
     pub fn entry(self) -> &'static str {
         match self {
-            Profile::Hosted => "main",
+            Profile::Hosted | Profile::Native => "main",
             Profile::Freestanding => "_start",
         }
+    }
+
+    /// Compiled by LLVM rather than run on the VM: no GC, but raw pointers,
+    /// `syscall` and inline asm.
+    pub fn is_compiled(self) -> bool {
+        self != Profile::Hosted
     }
 }
 
@@ -52,12 +64,18 @@ pub struct Module {
     pub profile: Profile,
     pub structs: Vec<StructDef>,
     pub enums: Vec<EnumDef>,
+    /// C functions the program calls (native only), by symbol name.
+    pub externs: Vec<ExternFn>,
     pub funcs: Vec<Function>,
 }
 
 impl Module {
     pub fn func(&self, name: &str) -> Option<&Function> {
         self.funcs.iter().find(|f| f.name == name)
+    }
+
+    pub fn extern_fn(&self, name: &str) -> Option<&ExternFn> {
+        self.externs.iter().find(|f| f.name == name)
     }
 
     pub fn struct_def(&self, name: &str) -> Option<&StructDef> {
@@ -76,6 +94,20 @@ impl Module {
             _ => None,
         }
     }
+}
+
+/// A function defined outside the program and called with the C calling
+/// convention. `call` and `funcref` name it like any other function. Only
+/// C-compatible types appear in it (see [`types::c_compatible`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternFn {
+    /// The C symbol.
+    pub name: String,
+    pub params: Vec<Type>,
+    pub ret: Type,
+    /// Takes more arguments after `params`, like `printf`. Those are passed
+    /// with C's default promotions.
+    pub variadic: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -184,7 +216,8 @@ pub enum Inst {
     Const { dst: Reg, value: i64 },
     /// The unit value.
     Unit { dst: Reg },
-    /// String literal: `str` when hosted, `ptr` to constant bytes when freestanding.
+    /// String literal: `str` when hosted, `ptr` to constant
+    /// NUL-terminated bytes when compiled.
     Str { dst: Reg, value: String },
     Copy { dst: Reg, src: Reg },
     Unary { dst: Reg, op: UnOp, src: Reg },
@@ -206,13 +239,13 @@ pub enum Inst {
     Field { dst: Reg, src: Reg, index: u32 },
     /// A copy of struct `src` with field `index` replaced by `value`.
     SetField { dst: Reg, src: Reg, index: u32, value: Reg },
-    /// Freestanding only: `*ptr`.
+    /// Native and freestanding only: `*ptr`.
     Load { dst: Reg, ptr: Reg },
-    /// Freestanding only: `*ptr = value`.
+    /// Native and freestanding only: `*ptr = value`.
     Store { ptr: Reg, value: Reg },
-    /// Freestanding only: the address of register `src`.
+    /// Native and freestanding only: the address of register `src`.
     Addr { dst: Reg, src: Reg },
-    /// Freestanding only: the address of field `index` of the struct `ptr` points to.
+    /// Native and freestanding only: the address of field `index` of the struct `ptr` points to.
     FieldPtr { dst: Reg, ptr: Reg, index: u32 },
     /// Builds variant `index` of the enum type of `dst` from its payload values.
     Variant { dst: Reg, index: u32, fields: Vec<Reg> },
@@ -259,10 +292,10 @@ pub enum Inst {
     Elem { dst: Reg, src: Reg, index: Reg },
     /// A copy of array `src` with element `index` replaced by `value`. Bounds-checked.
     SetElem { dst: Reg, src: Reg, index: Reg, value: Reg },
-    /// Freestanding only: the address of element `index` of the array `ptr` points
+    /// Native and freestanding only: the address of element `index` of the array `ptr` points
     /// to. Bounds-checked.
     ElemPtr { dst: Reg, ptr: Reg, index: Reg },
-    /// Freestanding only. First argument is the syscall number, then up to 6 more.
+    /// Native and freestanding only. First argument is the syscall number, then up to 6 more.
     Syscall { dst: Reg, args: Vec<Reg> },
     /// Hosted-only builtin.
     Print { src: Reg },
@@ -271,7 +304,7 @@ pub enum Inst {
     /// Compile time only (macros): `prefix` plus a number never handed out before
     /// in this compilation, for names that cannot clash.
     Unique { dst: Reg, prefix: Reg },
-    /// Freestanding only: inline assembly. `template` uses LLVM operand syntax
+    /// Native and freestanding only: inline assembly. `template` uses LLVM operand syntax
     /// (`$0` is the output if there is one, then the inputs) and `constraints` is an
     /// LLVM constraint string with one input entry per register in `args`. `dst`
     /// is the output, or `unit`.

@@ -89,6 +89,11 @@ pub struct FnDecl {
     pub is_pub: bool,
     /// `macro name(...) -> expr { ... }`: run at compile time by `name!(...)`.
     pub is_macro: bool,
+    /// `extern fn name(...)`: a C function, defined elsewhere (native mode).
+    /// Its `body` is empty.
+    pub is_extern: bool,
+    /// An extern function ending in `...`, like `printf`.
+    pub variadic: bool,
     pub name: String,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,

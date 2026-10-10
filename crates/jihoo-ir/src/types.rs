@@ -84,7 +84,7 @@ pub enum Type {
     Int(IntTy),
     /// GC-managed string. Hosted only.
     Str,
-    /// Raw pointer to a `T`. Freestanding only.
+    /// Raw pointer to a `T`. Native and freestanding only.
     Ptr(Box<Type>),
     /// A struct, by name. Structs are values: copying one copies its fields.
     Struct(String),
@@ -143,12 +143,12 @@ impl Type {
         }
     }
 
-    /// GC types need the hosted runtime; raw pointers are only for freestanding code.
+    /// GC types need the hosted runtime; raw pointers are only for compiled code.
     /// Struct fields are checked where the struct is defined.
     pub fn available_in(&self, profile: Profile) -> bool {
         match self {
             Type::Str => profile == Profile::Hosted,
-            Type::Ptr(inner) => profile == Profile::Freestanding && inner.available_in(profile),
+            Type::Ptr(inner) => profile.is_compiled() && inner.available_in(profile),
             Type::Array(elem, _) => elem.available_in(profile),
             Type::Fn(params, ret) => params.iter().chain([&**ret]).all(|t| t.available_in(profile)),
             Type::Ref(inner) | Type::Chan(inner) | Type::Cell(inner) => {
@@ -236,11 +236,30 @@ pub fn struct_name_jir(name: &str) -> String {
     out
 }
 
+/// Whether values of type `t` can be passed to or from C, as a parameter or
+/// (with `is_ret`) the result of an `extern fn`: integers, bools, pointers, and
+/// functions taking and returning those. Structs, enums and arrays are passed
+/// differently by every C ABI, so they cross by pointer.
+pub fn c_compatible(t: &Type, is_ret: bool) -> bool {
+    match t {
+        Type::Unit => is_ret,
+        Type::Bool | Type::Int(_) | Type::Ptr(_) => true,
+        Type::Fn(params, ret) => params.iter().all(|p| c_compatible(p, false)) && c_compatible(ret, true),
+        _ => false,
+    }
+}
+
+/// Whether `params` are those of C's `main(int argc, char **argv)`, which a
+/// native `main` may take: `(i32, **u8)`.
+pub fn is_main_args(params: &[Type]) -> bool {
+    params == [Type::Int(IntTy::I32), Type::ptr(Type::ptr(Type::U8))]
+}
+
 /// Type of a string literal in the given profile.
 pub fn str_literal(profile: Profile) -> Type {
     match profile {
         Profile::Hosted => Type::Str,
-        Profile::Freestanding => Type::ptr(Type::U8),
+        Profile::Native | Profile::Freestanding => Type::ptr(Type::U8),
     }
 }
 
