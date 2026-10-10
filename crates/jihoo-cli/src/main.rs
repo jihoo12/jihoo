@@ -186,6 +186,13 @@ fn build(opts: &Opts) -> Result<(), String> {
     }
 
     let out = opts.output.clone().unwrap_or_else(|| opts.input.with_extension(""));
+    // Without an extension, the default output is the source file itself.
+    if same_file(&out, &opts.input) {
+        return Err(format!(
+            "{}: the program would overwrite its own source; name the output with `-o`",
+            opts.input.display()
+        ));
+    }
     // Not `out.o`: that may be one of the link inputs.
     let jir = out.with_extension("jihoo.jir");
     let obj = out.with_extension("jihoo.o");
@@ -211,6 +218,11 @@ fn build(opts: &Opts) -> Result<(), String> {
     let _ = std::fs::remove_file(&obj);
     let _ = std::fs::remove_file(&jir);
     result
+}
+
+/// Whether `a` and `b` name the same file. `b` exists; `a` may not.
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
 fn run_tool(cmd: &mut Command) -> Result<(), String> {

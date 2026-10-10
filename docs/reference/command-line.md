@@ -23,7 +23,9 @@ Native and freestanding programs are refused: they need `jihoo build`.
 ### `jihoo build <file.jh> [-o out] [link inputs]`
 
 Compiles a native or freestanding program to an executable, `out`, which
-defaults to the input's name without `.jh`. The steps are:
+defaults to the input's name without `.jh`. An output that would replace the
+input itself (a source without an extension, or `-o` naming it) is an error.
+The steps are:
 
 1. check the program and write its JIR (`out.jihoo.jir`);
 2. compile the JIR to an object file with `jihoo-llc` (`out.jihoo.o`);

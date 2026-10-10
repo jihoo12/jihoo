@@ -102,6 +102,24 @@ fn division_by_zero_fails_on_both_backends() {
     fails_on_both_backends("rem0", body, "division by zero");
 }
 
+/// The default output of a source without an extension is the source itself,
+/// which `build` must refuse rather than overwrite; so must `-o` naming it.
+#[test]
+fn build_never_overwrites_its_source() {
+    let work = std::env::temp_dir().join(format!("jihoo-overwrite-{}", std::process::id()));
+    std::fs::create_dir_all(&work).unwrap();
+    let src = work.join("prog");
+    let text = "#![freestanding]\nfn _start() -> i64 { return 0 }\n";
+    std::fs::write(&src, text).unwrap();
+    for args in [vec![], vec!["-o".into(), work.join("./prog").into_os_string()]] {
+        let out = Command::new(JIHOO).arg("build").arg(&src).args(&args).output().unwrap();
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("overwrite its own source"));
+        assert_eq!(std::fs::read_to_string(&src).unwrap(), text);
+    }
+    std::fs::remove_dir_all(&work).unwrap();
+}
+
 /// Inline asm only exists natively, so it is checked against known results
 /// instead of the VM.
 #[test]
