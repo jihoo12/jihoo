@@ -195,7 +195,8 @@ fn build(opts: &Opts) -> Result<(), String> {
     let result = run_tool(Command::new(&llc).arg(&jir).arg("-o").arg(&obj)).and_then(|_| {
         if m.profile == Profile::Native {
             let cc = std::env::var("JIHOO_CC").unwrap_or_else(|_| "cc".into());
-            run_tool(Command::new(&cc).arg("-o").arg(&out).arg(&obj).args(&opts.link))
+            // libm is part of the C standard library, and float `%` calls its `fmod`.
+            run_tool(Command::new(&cc).arg("-o").arg(&out).arg(&obj).args(&opts.link).arg("-lm"))
         } else {
             let ld = std::env::var("JIHOO_LD").unwrap_or_else(|_| "ld.lld".into());
             run_tool(

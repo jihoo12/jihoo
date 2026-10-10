@@ -4,17 +4,19 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <cstdlib>
 #include <sstream>
 #include <unordered_map>
 
 namespace jir {
 namespace {
 
-enum class TokKind { Word, Reg, Global, StructName, Int, Str, Punct };
+enum class TokKind { Word, Reg, Global, StructName, Int, Float, Str, Punct };
 
 struct Tok {
   TokKind kind;
-  std::string text;  // word / global name / string bytes / punct char
+  std::string text;  // word / global name / string bytes / punct char / float digits
   int64_t num = 0;   // Reg index or Int value
 };
 
@@ -106,10 +108,28 @@ std::vector<Tok> tokenize(int line, const std::string &src) {
     } else if (c == '-' && i + 1 < src.size() && src[i + 1] == '>') {
       out.push_back({TokKind::Punct, "->"});
       i += 2;
+    } else if (src.compare(i, 4, "-inf") == 0) {
+      out.push_back({TokKind::Word, "-inf"});
+      i += 4;
     } else if (std::isdigit((unsigned char)c) || c == '-') {
       size_t j = i++;
       while (i < src.size() && std::isdigit((unsigned char)src[i])) i++;
-      out.push_back({TokKind::Int, "", number(line, src.substr(j, i - j))});
+      // A float constant: digits with a fraction and/or an exponent.
+      bool is_float = false;
+      if (i < src.size() && src[i] == '.') {
+        is_float = true;
+        for (i++; i < src.size() && std::isdigit((unsigned char)src[i]); i++) {}
+      }
+      if (i < src.size() && (src[i] == 'e' || src[i] == 'E')) {
+        is_float = true;
+        i++;
+        if (i < src.size() && (src[i] == '+' || src[i] == '-')) i++;
+        for (; i < src.size() && std::isdigit((unsigned char)src[i]); i++) {}
+      }
+      if (is_float)
+        out.push_back({TokKind::Float, src.substr(j, i - j)});
+      else
+        out.push_back({TokKind::Int, "", number(line, src.substr(j, i - j))});
     } else if (ident_char(c)) {
       size_t j = i;
       while (i < src.size() && ident_char(src[i])) i++;
@@ -207,6 +227,8 @@ struct Line {
         s.kind = Type::Str;
         return s;
       }
+      if (w == "f32") return Type::floating(32);
+      if (w == "f64") return Type::floating(64);
       if (w.size() >= 2 && (w[0] == 'i' || w[0] == 'u')) {
         std::string digits = w.substr(1);
         if (digits == "8" || digits == "16" || digits == "32" || digits == "64")
@@ -258,6 +280,15 @@ Inst parse_assign(Line &l) {
   if (w == "const") {
     inst.op = Op::Const;
     inst.imm = l.integer();
+  } else if (w == "fconst") {
+    inst.op = Op::FConst;
+    const Tok &t = l.next("a float");
+    if (t.kind == TokKind::Float) inst.fimm = std::strtod(t.text.c_str(), nullptr);
+    else if (t.kind == TokKind::Int) inst.fimm = double(t.num);
+    else if (t.kind == TokKind::Word && t.text == "inf") inst.fimm = HUGE_VAL;
+    else if (t.kind == TokKind::Word && t.text == "-inf") inst.fimm = -HUGE_VAL;
+    else if (t.kind == TokKind::Word && t.text == "nan") inst.fimm = std::nan("");
+    else fail(l.no, "expected a float");
   } else if (w == "unit") {
     inst.op = Op::Unit;
   } else if (w == "str") {

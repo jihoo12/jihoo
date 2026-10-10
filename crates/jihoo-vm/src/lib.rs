@@ -17,7 +17,7 @@ use std::fmt;
 use std::io::Write;
 
 use gc::{GcRef, Heap, Waiter};
-use jihoo_ir::{BinOp, Function, Inst, Module, PathStep, Profile, Reg, SelectCase, Terminator, Type, UnOp};
+use jihoo_ir::{BinOp, FloatTy, Function, Inst, IntTy, Module, PathStep, Profile, Reg, SelectCase, Terminator, Type, UnOp};
 
 const MAX_CALL_DEPTH: usize = 10_000;
 /// Instructions a task runs before the next ready task gets its turn, at the
@@ -29,6 +29,9 @@ pub enum Value {
     Unit,
     /// Every integer type, in canonical form (see `IntTy::wrap`).
     Int(i64),
+    /// Every float type, as the bits of an `f64` (so values stay `Eq`); an
+    /// `f32` is an `f64` exactly representable as `f32` (see `FloatTy::round`).
+    Float(u64),
     Bool(bool),
     Str(GcRef),
     /// A struct or an array.
@@ -39,11 +42,15 @@ pub enum Value {
 }
 
 impl Value {
+    pub fn float(v: f64) -> Value {
+        Value::Float(v.to_bits())
+    }
+
     /// The heap object this value refers to, if any.
     pub fn gc_ref(&self) -> Option<GcRef> {
         match self {
             Value::Str(r) | Value::Agg(r) | Value::Chan(r) => Some(*r),
-            Value::Unit | Value::Int(_) | Value::Bool(_) | Value::Func(_) => None,
+            Value::Unit | Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Func(_) => None,
         }
     }
 }
@@ -431,6 +438,7 @@ impl<'m> Vm<'m> {
                 };
                 self.set(*dst, v);
             }
+            Inst::FConst { dst, value } => self.set(*dst, Value::float(*value)),
             Inst::Unit { dst } => self.set(*dst, Value::Unit),
             Inst::Str { dst, value } => {
                 let r = self.alloc_str(value);
@@ -446,6 +454,7 @@ impl<'m> Vm<'m> {
             Inst::Unary { dst, op, src } => {
                 let v = match (op, f.reg_type(*dst)) {
                     (UnOp::Neg, Type::Int(t)) => Value::Int(t.wrap(self.int(*src)?.wrapping_neg())),
+                    (UnOp::Neg, Type::Float(_)) => Value::float(-self.float(*src)?),
                     (UnOp::Not, Type::Int(t)) => Value::Int(t.wrap(!self.int(*src)?)),
                     (UnOp::Not, _) => Value::Bool(!self.bool(*src)?),
                     (UnOp::Neg, t) => return Err(self.error(&format!("cannot negate {t}"))),
@@ -460,6 +469,9 @@ impl<'m> Vm<'m> {
                 let v = match (f.reg_type(*dst), self.get(*src)) {
                     (Type::Int(t), Value::Int(n)) => Value::Int(t.wrap(n)),
                     (Type::Int(_), Value::Bool(b)) => Value::Int(b as i64),
+                    (&Type::Float(to), Value::Int(n)) => Value::float(int_to_float(f.reg_type(*src), n, to)),
+                    (&Type::Float(to), Value::Float(x)) => Value::float(to.round(f64::from_bits(x))),
+                    (&Type::Int(to), Value::Float(x)) => Value::Int(float_to_int(f64::from_bits(x), to)),
                     (_, v) => v, // a cast to the same type
                 };
                 self.set(*dst, v);
@@ -660,6 +672,7 @@ impl<'m> Vm<'m> {
                 let text = match (f.reg_type(*src), self.get(*src)) {
                     (Type::Int(jihoo_ir::IntTy::U64), Value::Int(n)) => (n as u64).to_string(),
                     (_, Value::Int(n)) => n.to_string(),
+                    (&Type::Float(t), Value::Float(x)) => float_text(t, f64::from_bits(x)),
                     (_, Value::Bool(b)) => b.to_string(),
                     (_, v) => return Err(self.error(&format!("`to_str` cannot take {}", type_name(v)))),
                 };
@@ -679,6 +692,10 @@ impl<'m> Vm<'m> {
                 let line = match self.get(*src) {
                     Value::Int(n) if f.reg_type(*src) == &Type::Int(jihoo_ir::IntTy::U64) => (n as u64).to_string(),
                     Value::Int(n) => n.to_string(),
+                    Value::Float(x) => match f.reg_type(*src) {
+                        &Type::Float(t) => float_text(t, f64::from_bits(x)),
+                        t => return Err(self.error(&format!("a float in a {t} register"))),
+                    },
                     Value::Bool(b) => b.to_string(),
                     Value::Str(r) => self.heap.str(r).to_string(),
                     v @ (Value::Unit | Value::Agg(_) | Value::Func(_) | Value::Chan(_)) => {
@@ -702,6 +719,15 @@ impl<'m> Vm<'m> {
                         // Parenthesized so that a negative number stays one operand.
                         (HoleKind::Expr, _, Value::Int(n)) if n < 0 => format!("({n})"),
                         (HoleKind::Expr, _, Value::Int(n)) => n.to_string(),
+                        (HoleKind::Expr, &Type::Float(t), Value::Float(x)) => {
+                            let x = f64::from_bits(x);
+                            if !x.is_finite() {
+                                return Err(self.error(&format!("{} has no literal to insert as code", float_text(t, x))));
+                            }
+                            // Parenthesized so that a negative number stays one operand.
+                            let text = float_text(t, x);
+                            if x.is_sign_negative() { format!("({text})") } else { text }
+                        }
                         (HoleKind::Expr, _, Value::Bool(b)) => b.to_string(),
                         (HoleKind::Ident, Type::Str | Type::Expr, Value::Str(r)) => {
                             let name = self.heap.str(r).trim().to_string();
@@ -731,6 +757,28 @@ impl<'m> Vm<'m> {
     /// `operand` is the type of `a` (and `b`): integer ops depend on width and signedness.
     fn binary(&mut self, op: BinOp, operand: &Type, a: Value, b: Value) -> Result<Value, VmError> {
         use Value::*;
+        if let (&Type::Float(t), Float(x), Float(y)) = (operand, a, b) {
+            let (x, y) = (f64::from_bits(x), f64::from_bits(y));
+            // Each result is rounded to `t`: for `f32`, the f64 result of one
+            // operation on two f32s, rounded once, is the correctly rounded f32.
+            let num = |v: f64| Value::float(t.round(v));
+            return Ok(match op {
+                BinOp::Add => num(x + y),
+                BinOp::Sub => num(x - y),
+                BinOp::Mul => num(x * y),
+                BinOp::Div => num(x / y),
+                BinOp::Rem => num(x % y),
+                BinOp::Eq => Bool(x == y),
+                BinOp::Ne => Bool(x != y),
+                BinOp::Lt => Bool(x < y),
+                BinOp::Le => Bool(x <= y),
+                BinOp::Gt => Bool(x > y),
+                BinOp::Ge => Bool(x >= y),
+                BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Shl | BinOp::Shr => {
+                    return Err(self.error(&format!("`{}` is not supported for floats", op.mnemonic())))
+                }
+            });
+        }
         if let (Type::Int(t), Int(x), Int(y)) = (operand, a, b) {
             let (ux, uy) = (x as u64, y as u64);
             let signed = t.signed();
@@ -936,6 +984,13 @@ impl<'m> Vm<'m> {
         self.stack.last_mut().unwrap().regs[r.0 as usize] = v;
     }
 
+    fn float(&self, r: Reg) -> Result<f64, VmError> {
+        match self.get(r) {
+            Value::Float(x) => Ok(f64::from_bits(x)),
+            v => Err(self.error(&format!("expected a float, found {}", type_name(v)))),
+        }
+    }
+
     fn int(&self, r: Reg) -> Result<i64, VmError> {
         match self.get(r) {
             Value::Int(n) => Ok(n),
@@ -998,10 +1053,48 @@ fn roots<'a>(
     stacks.flatten().flat_map(|f| f.regs.iter()).chain(pinned).chain(extra)
 }
 
+/// Integer `n` (in canonical form for type `from`) as the nearest `to`, rounded
+/// once, as LLVM's `sitofp`/`uitofp` do.
+fn int_to_float(from: &Type, n: i64, to: FloatTy) -> f64 {
+    let unsigned = matches!(from, Type::Int(t) if !t.signed());
+    match (to, unsigned) {
+        (FloatTy::F32, false) => n as f32 as f64,
+        (FloatTy::F32, true) => n as u64 as f32 as f64,
+        (FloatTy::F64, false) => n as f64,
+        (FloatTy::F64, true) => n as u64 as f64,
+    }
+}
+
+/// `x` as integer type `to`: the fraction dropped, saturating at the limits,
+/// NaN as 0, like LLVM's `fptosi.sat`/`fptoui.sat` (and Rust's `as`).
+fn float_to_int(x: f64, to: IntTy) -> i64 {
+    match to {
+        IntTy::I8 => x as i8 as i64,
+        IntTy::I16 => x as i16 as i64,
+        IntTy::I32 => x as i32 as i64,
+        IntTy::I64 => x as i64,
+        IntTy::U8 => x as u8 as i64,
+        IntTy::U16 => x as u16 as i64,
+        IntTy::U32 => x as u32 as i64,
+        IntTy::U64 => x as u64 as i64,
+    }
+}
+
+/// How `print` and string conversion show a float: the shortest decimal that
+/// reads back as the same value of type `t`, always with a `.` or exponent
+/// (`1.0`, `0.1`, `1e100`), or `inf`, `-inf`, `NaN`.
+pub fn float_text(t: FloatTy, x: f64) -> String {
+    match t {
+        FloatTy::F32 => format!("{:?}", x as f32),
+        FloatTy::F64 => format!("{x:?}"),
+    }
+}
+
 fn type_name(v: Value) -> &'static str {
     match v {
         Value::Unit => "unit",
         Value::Int(_) => "i64",
+        Value::Float(_) => "float",
         Value::Bool(_) => "bool",
         Value::Str(_) => "str",
         Value::Agg(_) => "aggregate",

@@ -137,7 +137,7 @@ impl FnCx<'_> {
             let r = self.expr(h, None)?;
             let t = self.ty(r).clone();
             let (ok, want) = match hk {
-                HoleKind::Expr => (matches!(t, Type::Expr | Type::Int(_) | Type::Bool | Type::Str), "`expr`, an integer, a bool or a `str`"),
+                HoleKind::Expr => (matches!(t, Type::Expr | Type::Int(_) | Type::Float(_) | Type::Bool | Type::Str), "`expr`, a number, a bool or a `str`"),
                 HoleKind::Ident => (matches!(t, Type::Str | Type::Expr), "a `str` (a name)"),
                 HoleKind::Stmts => (matches!(t, Type::Stmts | Type::Expr), "`stmts` or `expr`"),
                 HoleKind::Items => (t == Type::Items, "`items`"),

@@ -58,22 +58,23 @@ fn main(argc: i32, argv: **u8) -> i64 {
 ```
 
 - `extern fn` declares a C function; calls use the C calling convention. Only
-  integers, `bool`, pointers and functions made of those cross into C, and
+  numbers, `bool`, pointers and functions made of those cross into C, and
   `unit` as C's `void`. Structs, enums and arrays go by pointer (`&p`), since
   each C ABI passes them differently.
 - C types map as `int` → `i32`, `long`/`ssize_t` → `i64`, `size_t` → `u64`,
-  `char` → `u8`, `T *` → `*T`, `void *` → `*u8`. String literals are already
-  NUL-terminated `*u8`s.
+  `float` → `f32`, `double` → `f64`, `char` → `u8`, `T *` → `*T`, `void *` →
+  `*u8`. String literals are already NUL-terminated `*u8`s.
 - Arguments past `...` get C's default promotions (narrow integers and bools
-  widen to 32 bits), so pass `i64` with `%ld`.
+  widen to 32 bits, `f32` to `f64`), so pass `i64` with `%ld`.
 - A jihoo function is a C function pointer: `libc.qsort(p, n, 8, compare)`.
-  Callbacks should take and return integers of at least 32 bits, pointers, or
-  nothing.
+  Callbacks should take and return floats, integers of at least 32 bits,
+  pointers, or nothing.
 - Several modules may declare the same C function if they agree on its
   signature. Only the C functions a program uses are part of it, so a library of
   declarations such as `lib/libc.jh` costs nothing.
 - C functions cannot run at compile time: `comptime` and macros run on the VM.
-- `jihoo build prog.jh util.c -lz` compiles and links C files and libraries in;
+- `jihoo build prog.jh util.c -lz` compiles and links C files and libraries in,
+  besides libc and libm (`sqrt`, `sin`, ... are declared in `lib/libc.jh`);
   `JIHOO_CC` picks the C compiler (default `cc`).
 
 ### Planned library layers
@@ -98,7 +99,7 @@ fn area(w: i64, h: i64) -> i64 {   // signatures are written out
 }
 ```
 
-- Types: `unit`, `bool`, `i8`…`i64`, `u8`…`u64`, structs, enums, arrays, function types
+- Types: `unit`, `bool`, `i8`…`i64`, `u8`…`u64`, `f32`, `f64`, structs, enums, arrays, function types
   `fn(A, B) -> R`, plus `str`, `ref T`, `cell T` and `chan T` (hosted only,
   garbage collected) and `*T` (native and freestanding, raw pointer). A string literal
   is a `str` when hosted and a `*u8` to constant NUL-terminated bytes when compiled.
@@ -110,6 +111,17 @@ fn area(w: i64, h: i64) -> i64 {   // signatures are written out
 - Integer literals (`1_000`, `0xff`, `0b1010`) take their type from context (`let c: u8 = 65`, `p[i] == 0`,
   arguments, fields), defaulting to `i64`, and must fit that type. Different
   integer types never mix implicitly; convert with `as`.
+- Floats are IEEE 754 `f32` and `f64`, the same bit for bit on the VM and
+  natively (no fast-math, no fused multiply-add). A float literal (`1.5`,
+  `2e10`, `1.5e-3`) is an `f64` unless an `f32` is expected; an integer literal
+  may stand where a float is expected (`x * 2`, `let y: f64 = 3`) if the value
+  is exact. `+ - * /` round to the nearest value; `/` by zero gives an infinity
+  or NaN, and `%` is C's `fmod` (the sign of the dividend). Comparisons follow
+  IEEE: NaN is unequal to everything, itself too, and `0.0 == -0.0`.
+- `as` converts between all numeric types: to a float, to the nearest value;
+  from a float to an integer, dropping the fraction and saturating at the
+  type's limits, with NaN becoming 0 (like Rust). Floats cannot be `match`ed
+  or used as bits.
 - A function without `-> T` returns `unit`.
 - `if`/`while` conditions and the operands of `&&`, `||`, `!` must be `bool`;
   there is no implicit integer-to-bool conversion.
@@ -848,3 +860,6 @@ free of LLVM.
     calling C through `extern fn`.~~ Passing structs to C by value (per-target
     C ABI lowering); exporting jihoo functions under C names; a `print` for
     native code.
+13. ~~Floats: `f32` and `f64`, identical on the VM and natively, and across
+    into C.~~ Exact math builtins for every profile (`sqrt`, `floor`, ...,
+    which IEEE defines exactly); reading a float's bits.

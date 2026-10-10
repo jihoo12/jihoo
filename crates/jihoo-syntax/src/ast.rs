@@ -262,6 +262,8 @@ pub struct Expr {
 #[derive(Debug, Clone)]
 pub enum ExprKind {
     Int(i64),
+    /// A float literal: `f64` unless its context wants `f32`.
+    Float(f64),
     Bool(bool),
     Str(String),
     Var(String),
@@ -420,7 +422,7 @@ pub fn set_pos(e: &mut Expr, pos: Pos) {
     e.pos = pos;
     let ty = |t: &mut TypeExpr| set_type_pos(t, pos);
     match &mut e.kind {
-        ExprKind::Int(_) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::Var(_) => {}
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::Var(_) => {}
         ExprKind::Unary(_, x)
         | ExprKind::Field(x, _)
         | ExprKind::Deref(x)

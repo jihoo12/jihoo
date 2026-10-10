@@ -77,11 +77,61 @@ impl IntTy {
     }
 }
 
+/// An IEEE 754 binary floating-point type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FloatTy {
+    F32,
+    F64,
+}
+
+impl FloatTy {
+    pub const ALL: [FloatTy; 2] = [FloatTy::F32, FloatTy::F64];
+
+    pub fn bits(self) -> u32 {
+        match self {
+            FloatTy::F32 => 32,
+            FloatTy::F64 => 64,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            FloatTy::F32 => "f32",
+            FloatTy::F64 => "f64",
+        }
+    }
+
+    /// Rounds `v` to the nearest value of this type. Values are carried as
+    /// `f64`s; an `f32` is an `f64` that is exactly representable as `f32`.
+    /// Rounding the exact `f64` result of `+ - * /` on two `f32`s gives the
+    /// correctly rounded `f32` result, so the VM can compute in `f64`.
+    pub fn round(self, v: f64) -> f64 {
+        match self {
+            FloatTy::F32 => v as f32 as f64,
+            FloatTy::F64 => v,
+        }
+    }
+}
+
+/// How JIR text spells a float constant: the shortest decimal that reads back
+/// as the same `f64` (so also exact for an `f32`), or `inf`, `-inf`, `nan`.
+pub fn float_jir(v: f64) -> String {
+    if v.is_nan() {
+        "nan".into()
+    } else if v.is_infinite() {
+        if v > 0.0 { "inf" } else { "-inf" }.into()
+    } else {
+        // `{:?}` always has a `.` or an exponent, so it never reads as an integer.
+        format!("{v:?}")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Unit,
     Bool,
     Int(IntTy),
+    Float(FloatTy),
     /// GC-managed string. Hosted only.
     Str,
     /// Raw pointer to a `T`. Native and freestanding only.
@@ -111,6 +161,7 @@ pub enum Type {
 impl Type {
     pub const I64: Type = Type::Int(IntTy::I64);
     pub const U8: Type = Type::Int(IntTy::U8);
+    pub const F64: Type = Type::Float(FloatTy::F64);
 
     pub fn ptr(to: Type) -> Type {
         Type::Ptr(Box::new(to))
@@ -121,7 +172,10 @@ impl Type {
             "unit" => Type::Unit,
             "bool" => Type::Bool,
             "str" => Type::Str,
-            _ => Type::Int(*IntTy::ALL.iter().find(|t| t.name() == name)?),
+            _ => match IntTy::ALL.iter().find(|t| t.name() == name) {
+                Some(t) => Type::Int(*t),
+                None => Type::Float(*FloatTy::ALL.iter().find(|t| t.name() == name)?),
+            },
         })
     }
 
@@ -155,7 +209,7 @@ impl Type {
                 profile == Profile::Hosted && inner.available_in(profile)
             }
             Type::Expr | Type::Stmts | Type::Items => false,
-            Type::Unit | Type::Bool | Type::Int(_) | Type::Struct(_) | Type::Enum(_) => true,
+            Type::Unit | Type::Bool | Type::Int(_) | Type::Float(_) | Type::Struct(_) | Type::Enum(_) => true,
         }
     }
 
@@ -165,7 +219,7 @@ impl Type {
     }
 
     pub fn is_printable(&self) -> bool {
-        matches!(self, Type::Int(_) | Type::Bool | Type::Str)
+        matches!(self, Type::Int(_) | Type::Float(_) | Type::Bool | Type::Str)
     }
 
     pub fn is_syscall_arg(&self) -> bool {
@@ -197,6 +251,7 @@ impl fmt::Display for Type {
             Type::Unit => f.write_str("unit"),
             Type::Bool => f.write_str("bool"),
             Type::Int(t) => f.write_str(t.name()),
+            Type::Float(t) => f.write_str(t.name()),
             Type::Str => f.write_str("str"),
             Type::Ptr(t) => write!(f, "*{t}"),
             Type::Struct(name) | Type::Enum(name) => f.write_str(name),
@@ -243,7 +298,7 @@ pub fn struct_name_jir(name: &str) -> String {
 pub fn c_compatible(t: &Type, is_ret: bool) -> bool {
     match t {
         Type::Unit => is_ret,
-        Type::Bool | Type::Int(_) | Type::Ptr(_) => true,
+        Type::Bool | Type::Int(_) | Type::Float(_) | Type::Ptr(_) => true,
         Type::Fn(params, ret) => params.iter().all(|p| c_compatible(p, false)) && c_compatible(ret, true),
         _ => false,
     }
@@ -266,6 +321,7 @@ pub fn str_literal(profile: Profile) -> Type {
 pub fn unary(op: UnOp, t: &Type) -> Option<Type> {
     match (op, t) {
         (UnOp::Neg, Type::Int(i)) if i.signed() => Some(t.clone()),
+        (UnOp::Neg, Type::Float(_)) => Some(t.clone()),
         (UnOp::Not, Type::Bool) => Some(Type::Bool),
         // On integers, `!` flips every bit.
         (UnOp::Not, Type::Int(_)) => Some(t.clone()),
@@ -278,13 +334,17 @@ pub fn binary(op: BinOp, l: &Type, r: &Type) -> Option<Type> {
     use Type::*;
     Some(match (op, l, r) {
         (Add | Sub | Mul | Div | Rem | And | Or | Xor | Shl | Shr, Int(a), Int(b)) if a == b => l.clone(),
+        // IEEE 754: `/` by zero is an infinity or NaN, `%` is C's `fmod`.
+        (Add | Sub | Mul | Div | Rem, Float(a), Float(b)) if a == b => l.clone(),
         // `&`, `|` and `^` on bools evaluate both sides, unlike `&&` and `||`.
         (And | Or | Xor, Bool, Bool) => Bool,
         (Add, Str, Str) => Str,
         // Pointer arithmetic counts in elements, like C.
         (Add | Sub, Ptr(_), Int(IntTy::I64)) => l.clone(),
-        (Eq | Ne, a, b) if a == b && matches!(a, Bool | Int(_) | Str | Ptr(_)) => Bool,
+        // Floats compare as IEEE 754 says: NaN is unequal to everything, itself too.
+        (Eq | Ne, a, b) if a == b && matches!(a, Bool | Int(_) | Float(_) | Str | Ptr(_)) => Bool,
         (Lt | Le | Gt | Ge, Int(a), Int(b)) if a == b => Bool,
+        (Lt | Le | Gt | Ge, Float(a), Float(b)) if a == b => Bool,
         (Lt | Le | Gt | Ge, Ptr(a), Ptr(b)) if a == b => Bool,
         _ => return None,
     })
@@ -296,6 +356,9 @@ pub fn can_cast(from: &Type, to: &Type) -> bool {
     match (from, to) {
         _ if from == to => true,
         (Int(_) | Bool, Int(_)) => true,
+        // Integers and floats round to the nearest float; floats become integers by
+        // dropping the fraction, saturating at the limits, and NaN becomes 0.
+        (Int(_) | Float(_), Float(_)) | (Float(_), Int(_)) => true,
         (Ptr(_), Ptr(_)) => true,
         (Ptr(_), Int(IntTy::I64 | IntTy::U64)) | (Int(IntTy::I64 | IntTy::U64), Ptr(_)) => true,
         _ => false,

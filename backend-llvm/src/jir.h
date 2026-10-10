@@ -13,8 +13,8 @@ namespace jir {
 enum class Profile { Hosted, Native, Freestanding };
 
 struct Type {
-  enum Kind { Unit, Bool, Int, Str, Ptr, Struct, Array, Fn } kind = Unit;
-  unsigned bits = 0;               // Int
+  enum Kind { Unit, Bool, Int, Float, Str, Ptr, Struct, Array, Fn } kind = Unit;
+  unsigned bits = 0;               // Int, Float (32 or 64)
   bool is_signed = false;          // Int
   std::shared_ptr<Type> pointee;   // Ptr: the pointee; Array: the element type; Fn: the result
   uint64_t count = 0;              // Array
@@ -27,6 +27,12 @@ struct Type {
     t.kind = Int;
     t.bits = bits;
     t.is_signed = is_signed;
+    return t;
+  }
+  static Type floating(unsigned bits) {
+    Type t;
+    t.kind = Float;
+    t.bits = bits;
     return t;
   }
   static Type pointer(Type to) {
@@ -54,6 +60,7 @@ struct Type {
     if (kind != o.kind) return false;
     switch (kind) {
       case Int: return bits == o.bits && is_signed == o.is_signed;
+      case Float: return bits == o.bits;
       case Ptr: return *pointee == *o.pointee;
       case Array: return count == o.count && *pointee == *o.pointee;
       case Struct: return name == o.name;
@@ -68,6 +75,7 @@ struct Type {
       case Unit: return "unit";
       case Bool: return "bool";
       case Int: return (is_signed ? "i" : "u") + std::to_string(bits);
+      case Float: return "f" + std::to_string(bits);
       case Str: return "str";
       case Ptr: return "*" + pointee->str();
       case Struct: return "$" + name;
@@ -109,7 +117,7 @@ struct ExternFn {
 };
 
 enum class Op {
-  Const, Unit, Str, Copy, Neg, Not,
+  Const, FConst, Unit, Str, Copy, Neg, Not,
   Add, Sub, Mul, Div, Rem, Eq, Ne, Lt, Le, Gt, Ge, And, Or, Xor, Shl, Shr,
   Cast, Call, FuncRef, CallIndirect, Struct, Field, SetField, Load, Store, Addr, FieldPtr,
   Array, Splat, Elem, SetElem, ElemPtr, Variant, Tag, Payload, GetPath, SetPath,
@@ -127,6 +135,7 @@ struct Inst {
   uint32_t dst = 0;            // unused for Store and Print
   std::vector<uint32_t> args;  // operand registers
   int64_t imm = 0;             // Const value, field index, or variant index
+  double fimm = 0;             // FConst value
   int64_t imm2 = 0;            // Payload: index of the value in the variant
   std::string text;            // Str bytes, Call/FuncRef function, Struct name, or Asm template
   std::string constraints;     // Asm only: LLVM constraint string

@@ -4,6 +4,7 @@ use crate::{Error, Pos};
 pub enum Tok {
     Ident(String),
     Int(i64),
+    Float(f64),
     Str(String),
     /// `#![name]`
     InnerAttr(String),
@@ -100,6 +101,13 @@ impl<'a> Lexer<'a> {
 
     fn peek2(&self) -> u8 {
         self.src.get(self.i + 1).copied().unwrap_or(0)
+    }
+
+    /// Decimal digits, which may be separated by `_`.
+    fn eat_digits(&mut self) {
+        while self.peek().is_ascii_digit() || self.peek() == b'_' {
+            self.bump();
+        }
     }
 
     fn bump(&mut self) -> u8 {
@@ -278,6 +286,28 @@ impl<'a> Lexer<'a> {
                     self.bump();
                 }
                 let digits_start = self.i;
+                let mut is_float = false;
+                if radix == 10 {
+                    // `1.5`, `2e10`, `1.5e-3`: a float. `1.` and `1.x` stay an
+                    // integer followed by `.`.
+                    self.eat_digits();
+                    if self.peek() == b'.' && self.peek2().is_ascii_digit() {
+                        is_float = true;
+                        self.bump();
+                        self.eat_digits();
+                    }
+                    if matches!(self.peek(), b'e' | b'E') {
+                        let sign = usize::from(matches!(self.peek2(), b'+' | b'-'));
+                        if self.src.get(self.i + 1 + sign).is_some_and(|d| d.is_ascii_digit()) {
+                            is_float = true;
+                            for _ in 0..=sign {
+                                self.bump();
+                            }
+                            self.eat_digits();
+                        }
+                    }
+                }
+                // Anything else glued on makes the literal invalid (`12ab`).
                 while self.peek().is_ascii_alphanumeric() || self.peek() == b'_' {
                     self.bump();
                 }
@@ -285,14 +315,22 @@ impl<'a> Lexer<'a> {
                 let from = if radix == 10 { start } else { digits_start };
                 let digits: String =
                     std::str::from_utf8(&self.src[from..self.i]).unwrap().chars().filter(|&c| c != '_').collect();
-                let n = i64::from_str_radix(&digits, radix).map_err(|e| {
-                    let why = match e.kind() {
-                        std::num::IntErrorKind::PosOverflow => "is too large",
-                        _ => "is not a valid number",
-                    };
-                    Error::new(pos, format!("integer literal `{raw}` {why}"))
-                })?;
-                Tok::Int(n)
+                if is_float {
+                    match digits.parse::<f64>() {
+                        Ok(x) if x.is_finite() => Tok::Float(x),
+                        Ok(_) => return Err(Error::new(pos, format!("float literal `{raw}` is too large"))),
+                        Err(_) => return Err(Error::new(pos, format!("float literal `{raw}` is not a valid number"))),
+                    }
+                } else {
+                    let n = i64::from_str_radix(&digits, radix).map_err(|e| {
+                        let why = match e.kind() {
+                            std::num::IntErrorKind::PosOverflow => "is too large",
+                            _ => "is not a valid number",
+                        };
+                        Error::new(pos, format!("integer literal `{raw}` {why}"))
+                    })?;
+                    Tok::Int(n)
+                }
             }
             c if c.is_ascii_alphabetic() || c == b'_' => {
                 let start = self.i - 1;

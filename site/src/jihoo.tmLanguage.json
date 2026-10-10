@@ -38,6 +38,7 @@
       "patterns": [
         { "name": "constant.numeric.hex.jihoo", "match": "\\b0[xX][0-9a-fA-F_]+\\b" },
         { "name": "constant.numeric.binary.jihoo", "match": "\\b0[bB][01_]+\\b" },
+        { "name": "constant.numeric.float.jihoo", "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?|[eE][+-]?[0-9][0-9_]*)\\b" },
         { "name": "constant.numeric.decimal.jihoo", "match": "\\b[0-9][0-9_]*\\b" }
       ]
     },
@@ -74,7 +75,7 @@
       "patterns": [
         {
           "name": "support.type.primitive.jihoo",
-          "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|bool|unit|str|type|expr|stmts)\\b"
+          "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|unit|str|type|expr|stmts)\\b"
         }
       ]
     },

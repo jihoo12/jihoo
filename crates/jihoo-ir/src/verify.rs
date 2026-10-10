@@ -220,6 +220,10 @@ impl Cx<'_> {
                         Type::Int(t) if t.wrap(*value) == *value => Ok(()),
                         t => Err(format!("`const {value}` is not a valid {}", t.jir())),
                     },
+                    Inst::FConst { dst, value } => match ty(dst)? {
+                        Type::Float(t) if value.is_nan() || t.round(*value) == *value => Ok(()),
+                        t => Err(format!("`fconst {}` is not a valid {}", types::float_jir(*value), t.jir())),
+                    },
                     Inst::Unit { dst } => expect(dst, &Type::Unit),
                     Inst::Str { dst, .. } => expect(dst, &types::str_literal(profile)),
                     Inst::Copy { dst, src } => expect(dst, ty(src)?),
@@ -496,7 +500,7 @@ impl Cx<'_> {
                     // Macros run on the VM while compiling and never end up in a module.
                     Inst::Quote { .. } => Err("`quote` only exists at compile time".into()),
                     Inst::ToStr { dst, src } => {
-                        if !matches!(ty(src)?, Type::Int(_) | Type::Bool) {
+                        if !matches!(ty(src)?, Type::Int(_) | Type::Float(_) | Type::Bool) {
                             Err(format!("`to_str` cannot take {}", ty(src)?.jir()))
                         } else {
                             expect(dst, &Type::Str)

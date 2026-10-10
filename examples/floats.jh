@@ -1,0 +1,61 @@
+// Floats: `f64` (the default for `1.5`) and `f32`, IEEE 754 in every profile.
+//   jihoo run examples/floats.jh
+//
+// An integer literal may stand where a float is expected (`x * 2`), but
+// values never change type on their own: convert with `as`.
+
+// The Mandelbrot set, one character per point.
+fn row(y: f64) -> str {
+    let line = ""
+    let x = -2.0
+    while x < 0.5 {
+        let a = 0.0
+        let b = 0.0
+        let i = 0
+        while i < 50 && a * a + b * b < 4 {
+            let t = a * a - b * b + x
+            b = 2 * a * b + y
+            a = t
+            i = i + 1
+        }
+        line = line + if_then(i == 50, "#", if_then(i > 8, "+", " "))
+        x = x + 0.04
+    }
+    return line
+}
+
+fn if_then(c: bool, yes: str, no: str) -> str {
+    if c {
+        return yes
+    }
+    return no
+}
+
+// Newton's method; `sqrt` of a C library is a native program's `libc.sqrt`.
+fn sqrt(x: f64) -> f64 {
+    let g = x
+    let i = 0
+    while i < 60 {
+        g = (g + x / g) / 2
+        i = i + 1
+    }
+    return g
+}
+
+fn main() {
+    let y = -1.0
+    while y <= 1.0 {
+        print(row(y))
+        y = y + 0.1
+    }
+
+    print(sqrt(2.0))                  // 1.414213562373095, one ulp below libm's
+    print(0.1 + 0.2)                  // 0.30000000000000004
+    let third: f32 = 1.0 / 3          // f32: about 7 significant digits
+    print(third)                      // 0.33333334
+    print(7.5 % 2.0)                  // 1.5, like C's fmod
+    print(1.0 / 0.0)                  // inf
+    print(-7.9 as i64)                // -7: the fraction is dropped
+    print(1e300 as i32)               // 2147483647: saturates
+    print("pi is about " + to_str(355.0 / 113))
+}

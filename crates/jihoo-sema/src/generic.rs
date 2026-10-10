@@ -76,6 +76,7 @@ impl Bindings {
             .map(|(_, b)| match b {
                 Binding::Type(t) => t.to_string(),
                 Binding::Value(_, ConstValue::Int(v)) => v.to_string(),
+                Binding::Value(Type::Float(t), ConstValue::Float(x)) => jihoo_vm::float_text(*t, f64::from_bits(*x)),
                 Binding::Value(_, ConstValue::Bool(v)) => v.to_string(),
                 Binding::Value(_, ConstValue::Func(f)) | Binding::Closure { func: f, .. } => f.clone(),
                 Binding::Value(_, v) => format!("{v:?}"),
@@ -106,6 +107,7 @@ impl Bindings {
             .map(|(n, b)| match b {
                 Binding::Type(t) => format!("{n} = {t}"),
                 Binding::Value(_, ConstValue::Int(v)) => format!("{n} = {v}"),
+                Binding::Value(Type::Float(t), ConstValue::Float(x)) => format!("{n} = {}", jihoo_vm::float_text(*t, f64::from_bits(*x))),
                 Binding::Value(_, ConstValue::Func(f)) | Binding::Closure { func: f, .. } => format!("{n} = {f}"),
                 Binding::Value(_, v) => format!("{n} = {v:?}"),
             })

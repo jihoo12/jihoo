@@ -36,6 +36,10 @@ pub fn of(t: &Type, members: &Members<'_>) -> Option<Layout> {
             let bytes = u64::from(i.bits() / 8);
             Layout { size: bytes, align: bytes }
         }
+        Type::Float(f) => {
+            let bytes = u64::from(f.bits() / 8);
+            Layout { size: bytes, align: bytes }
+        }
         Type::Ptr(_) | Type::Fn(..) => Layout { size: 8, align: 8 },
         Type::Str | Type::Ref(_) | Type::Chan(_) | Type::Cell(_) | Type::Expr | Type::Stmts | Type::Items => return None,
         Type::Array(elem, n) => {

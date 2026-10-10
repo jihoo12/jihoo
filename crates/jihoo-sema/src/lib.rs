@@ -29,7 +29,7 @@ use std::rc::Rc;
 
 use jihoo_ir as ir;
 use jihoo_ir::types;
-use jihoo_ir::{BlockId, Inst, IntTy, Profile, Reg, Terminator, Type};
+use jihoo_ir::{BlockId, FloatTy, Inst, IntTy, Profile, Reg, Terminator, Type};
 use jihoo_syntax::ast::*;
 use jihoo_syntax::loader::Module;
 use jihoo_syntax::{Error, Pos};
@@ -338,12 +338,22 @@ struct FnCx<'a> {
     closure_regs: HashMap<String, Vec<Reg>>,
 }
 
-/// An integer literal, possibly negated: its type comes from context.
-fn is_int_literal(e: &Expr) -> bool {
+/// A number literal, possibly negated: its type comes from context.
+#[derive(Clone, Copy, PartialEq)]
+enum Literal {
+    Int,
+    Float,
+}
+
+fn number_literal(e: &Expr) -> Option<Literal> {
     match &e.kind {
-        ExprKind::Int(_) => true,
-        ExprKind::Unary(UnOp::Neg, inner) => matches!(inner.kind, ExprKind::Int(_)),
-        _ => false,
+        ExprKind::Int(_) => Some(Literal::Int),
+        ExprKind::Float(_) => Some(Literal::Float),
+        ExprKind::Unary(UnOp::Neg, inner) => match inner.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) => number_literal(inner),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -493,6 +503,20 @@ impl<'a> FnCx<'a> {
 
     fn konst(&mut self, ty: Type, value: i64) -> Reg {
         self.emit_to(ty, |dst| Inst::Const { dst, value })
+    }
+
+    /// `value`, rounded to `t`.
+    pub(crate) fn fconst(&mut self, t: FloatTy, value: f64) -> Reg {
+        let value = t.round(value);
+        self.emit_to(Type::Float(t), |dst| Inst::FConst { dst, value })
+    }
+
+    /// A float literal: `f64`, or `f32` where that is expected.
+    fn float_literal(&mut self, x: f64, expected: Option<&Type>) -> Reg {
+        match expected {
+            Some(&Type::Float(t)) => self.fconst(t, x),
+            _ => self.fconst(FloatTy::F64, x),
+        }
     }
 
     fn unit(&mut self) -> Reg {
@@ -788,6 +812,11 @@ impl<'a> FnCx<'a> {
                 let ExprKind::Int(n) = inner.kind else { unreachable!() };
                 self.int_literal(e.pos, -(n as i128), expected)?
             }
+            ExprKind::Float(x) => self.float_literal(*x, expected),
+            ExprKind::Unary(UnOp::Neg, inner) if matches!(inner.kind, ExprKind::Float(_)) => {
+                let ExprKind::Float(x) = inner.kind else { unreachable!() };
+                self.float_literal(-x, expected)
+            }
             ExprKind::Bool(b) => self.konst(Type::Bool, *b as i64),
             ExprKind::Str(s) => {
                 // Macros run on the VM, where strings are always `str`.
@@ -917,6 +946,15 @@ impl<'a> FnCx<'a> {
     }
 
     fn int_literal(&mut self, pos: Pos, n: i128, expected: Option<&Type>) -> Result<Reg, Error> {
+        // Where a float is expected, `2` means `2.0`, as long as that is exact.
+        if let Some(&Type::Float(t)) = expected {
+            let x = t.round(n as f64);
+            if x as i128 != n {
+                let msg = format!("integer literal {n} is not exactly representable as {}; write it as a float", t.name());
+                return Err(Error::new(pos, msg));
+            }
+            return Ok(self.fconst(t, x));
+        }
         let t = expected.and_then(Type::as_int).unwrap_or(IntTy::I64);
         if n < t.min() || n > t.max() {
             return Err(Error::new(pos, format!("integer literal {n} does not fit in {}", t.name())));
@@ -952,12 +990,20 @@ impl<'a> FnCx<'a> {
         // their operands get no hint from outside.
         let hint = if is_cmp { None } else { expected };
 
-        let (lhs, rhs) = if is_int_literal(l) && !is_int_literal(r) {
+        let (ll, rl) = (number_literal(l), number_literal(r));
+        let (lhs, rhs) = if ll.is_some() && rl.is_none() {
             // `1 + x`: type the literal after `x`. Literals have no side effects,
             // so evaluating the right side first is not observable.
             let rhs = self.expr(r, hint)?;
             let rt = self.ty(rhs).clone();
             (self.expr(l, Some(&rt))?, rhs)
+        } else if ll.is_some() && rl.is_some() && (ll == Some(Literal::Float) || rl == Some(Literal::Float)) {
+            // `1 + 2.5`: both float, of the expected type if that is one.
+            let t = match hint {
+                Some(t @ Type::Float(_)) => t.clone(),
+                _ => Type::F64,
+            };
+            (self.expr(l, Some(&t))?, self.expr(r, Some(&t))?)
         } else {
             let lhs = self.expr(l, hint)?;
             let rt = match self.ty(lhs) {
@@ -1102,8 +1148,8 @@ impl<'a> FnCx<'a> {
                     return Err(Error::new(pos, "`to_str` takes exactly 1 argument"));
                 };
                 let r = self.expr(arg, None)?;
-                if !matches!(self.ty(r), Type::Int(_) | Type::Bool) {
-                    return Err(Error::new(arg.pos, format!("`to_str` takes an integer or a bool, not {}", self.ty(r))));
+                if !matches!(self.ty(r), Type::Int(_) | Type::Float(_) | Type::Bool) {
+                    return Err(Error::new(arg.pos, format!("`to_str` takes a number or a bool, not {}", self.ty(r))));
                 }
                 Ok(self.emit_to(Type::Str, |dst| Inst::ToStr { dst, src: r }))
             }

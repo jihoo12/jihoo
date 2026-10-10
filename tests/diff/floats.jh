@@ -1,0 +1,174 @@
+// Floats: arithmetic, f32 rounding, infinities and NaN, casts, `%`, and
+// literals. Every result goes into a hash through its exact value, so the VM
+// and native code must agree bit for bit.
+
+fn mix(h: i64, v: i64) -> i64 {
+    return (h ^ v) * 1099511628211
+}
+
+// Mixes the exact value of `x`: NaN, the infinities and the sign of zero
+// separately, else an integer mantissa and a power of two. Doubling and
+// halving are exact, so the mantissa is exact.
+fn put(h: i64, x: f64) -> i64 {
+    if x != x {
+        return mix(h, 1)
+    }
+    if x == 1.0 / 0.0 {
+        return mix(h, 2)
+    }
+    if x == -1.0 / 0.0 {
+        return mix(h, 3)
+    }
+    if x == 0.0 {
+        if 1.0 / x > 0.0 {
+            return mix(h, 4)
+        }
+        return mix(h, 5)
+    }
+    let m = x
+    let e = 0
+    while m >= 9007199254740992.0 || m <= -9007199254740992.0 {
+        m = m / 2.0
+        e = e + 1
+    }
+    while m != (m as i64) as f64 {
+        m = m * 2.0
+        e = e - 1
+    }
+    return mix(mix(h, m as i64), e)
+}
+
+fn put32(h: i64, x: f32) -> i64 {
+    return put(h, x as f64)
+}
+
+fn sqrt(x: f64) -> f64 {
+    let g = x
+    let i = 0
+    while i < 60 {
+        g = (g + x / g) / 2
+        i = i + 1
+    }
+    return g
+}
+
+fn entry() -> i64 {
+    let h = -3750763034362895579
+
+    // Arithmetic and literals.
+    h = put(h, 0.1 + 0.2)
+    h = put(h, 1.5e300 * 1e10)
+    h = put(h, 1e-300 * 1e-300)
+    h = put(h, 2.0 / 3.0)
+    h = put(h, -(5.25))
+    h = put(h, 1 + 2.5)
+    h = put(h, sqrt(2.0))
+    h = put(h, 6.02214076e23 / 7)
+
+    // f32 arithmetic is rounded at every step.
+    let a: f32 = 0.1
+    let b: f32 = 0.2
+    h = put32(h, a + b)
+    h = put32(h, a * b / 3)
+    h = put32(h, 16777216.0 + 1.0)
+    let acc: f32 = 0.0
+    let i = 0
+    while i < 1000 {
+        acc = acc + 0.001
+        i = i + 1
+    }
+    h = put32(h, acc)
+
+    // Infinities, NaN and signed zero.
+    let zero = 0.0
+    let inf = 1.0 / zero
+    let nan = zero / zero
+    h = put(h, inf - inf)
+    h = put(h, -1.0 / inf)
+    h = put(h, 0.0 * -1.0)
+    h = mix(h, (nan == nan) as i64)
+    h = mix(h, (nan != nan) as i64)
+    h = mix(h, (nan < 1.0) as i64 + (nan >= 1.0) as i64 * 2)
+    h = mix(h, (inf > 1e308) as i64)
+
+    // `%` is fmod: the sign of the dividend, exact, also across exponents.
+    h = put(h, 7.5 % 2.0)
+    h = put(h, -7.5 % 2.0)
+    h = put(h, 7.5 % -2.0)
+    h = put(h, 1e300 % 3.0)
+    h = put(h, 1.7976931348623157e308 % 1e-300)
+    h = put(h, 5e-324 % 3e-324)
+    h = put(h, 3.0 % inf)
+    h = put(h, inf % 3.0)
+    h = put(h, 3.0 % 0.0)
+    h = put(h, -0.0 % 1.0)
+    // Many operands at run time (literals would be folded while compiling),
+    // across exponents, signs and subnormals.
+    let seed = 12345
+    let k = 0
+    while k < 400 {
+        seed = (seed * 6364136223846793005 + 1442695040888963407)
+        let mx = ((seed >> 11) & 1048575) as f64 + 1.0
+        let ex = ((seed >> 40) & 1023) - 600
+        seed = (seed * 6364136223846793005 + 1442695040888963407)
+        let my = ((seed >> 11) & 1048575) as f64 + 1.0
+        let ey = ((seed >> 40) & 1023) - 600
+        let x = mx
+        let y = my
+        while ex > 0 {
+            x = x * 2.0
+            ex = ex - 1
+        }
+        while ex < 0 {
+            x = x / 2.0
+            ex = ex + 1
+        }
+        while ey > 0 {
+            y = y * 2.0
+            ey = ey - 1
+        }
+        while ey < 0 {
+            y = y / 2.0
+            ey = ey + 1
+        }
+        if (seed >> 33) & 1 == 0 {
+            x = -x
+        }
+        h = put(h, x % y)
+        h = put32(h, (x as f32) % (y as f32))
+        h = put(h, x / y + x * y - y)
+        k = k + 1
+    }
+
+    let c: f32 = 10.75
+    h = put32(h, c % 3.5)
+    h = put32(h, -c % 0.1)
+
+    // Casts: rounding to nearest, truncating and saturating to integers.
+    h = mix(h, 3.99 as i64)
+    h = mix(h, -3.99 as i64)
+    h = mix(h, 1e300 as i32 as i64)
+    h = mix(h, -1e300 as i8 as i64)
+    h = mix(h, nan as u16 as i64)
+    h = mix(h, -5.5 as u32 as i64)
+    h = mix(h, 300.7 as u8 as i64)
+    h = mix(h, 1e19 as u64 as i64)
+    h = put(h, 9007199254740993 as f64)
+    h = put32(h, 16777217 as f32)
+    let big: u64 = 0
+    big = big - 1
+    h = put(h, big as f64)
+    h = put32(h, big as f32)
+    // i64 -> f32 directly, not through f64 (which would round twice).
+    h = put32(h, 9007199791611905 as f32)
+    h = put32(h, (0.1 as f32) as f64 as f32)
+    h = put(h, 1e40 as f32 as f64)
+    h = put32(h, 3.4028235677973366e38 as f32)
+
+    // Comparisons.
+    h = mix(h, (0.1 + 0.2 == 0.3) as i64)
+    h = mix(h, (0.0 == -0.0) as i64)
+    h = mix(h, (a < b) as i64 + (2.0 <= 2.0) as i64 * 2)
+
+    return (h ^ (h >> 8) ^ (h >> 16) ^ (h >> 32)) & 255
+}

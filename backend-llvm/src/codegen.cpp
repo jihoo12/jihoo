@@ -4,9 +4,9 @@
 // (part of the optimization pipeline) turns them back into SSA values. `addr %r`
 // is simply the address of that alloca, which mem2reg then leaves in memory.
 //
-// Type mapping: iN/uN -> iN, bool -> i1, *T and fn(...) -> R -> ptr, unit -> {}
-// (empty struct), $S -> a named LLVM struct, [N x T] -> [N x T]. `str` is a GC
-// type and never reaches this backend.
+// Type mapping: iN/uN -> iN, f32/f64 -> float/double, bool -> i1, *T and
+// fn(...) -> R -> ptr, unit -> {} (empty struct), $S -> a named LLVM struct,
+// [N x T] -> [N x T]. `str` is a GC type and never reaches this backend.
 //
 // Aggregates (structs and arrays) are never loaded or stored as SSA values: LLVM
 // handles large first-class aggregates very poorly (a 64 KiB array copy takes
@@ -72,6 +72,7 @@ class Types {
       case jir::Type::Unit: return StructType::get(ctx_);
       case jir::Type::Bool: return Type::getInt1Ty(ctx_);
       case jir::Type::Int: return Type::getIntNTy(ctx_, t.bits);
+      case jir::Type::Float: return t.bits == 32 ? Type::getFloatTy(ctx_) : Type::getDoubleTy(ctx_);
       case jir::Type::Ptr:
       case jir::Type::Fn: return PointerType::get(ctx_, 0);
       case jir::Type::Struct: return info(t.name).ty;
@@ -300,7 +301,7 @@ class FnGen {
 
   // Calls C function `e` (declared as `fn`) with the operands of `inst`.
   // Arguments past the fixed parameters get C's default promotions: bools and
-  // integers narrower than `int` widen to 32 bits.
+  // integers narrower than `int` widen to 32 bits, and `f32` to `f64`.
   void call_extern(const jir::ExternFn &e, Function *fn, const jir::Inst &inst) {
     size_t n = inst.args.size();
     if (n < e.params.size() || (!e.variadic && n != e.params.size()))
@@ -312,7 +313,8 @@ class FnGen {
       if (i >= e.params.size()) {
         if (t.kind == jir::Type::Bool) v = b_.CreateZExt(v, b_.getInt32Ty());
         else if (t.kind == jir::Type::Int && t.bits < 32) v = b_.CreateIntCast(v, b_.getInt32Ty(), t.is_signed);
-        else if (t.kind != jir::Type::Int && t.kind != jir::Type::Ptr && t.kind != jir::Type::Fn)
+        else if (t.kind == jir::Type::Float && t.bits == 32) v = b_.CreateFPExt(v, b_.getDoubleTy());
+        else if (t.kind != jir::Type::Int && t.kind != jir::Type::Float && t.kind != jir::Type::Ptr && t.kind != jir::Type::Fn)
           fail(f_.name, t.str() + " cannot be passed to C");
       } else if (t != e.params[i]) {
         fail(f_.name, "argument " + std::to_string(i + 1) + " to @" + e.name + " has the wrong type");
@@ -457,6 +459,25 @@ class FnGen {
     return t.kind == jir::Type::Int && t.is_signed;
   }
 
+  bool is_float(uint32_t r) { return type(r).kind == jir::Type::Float; }
+
+  // Ordered comparisons, false when either side is NaN; `!=` is unordered, so
+  // NaN != NaN, as on the VM.
+  Value *fcompare(jir::Op op, Value *a, Value *b) {
+    using P = CmpInst::Predicate;
+    using jir::Op;
+    P pred;
+    switch (op) {
+      case Op::Eq: pred = P::FCMP_OEQ; break;
+      case Op::Ne: pred = P::FCMP_UNE; break;
+      case Op::Lt: pred = P::FCMP_OLT; break;
+      case Op::Le: pred = P::FCMP_OLE; break;
+      case Op::Gt: pred = P::FCMP_OGT; break;
+      default: pred = P::FCMP_OGE; break;
+    }
+    return b_.CreateFCmp(pred, a, b);
+  }
+
   Value *compare(jir::Op op, Value *a, Value *b, bool is_signed) {
     using P = CmpInst::Predicate;
     using jir::Op;
@@ -477,6 +498,16 @@ class FnGen {
     Value *v = load(src);
     Type *ty = types_.lower(to);
     if (from == to) return v;  // aggregates are handled by the caller
+    if (to.kind == jir::Type::Float) {
+      if (from.kind == jir::Type::Float)
+        return to.bits > from.bits ? b_.CreateFPExt(v, ty) : b_.CreateFPTrunc(v, ty);
+      if (from.kind == jir::Type::Int) return from.is_signed ? b_.CreateSIToFP(v, ty) : b_.CreateUIToFP(v, ty);
+    }
+    if (to.kind == jir::Type::Int && from.kind == jir::Type::Float) {
+      // Saturating, NaN to 0, like the VM (plain fptosi would be poison).
+      Intrinsic::ID id = to.is_signed ? Intrinsic::fptosi_sat : Intrinsic::fptoui_sat;
+      return b_.CreateIntrinsic(id, {ty, v->getType()}, {v});
+    }
     if (to.kind == jir::Type::Int) {
       if (from.kind == jir::Type::Ptr) return b_.CreatePtrToInt(v, ty);
       if (from.kind == jir::Type::Int || from.kind == jir::Type::Bool)
@@ -493,11 +524,25 @@ class FnGen {
     using jir::Op;
     auto arg = [&](size_t i) { return load(inst.args.at(i)); };
     auto arg_reg = [&](size_t i) { return inst.args.at(i); };
+    // IEEE 754 arithmetic, with no fast-math flags, so results match the VM bit
+    // for bit. `frem` is C's fmod, like Rust's `%` on the VM.
+    if (inst.op >= Op::Add && inst.op <= Op::Rem && is_float(arg_reg(0))) {
+      static const Instruction::BinaryOps ops[] = {Instruction::FAdd, Instruction::FSub, Instruction::FMul,
+                                                   Instruction::FDiv, Instruction::FRem};
+      store(inst.dst, b_.CreateBinOp(ops[int(inst.op) - int(Op::Add)], arg(0), arg(1)));
+      return;
+    }
     switch (inst.op) {
       case Op::Const: {
         Type *ty = slot(inst.dst)->getAllocatedType();
         if (!ty->isIntegerTy()) fail(f_.name, "`const` needs an integer or bool register");
         store(inst.dst, ConstantInt::get(ty, uint64_t(inst.imm), /*isSigned=*/true));
+        return;
+      }
+      case Op::FConst: {
+        Type *ty = slot(inst.dst)->getAllocatedType();
+        if (!ty->isFloatingPointTy()) fail(f_.name, "`fconst` needs a float register");
+        store(inst.dst, ConstantFP::get(ty, inst.fimm));  // exact: JIR f32 constants fit in f32
         return;
       }
       case Op::Unit: store(inst.dst, unit()); return;
@@ -506,7 +551,7 @@ class FnGen {
         store(inst.dst, b_.CreateGlobalString(inst.text, ".str", 0, &mod_));
         return;
       case Op::Copy: copy_reg(inst.dst, arg_reg(0)); return;
-      case Op::Neg: store(inst.dst, b_.CreateNeg(arg(0))); return;
+      case Op::Neg: store(inst.dst, is_float(arg_reg(0)) ? b_.CreateFNeg(arg(0)) : b_.CreateNeg(arg(0))); return;
       case Op::Not: store(inst.dst, b_.CreateNot(arg(0))); return;
       case Op::Add:
         if (type(arg_reg(0)).kind == jir::Type::Ptr)
@@ -544,7 +589,8 @@ class FnGen {
         return;
       }
       case Op::Eq: case Op::Ne: case Op::Lt: case Op::Le: case Op::Gt: case Op::Ge:
-        store(inst.dst, compare(inst.op, arg(0), arg(1), is_signed(arg_reg(0))));
+        store(inst.dst, is_float(arg_reg(0)) ? fcompare(inst.op, arg(0), arg(1))
+                                             : compare(inst.op, arg(0), arg(1), is_signed(arg_reg(0))));
         return;
       case Op::Cast:
         if (type(arg_reg(0)) == type(inst.dst))
@@ -805,12 +851,74 @@ void define_mem_function(Module &m, const std::string &kind) {
   b.CreateRet(dst);
 }
 
+// Defines `fmod` or `fmodf` (for `ft`), which `frem` becomes, weak like the
+// memory functions. The result is exact, as C requires: with t = |y| * 2^k the
+// largest such value <= |x|, subtracting t whenever the remainder r is at
+// least t, then halving t down to |y|, every subtraction has t <= r < 2t and
+// so is exact (Sterbenz), and so is every doubling and halving of t.
+void define_fmod(Module &m, Type *ft, const std::string &name) {
+  LLVMContext &ctx = m.getContext();
+  auto *f = Function::Create(FunctionType::get(ft, {ft, ft}, false), GlobalValue::WeakAnyLinkage, name, m);
+  f->addFnAttr("no-builtins");
+  f->addFnAttr(Attribute::NoUnwind);
+  Value *x = f->getArg(0), *y = f->getArg(1);
+  auto block = [&](const char *n) { return BasicBlock::Create(ctx, n, f); };
+  BasicBlock *entry = block("entry"), *nan = block("nan"), *check = block("check"), *small = block("small"),
+             *up = block("up"), *down = block("down"), *sub = block("sub"), *next = block("next"),
+             *halve = block("halve"), *done = block("done");
+
+  IRBuilder<> b(entry);
+  Value *ax = b.CreateUnaryIntrinsic(Intrinsic::fabs, x);
+  Value *ay = b.CreateUnaryIntrinsic(Intrinsic::fabs, y);
+  // NaN if either is NaN, x is infinite, or y is zero.
+  Value *bad = b.CreateOr(b.CreateOr(b.CreateFCmpUNO(x, y), b.CreateFCmpOEQ(ax, ConstantFP::getInfinity(ft))),
+                          b.CreateFCmpOEQ(ay, ConstantFP::get(ft, 0.0)));
+  b.CreateCondBr(bad, nan, check);
+
+  b.SetInsertPoint(nan);
+  b.CreateRet(ConstantFP::getNaN(ft));
+
+  b.SetInsertPoint(check);  // |x| < |y| (which includes an infinite y): x itself
+  b.CreateCondBr(b.CreateFCmpOLT(ax, ay), small, up);
+  b.SetInsertPoint(small);
+  b.CreateRet(x);
+
+  b.SetInsertPoint(up);  // t = the largest |y| * 2^k <= |x|
+  PHINode *t_up = b.CreatePHI(ft, 2);
+  t_up->addIncoming(ay, check);
+  Value *twice = b.CreateFMul(t_up, ConstantFP::get(ft, 2.0));
+  t_up->addIncoming(twice, up);
+  b.CreateCondBr(b.CreateFCmpOLE(twice, ax), up, down);
+
+  b.SetInsertPoint(down);  // r -= t if r >= t; stop at t == |y|, else halve t
+  PHINode *t = b.CreatePHI(ft, 2), *r = b.CreatePHI(ft, 2);
+  t->addIncoming(t_up, up);
+  r->addIncoming(ax, up);
+  b.CreateCondBr(b.CreateFCmpOGE(r, t), sub, next);
+  b.SetInsertPoint(sub);
+  Value *less = b.CreateFSub(r, t);
+  b.CreateBr(next);
+  b.SetInsertPoint(next);
+  PHINode *r2 = b.CreatePHI(ft, 2);
+  r2->addIncoming(r, down);
+  r2->addIncoming(less, sub);
+  b.CreateCondBr(b.CreateFCmpOEQ(t, ay), done, halve);
+  b.SetInsertPoint(halve);
+  t->addIncoming(b.CreateFMul(t, ConstantFP::get(ft, 0.5)), halve);
+  r->addIncoming(r2, halve);
+  b.CreateBr(down);
+
+  b.SetInsertPoint(done);  // the sign of x, also for a zero result
+  b.CreateRet(b.CreateBinaryIntrinsic(Intrinsic::copysign, r2, x));
+}
+
 // Declares C function `e`, with the extensions the C ABI wants for narrow
 // integers and bools.
 Function *declare_extern(Module &m, const Types &types, const jir::ExternFn &e) {
   LLVMContext &ctx = m.getContext();
   auto scalar = [&](const jir::Type &t) {
-    if (t.kind != jir::Type::Bool && t.kind != jir::Type::Int && t.kind != jir::Type::Ptr && t.kind != jir::Type::Fn)
+    if (t.kind != jir::Type::Bool && t.kind != jir::Type::Int && t.kind != jir::Type::Float && t.kind != jir::Type::Ptr &&
+        t.kind != jir::Type::Fn)
       throw CodegenError("extern @" + e.name + ": " + t.str() + " cannot be passed to or from C");
     return types.lower(t);
   };
@@ -902,6 +1010,8 @@ std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, co
     define_c_main(*mod, fns["main"], *entry);
   } else {
     for (const char *kind : {"memcpy", "memmove", "memset"}) define_mem_function(*mod, kind);
+    define_fmod(*mod, Type::getDoubleTy(ctx), "fmod");
+    define_fmod(*mod, Type::getFloatTy(ctx), "fmodf");
   }
 
   std::string err;

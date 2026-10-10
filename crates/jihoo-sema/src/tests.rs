@@ -1,4 +1,5 @@
 use super::*;
+use jihoo_ir::FloatTy;
 
 fn check(src: &str) -> Result<ir::Module, String> {
     let prog = jihoo_syntax::parse(src).map_err(|e| e.to_string())?;
@@ -1115,7 +1116,7 @@ fn unique_names_and_to_str() {
     assert!(err("fn main() { let x = unique(\"a\") }").contains("only be used inside a macro"));
     assert!(err("macro m() -> expr { return ident(\"1x\") }\nfn main() { print(m!()) }").contains("`1x` is not a valid name"));
     assert!(err(&fs("fn f() { let s = to_str(1) }")).contains("only available in hosted programs and macros"));
-    assert!(err("fn main() { print(to_str(\"s\")) }").contains("takes an integer or a bool"));
+    assert!(err("fn main() { print(to_str(\"s\")) }").contains("takes a number or a bool"));
 }
 
 /// Wraps `body` in a native program.
@@ -1190,4 +1191,34 @@ fn extern_declarations_across_modules() {
     check_files(&[("main.jh", "#![native]\nimport io\nfn main() { io.f() }"), ("lib/io.jh", io)]).unwrap();
     let e = check_files(&[("main.jh", "#![freestanding]\nimport c\nfn _start() {}"), ("lib/c.jh", libc)]).unwrap_err();
     assert!(e.contains("module `c` is native-only, but the program is freestanding"), "{e}");
+}
+
+#[test]
+fn floats() {
+    // A float literal is f64 unless f32 is expected; an integer literal becomes
+    // a float where one is expected, if it is exact.
+    let m = check("fn f(x: f32) -> f32 { return x * 2 + 0.5 }\nfn main() { let y = 1.5\n let z: f64 = 3\n print(y + z) }").unwrap();
+    let f = m.func("f").unwrap();
+    assert!(f.regs.iter().all(|t| *t == Type::Float(FloatTy::F32)), "{f}");
+    let text = m.to_string();
+    assert!(text.contains("fconst 2.0") && text.contains("fconst 0.5") && text.contains("fconst 3.0"), "{text}");
+    // `1 + 2.5` is a float; f32 literals are rounded to f32.
+    check("fn main() { let x: f64 = 1 + 2.5 }").unwrap();
+    let m = check("fn main() { let x: f32 = 0.1 }").unwrap();
+    assert!(m.to_string().contains(&format!("fconst {:?}", 0.1f32 as f64)), "{m}");
+    assert!(err("fn main() { let x: f32 = 16777217 }").contains("not exactly representable as f32"));
+    // No implicit conversions between float types, or floats and integers.
+    assert!(err("fn f(a: f32, b: f64) -> f64 { return a + b }\nfn main() {}").contains("cannot apply `+` to f32 and f64"));
+    assert!(err("fn f(a: f64, n: i64) -> f64 { return a * n }\nfn main() {}").contains("cannot apply `*` to f64 and i64"));
+    check("fn f(a: f32, n: i64) -> f64 { return a as f64 * n as f64 }\nfn g(x: f64) -> u8 { return x as u8 }\nfn main() {}").unwrap();
+    // Integer-only operators, and casts that make no sense.
+    assert!(err("fn f(a: f64) -> f64 { return a & a }\nfn main() {}").contains("cannot apply `&`"));
+    assert!(err("fn f(a: f64) -> f64 { return a << 1 }\nfn main() {}").contains("cannot apply `<<`"));
+    assert!(err("fn f(a: f64) -> bool { return a as bool }\nfn main() {}").contains("cannot cast f64 to bool"));
+    assert!(err("fn main() { let x = 1.5\n match x { _ => {} } }").contains("cannot `match` on f64"));
+    // Floats work at compile time, in structs and arrays, and in every profile.
+    check("const K = 2.5 * 4\nstruct P { x: f64, y: f32 }\nfn main() { let a = [K; 3]\n let p = P { x: a[0], y: 1 } }").unwrap();
+    check(&fs("fn f(x: f64) -> f32 { return (x % 2.0) as f32 }")).unwrap();
+    check(&native("extern fn sqrt(x: f64) -> f64\nfn f() -> f64 { return sqrt(2) }")).unwrap();
+    assert!(err(&fs("fn f() { syscall(1, 1.5) }")).contains("must be integers or pointers"));
 }

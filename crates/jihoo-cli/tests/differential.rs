@@ -237,6 +237,53 @@ fn native_programs_link_c_files() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Floats cross into C: `float` and `double` parameters and results, mixed
+/// with integers, a callback taking a `double`, `f32` through `printf`'s
+/// variable arguments (promoted to `double`), and libm.
+#[test]
+fn native_floats_cross_into_c() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("jihoo-ffi-float-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("f.c"),
+        "float scale(float x, int n, double k) { return (float)(x * k) + n; }\n\
+         double integrate(double (*f)(double), double a, double b, int n) {\n\
+           double h = (b - a) / n, s = (f(a) + f(b)) / 2;\n\
+           for (int i = 1; i < n; i++) s += f(a + i * h);\n\
+           return s * h;\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.jh"),
+        "#![native]\n\
+         import libc\n\
+         extern fn scale(x: f32, n: i32, k: f64) -> f32\n\
+         extern fn integrate(f: fn(f64) -> f64, a: f64, b: f64, n: i32) -> f64\n\
+         fn square(x: f64) -> f64 { return x * x }\n\
+         fn main() -> i64 {\n\
+           let half: f32 = 0.5\n\
+           libc.printf(\"%.2f %.1f %g\\n\", scale(1.5, 2, 3.0), half, libc.sqrt(2.0))\n\
+           libc.printf(\"%.4f\\n\", integrate(square, 0.0, 3.0, 3000))\n\
+           return libc.floor(libc.atof(\"41.9\")) as i64\n\
+         }\n",
+    )
+    .unwrap();
+    let bin = dir.join("main");
+    let status =
+        Command::new(JIHOO).arg("build").arg(dir.join("main.jh")).arg(dir.join("f.c")).arg("-o").arg(&bin).status().unwrap();
+    assert!(status.success());
+    let out = Command::new(&bin).output().unwrap();
+    // The trapezoid rule is off by (b - a) * h^2 * f'' / 12 = 5e-7 here.
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "6.50 0.5 1.41421\n9.0000\n");
+    assert_eq!(out.status.code(), Some(41));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn native_programs_do_not_run_on_the_vm() {
     let dir = std::env::temp_dir().join(format!("jihoo-native-vm-{}", std::process::id()));

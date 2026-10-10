@@ -649,6 +649,9 @@ impl Parser {
                 self.bump();
                 PatternKind::Int(if negative { -(n as i128) } else { n as i128 })
             }
+            Tok::Float(_) => {
+                return Err(Error::new(pos, "floats cannot be patterns (rounding makes exact matches fragile); compare with `<`, `==` in a guard"))
+            }
             _ if negative => return Err(self.unexpected("an integer")),
             Tok::True | Tok::False => PatternKind::Bool(self.bump().tok == Tok::True),
             Tok::Ident(name) if name == "_" => {
@@ -800,6 +803,10 @@ impl Parser {
             Tok::Int(n) => {
                 self.bump();
                 ExprKind::Int(n)
+            }
+            Tok::Float(x) => {
+                self.bump();
+                ExprKind::Float(x)
             }
             Tok::True => {
                 self.bump();
@@ -1145,6 +1152,7 @@ fn describe(t: &Tok) -> String {
     match t {
         Tok::Ident(s) => format!("identifier `{s}`"),
         Tok::Int(n) => format!("integer `{n}`"),
+        Tok::Float(x) => format!("float `{x:?}`"),
         Tok::Str(_) => "string literal".into(),
         Tok::InnerAttr(a) => format!("`#![{a}]`"),
         Tok::Eof => "end of file".into(),
@@ -1213,7 +1221,7 @@ fn punct(t: &Tok) -> &'static str {
         Tok::Caret => "^",
         Tok::Shl => "<<",
         Tok::Shr => ">>",
-        Tok::Ident(_) | Tok::Int(_) | Tok::Str(_) | Tok::InnerAttr(_) | Tok::Eof => "?",
+        Tok::Ident(_) | Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::InnerAttr(_) | Tok::Eof => "?",
     }
 }
 
@@ -1241,6 +1249,19 @@ mod tests {
         // `-1` does not continue `x` from the previous line, and `*p` is a new statement.
         assert_eq!(body("let x = 1\n-1").len(), 2);
         assert_eq!(body("let x = 1\n*p = 2").len(), 2);
+    }
+
+    #[test]
+    fn lexes_float_literals() {
+        let toks = |src: &str| -> Vec<Tok> { crate::lexer::lex(src, 0).unwrap().into_iter().map(|t| t.tok).collect() };
+        assert_eq!(toks("1.5 2e3 1_000.25e-2 7E+1"), [Tok::Float(1.5), Tok::Float(2e3), Tok::Float(10.0025), Tok::Float(70.0), Tok::Eof]);
+        // `1.` and `1.x` are an integer and a `.`; hex digits are never exponents.
+        assert_eq!(toks("1.x"), [Tok::Int(1), Tok::Dot, Tok::Ident("x".into()), Tok::Eof]);
+        assert_eq!(toks("0x1e3"), [Tok::Int(0x1e3), Tok::Eof]);
+        assert_eq!(toks("xs[0].y"), [Tok::Ident("xs".into()), Tok::LBracket, Tok::Int(0), Tok::RBracket, Tok::Dot, Tok::Ident("y".into()), Tok::Eof]);
+        assert!(crate::lexer::lex("1e999", 0).unwrap_err().msg.contains("too large"));
+        assert!(crate::lexer::lex("1.5x", 0).unwrap_err().msg.contains("not a valid number"));
+        assert!(parse("fn f(x: f64) { match x { 1.5 => {} } }").unwrap_err().msg.contains("floats cannot be patterns"));
     }
 
     #[test]

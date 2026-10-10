@@ -660,10 +660,10 @@ impl<'p> Env<'p> {
                         if p.comptime {
                             return Err(Error::new(p.pos, "macro parameters are already compile-time; drop `comptime`"));
                         }
-                        if !matches!(t, Type::Expr | Type::Int(_) | Type::Bool | Type::Str) {
+                        if !matches!(t, Type::Expr | Type::Int(_) | Type::Float(_) | Type::Bool | Type::Str) {
                             return Err(Error::new(
                                 p.ty.pos,
-                                format!("macro parameters must be `expr`, integers, bools or `str`, not {t}"),
+                                format!("macro parameters must be `expr`, numbers, bools or `str`, not {t}"),
                             ));
                         }
                     }

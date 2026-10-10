@@ -89,6 +89,7 @@ impl Display for Inst {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Inst::Const { dst, value } => write!(f, "{dst} = const {value}"),
+            Inst::FConst { dst, value } => write!(f, "{dst} = fconst {}", types::float_jir(*value)),
             Inst::Unit { dst } => write!(f, "{dst} = unit"),
             Inst::Str { dst, value } => write!(f, "{dst} = str {}", quote(value)),
             Inst::Copy { dst, src } => write!(f, "{dst} = copy {src}"),

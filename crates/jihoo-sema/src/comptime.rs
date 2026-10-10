@@ -28,6 +28,8 @@ const FUEL: u64 = if cfg!(test) { 1_000_000 } else { 100_000_000 };
 pub(crate) enum ConstValue {
     Unit,
     Int(i64),
+    /// The bits of an `f64` (see `Value::Float`).
+    Float(u64),
     Bool(bool),
     Str(String),
     /// Fields of a struct or elements of an array; for an enum, the variant
@@ -117,9 +119,10 @@ impl Env<'_> {
             values.push(match a {
                 ConstValue::Unit => Value::Unit,
                 ConstValue::Int(n) => Value::Int(*n),
+                ConstValue::Float(x) => Value::Float(*x),
                 ConstValue::Bool(b) => Value::Bool(*b),
                 ConstValue::Str(s) => vm.alloc_string(s),
-                ConstValue::Agg(_) | ConstValue::Func(_) => unreachable!("macro arguments are code, integers, bools or str"),
+                ConstValue::Agg(_) | ConstValue::Func(_) => unreachable!("macro arguments are code, numbers, bools or str"),
             });
         }
         let mut out = Vec::new();
@@ -140,6 +143,7 @@ impl Env<'_> {
         Ok(match (v, ty) {
             (Value::Unit, Type::Unit) => ConstValue::Unit,
             (Value::Int(n), Type::Int(_)) => ConstValue::Int(n),
+            (Value::Float(x), Type::Float(_)) => ConstValue::Float(x),
             (Value::Bool(b), Type::Bool) => ConstValue::Bool(b),
             (Value::Str(r), t) if *t == Type::Str || t.is_code() => ConstValue::Str(heap.str(r).to_string()),
             (Value::Agg(r), Type::Struct(_)) => {
@@ -210,6 +214,7 @@ impl FnCx<'_> {
         match (ty, v) {
             (_, ConstValue::Unit) => self.unit(),
             (_, ConstValue::Int(n)) => self.konst(ty.clone(), *n),
+            (&Type::Float(t), ConstValue::Float(x)) => self.fconst(t, f64::from_bits(*x)),
             (_, ConstValue::Bool(b)) => self.konst(Type::Bool, *b as i64),
             (_, ConstValue::Str(s)) => self.emit_to(Type::Str, |dst| Inst::Str { dst, value: s.clone() }),
             (_, ConstValue::Func(f)) => self.emit_to(ty.clone(), |dst| Inst::FuncRef { dst, func: f.clone() }),

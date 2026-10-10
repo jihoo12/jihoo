@@ -5,8 +5,8 @@
 //   libc.printf("%s is %ld\n", "answer", 42)
 //
 // C types map to jihoo types as: int -> i32, long and ssize_t -> i64,
-// size_t -> u64, char and unsigned char -> u8 (bytes), any pointer -> *T
-// (`void *` is written `*u8`), void -> no result.
+// size_t -> u64, float -> f32, double -> f64, char and unsigned char -> u8
+// (bytes), any pointer -> *T (`void *` is written `*u8`), void -> no result.
 
 // stdio
 pub extern fn printf(fmt: *u8, ...) -> i32
@@ -25,6 +25,8 @@ pub extern fn exit(status: i32)
 pub extern fn abort()
 pub extern fn atoi(s: *u8) -> i32
 pub extern fn strtol(s: *u8, end: **u8, base: i32) -> i64
+pub extern fn strtod(s: *u8, end: **u8) -> f64
+pub extern fn atof(s: *u8) -> f64
 pub extern fn getenv(name: *u8) -> *u8
 pub extern fn qsort(base: *u8, n: u64, size: u64, cmp: fn(*u8, *u8) -> i32)
 
@@ -42,3 +44,29 @@ pub extern fn memcmp(a: *u8, b: *u8, n: u64) -> i32
 pub extern fn read(fd: i32, buf: *u8, n: u64) -> i64
 pub extern fn write(fd: i32, buf: *u8, n: u64) -> i64
 pub extern fn close(fd: i32) -> i32
+
+// math (libm, which `jihoo build` always links)
+pub extern fn sqrt(x: f64) -> f64
+pub extern fn cbrt(x: f64) -> f64
+pub extern fn pow(x: f64, y: f64) -> f64
+pub extern fn exp(x: f64) -> f64
+pub extern fn log(x: f64) -> f64
+pub extern fn log2(x: f64) -> f64
+pub extern fn log10(x: f64) -> f64
+pub extern fn sin(x: f64) -> f64
+pub extern fn cos(x: f64) -> f64
+pub extern fn tan(x: f64) -> f64
+pub extern fn asin(x: f64) -> f64
+pub extern fn acos(x: f64) -> f64
+pub extern fn atan(x: f64) -> f64
+pub extern fn atan2(y: f64, x: f64) -> f64
+pub extern fn hypot(x: f64, y: f64) -> f64
+pub extern fn fabs(x: f64) -> f64
+pub extern fn floor(x: f64) -> f64
+pub extern fn ceil(x: f64) -> f64
+pub extern fn round(x: f64) -> f64
+pub extern fn trunc(x: f64) -> f64
+pub extern fn fmod(x: f64, y: f64) -> f64
+pub extern fn sqrtf(x: f32) -> f32
+pub extern fn sinf(x: f32) -> f32
+pub extern fn cosf(x: f32) -> f32

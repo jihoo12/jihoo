@@ -104,7 +104,7 @@ nix build
 
 ## Status
 
-v0: static types with local inference; `bool`, `i8`…`u64` with arithmetic and
+v0: static types with local inference; `bool`, `i8`…`u64` and `f32`/`f64` with arithmetic and
 bitwise operators, structs and
 bounds-checked arrays (every profile), `size_of`/`align_of`, `str` (hosted),
 pointers with load/store, `&` and inline asm (native and freestanding);
@@ -116,7 +116,7 @@ compile-time parameters;
 macros that run at compile time and return code.
 modules with `import`, and a small standard library in [lib/](lib)
 (`libc`; `alloc`: an arena allocator and `Vec(T)`; `io`). See
-[examples/native.jh](examples/native.jh),
+[examples/native.jh](examples/native.jh), [examples/floats.jh](examples/floats.jh),
 [examples/pointers.jh](examples/pointers.jh), [examples/asm.jh](examples/asm.jh),
 [examples/arena.jh](examples/arena.jh),
 [examples/comptime.jh](examples/comptime.jh),

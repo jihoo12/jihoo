@@ -12,7 +12,7 @@ mod print;
 pub mod types;
 mod verify;
 
-pub use types::{IntTy, Type};
+pub use types::{FloatTy, IntTy, Type};
 pub use verify::verify;
 
 /// Language profile, selected with `#![native]` or `#![freestanding]` at the
@@ -214,6 +214,9 @@ pub enum Inst {
     /// An integer or `bool` (0/1) constant, depending on the type of `dst`.
     /// Integers are stored in canonical form (see [`IntTy::wrap`]).
     Const { dst: Reg, value: i64 },
+    /// A float constant, of the type of `dst`. For an `f32`, `value` is exactly
+    /// representable as `f32`.
+    FConst { dst: Reg, value: f64 },
     /// The unit value.
     Unit { dst: Reg },
     /// String literal: `str` when hosted, `ptr` to constant
@@ -222,7 +225,7 @@ pub enum Inst {
     Copy { dst: Reg, src: Reg },
     Unary { dst: Reg, op: UnOp, src: Reg },
     Binary { dst: Reg, op: BinOp, lhs: Reg, rhs: Reg },
-    /// Converts between integer types, bool to integer, and pointers.
+    /// Converts between integer and float types, bool to integer, and pointers.
     Cast { dst: Reg, src: Reg },
     Call { dst: Reg, func: String, args: Vec<Reg> },
     /// Function `func` as a value, of type `fn(params) -> ret`.
@@ -299,7 +302,7 @@ pub enum Inst {
     Syscall { dst: Reg, args: Vec<Reg> },
     /// Hosted-only builtin.
     Print { src: Reg },
-    /// Hosted (and macros): an integer or bool as text.
+    /// Hosted (and macros): a number or bool as text.
     ToStr { dst: Reg, src: Reg },
     /// Compile time only (macros): `prefix` plus a number never handed out before
     /// in this compilation, for names that cannot clash.
@@ -396,7 +399,7 @@ impl Inst {
     pub fn regs_mut(&mut self) -> Vec<&mut Reg> {
         use Inst::*;
         match self {
-            Const { dst, .. } | Unit { dst } | Str { dst, .. } | FuncRef { dst, .. } => vec![dst],
+            Const { dst, .. } | FConst { dst, .. } | Unit { dst } | Str { dst, .. } | FuncRef { dst, .. } => vec![dst],
             Copy { dst, src }
             | Unary { dst, src, .. }
             | Cast { dst, src }

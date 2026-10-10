@@ -125,6 +125,8 @@
             cp ${./examples}/*.jh .
             jihoo run hello.jh > hello.out
             grep -qx "Hello, jihoo!" hello.out
+            jihoo run floats.jh > floats.out
+            grep -qx 0.33333334 floats.out
             jihoo build native.jh -o native
             ./native one > native.out && status=0 || status=$?
             test "$status" = 49

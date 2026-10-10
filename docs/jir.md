@@ -48,7 +48,9 @@ bb3:
   Struct names that are not identifiers are quoted: instances of generic structs
   are `$"Pair(i64)"`.
   Function names may contain `.`: instances of generic functions are `@max.0`, ...
-- Integers are signed 64-bit decimals (`-5`, `42`).
+- Integers are signed 64-bit decimals (`-5`, `42`). Float constants (only in
+  `fconst`) are decimals with a `.` or an exponent (`1.5`, `-0.0`, `1e-7`), or
+  `inf`, `-inf`, `nan`; they are read as the nearest `f64`.
 - Strings are double-quoted. Escapes: `\n`, `\t`, `\\`, `\"`, `\xHH` (any byte).
 
 ## Module
@@ -82,15 +84,15 @@ extern @printf(*u8, ...) -> i32
 A C function the module calls, by its symbol name, with the C calling
 convention. `call` and `funcref` name it like any other function, and a module
 cannot have a function and an extern function of the same name. Its parameter
-and result types are integers, `bool`, pointers and function types made of
+and result types are integers, floats, `bool`, pointers and function types made of
 those, and a `unit` result (C's `void`); structs, enums and arrays go by
 pointer. Integers narrower than 32 bits and bools are sign- or zero-extended as
 the C ABI requires.
 
 With `...`, the function takes more arguments after the listed ones, like
-`printf`. A `call` may pass any integer, `bool`, pointer or function value
+`printf`. A `call` may pass any integer, float, `bool`, pointer or function value
 there, and they get C's default promotions (bools and integers narrower than 32
-bits widen to 32). A variadic extern cannot be a `funcref`.
+bits widen to 32, `f32` to `f64`). A variadic extern cannot be a `funcref`.
 
 ## Types
 
@@ -100,6 +102,7 @@ bits widen to 32). A variadic extern cannot be a `funcref`.
 | `bool`            | `true` / `false`                         | `i1`          |
 | `i8` … `i64`      | signed integers                          | `i8` … `i64`  |
 | `u8` … `u64`      | unsigned integers                        | `i8` … `i64`  |
+| `f32`, `f64`      | IEEE 754 binary32 and binary64          | `float`, `double` |
 | `str`             | GC-managed string, hosted only           | —             |
 | `*T`              | raw pointer to `T`, native and freestanding only | `ptr` |
 | `$Name`           | struct or enum, by value                 | named struct  |
@@ -184,19 +187,21 @@ The result type is what the destination register must be declared as.
 | syntax                          | operands              | result | meaning |
 |---------------------------------|-----------------------|--------|---------|
 | `%d = const N`                  |                       | int or `bool` | constant; `bool` is 0 or 1 |
+| `%d = fconst X`                 |                       | `f32` or `f64` | float constant; for `f32`, `X` is exactly an `f32` value |
 | `%d = unit`                     |                       | `unit` | the unit value |
 | `%d = str "..."`                |                       | `str` (hosted) / `*u8` (native, freestanding) | string literal; compiled strings are NUL-terminated constant bytes |
 | `%d = copy %a`                  | `T`                   | `T`    | copy |
-| `%d = neg %a`                   | signed int            | same   | wrapping negation |
+| `%d = neg %a`                   | signed int or float   | same   | wrapping negation; for floats, flips the sign (also of 0 and NaN) |
 | `%d = not %a`                   | `bool` or int         | same   | logical not, or bitwise not of an integer |
 | `%d = add\|sub\|mul %a, %b`     | `T, T` (int)          | `T`    | wrapping arithmetic |
 | `%d = div\|rem %a, %b`          | `T, T` (int)          | `T`    | signed or unsigned by type; truncating (VM traps on zero; native: undefined for now) |
+| `%d = add\|sub\|mul\|div\|rem %a, %b` | `T, T` (float) | `T` | IEEE 754, rounded to nearest; `rem` is C's `fmod` (exact, sign of `%a`) |
 | `%d = and\|or\|xor %a, %b`      | `T, T` (int or `bool`) | `T`   | bitwise (for `bool`: logical, both sides evaluated) |
 | `%d = shl\|shr %a, %b`          | `T, T` (int)          | `T`    | shift by `%b` modulo the bit width; `shr` is arithmetic for signed types, logical for unsigned |
 | `%d = add %a, %b`               | `str, str`            | `str`  | concatenation |
 | `%d = add\|sub %a, %b`          | `*T, i64`             | `*T`   | pointer offset in elements of `T` |
-| `%d = eq\|ne %a, %b`            | `T, T`: `bool`, int, `str`, `*U` | `bool` | equality (`str` compares contents); the frontend compares structs, enums, arrays and refs with helper functions `@fn.eq.N` |
-| `%d = lt\|le\|gt\|ge %a, %b`    | `T, T`: int or `*U`   | `bool` | ordered comparison, signed or unsigned by type; pointers unsigned |
+| `%d = eq\|ne %a, %b`            | `T, T`: `bool`, int, float, `str`, `*U` | `bool` | equality (`str` compares contents; floats as IEEE: NaN is unequal to itself, `0.0 == -0.0`); the frontend compares structs, enums, arrays and refs with helper functions `@fn.eq.N` |
+| `%d = lt\|le\|gt\|ge %a, %b`    | `T, T`: int, float or `*U` | `bool` | ordered comparison, signed or unsigned by type; pointers unsigned; false if either float is NaN |
 | `%d = cast %a`                  | see below             | dst type | conversion |
 | `%d = call @f(%a, ...)`         | parameter types of `@f` | return type of `@f` | call |
 | `%d = funcref @f`               |                       | `fn(P...) -> R` of `@f` | function `@f` as a value |
@@ -204,7 +209,9 @@ The result type is what the destination register must be declared as.
 | `%d = closure @f(%c, ...)`      | the first parameter types of `@f` | `fn(P...) -> R`, the rest of `@f`'s signature | hosted only: a function value that calls `@f` with `%c, ...` before its own arguments |
 
 `cast` allows: int → int (truncate, or sign-/zero-extend by the *source* type),
-`bool` → int (0/1), `*T` → `*U`, `*T` ↔ `i64`/`u64`, and any type to itself.
+`bool` → int (0/1), int → float and float → float (to nearest), float → int
+(dropping the fraction, saturating at the limits, NaN → 0), `*T` → `*U`, `*T` ↔
+`i64`/`u64`, and any type to itself.
 
 ### Structs
 
@@ -288,8 +295,8 @@ runtime error and native code traps.
 | syntax                          | operands              | result | meaning |
 |---------------------------------|-----------------------|--------|---------|
 | `%d = syscall(%n, %a, ...)`     | int or `*T`, 1 to 7 operands | `i64` | native and freestanding only: raw Linux syscall `%n` |
-| `print %a`                      | int, `bool` or `str`  |        | hosted only: print the value and a newline |
-| `%d = to_str %a`                | int or `bool`         | `str`  | hosted (and macros): the value as text |
+| `print %a`                      | number, `bool` or `str` |      | hosted only: print the value and a newline (floats as the shortest text that reads back exactly: `0.1`, `1.0`, `1e100`, `inf`, `NaN`) |
+| `%d = to_str %a`                | number or `bool`      | `str`  | hosted (and macros): the value as text, as `print` writes it |
 | `%d = unique %p`                | `str`                 | `str`  | compile time only: `p` plus a number unique in this compilation |
 | `%d = asm "tmpl", "cons"(%a, ...)` | int, `bool` or `*T` | int, `*T` or `unit` | native and freestanding only: inline assembly |
 | `%d = quote ["p0", "p1", ...](kind %h, ...)` | see below | `expr`, `stmts` or `items` | compile time only: code from template pieces and holes |
@@ -335,12 +342,13 @@ arguments. The frontend names the functions it lifts out of anonymous functions
 `jihoo-llc` passes aggregates (structs and arrays) by pointer: the caller passes
 the address of its copy and the callee copies it into its own storage, and an
 aggregate result is written through a hidden first parameter. Aggregates are
-moved with `memcpy`; a freestanding module defines weak `memcpy`, `memmove` and
-`memset` because it has no libc, and a native one uses libc's.
+moved with `memcpy`; a freestanding module defines weak `memcpy`, `memmove`,
+`memset`, and `fmod` and `fmodf` (which float `rem` becomes) because it has no
+libc, and a native one uses libc's and libm's.
 
 This is not the C ABI for aggregates, which is why extern functions only take
 scalars. Scalars and pointers are passed the C way, so a jihoo function whose
-parameters and result are integers of at least 32 bits, pointers or `unit` can
+parameters and result are floats, integers of at least 32 bits, pointers or `unit` can
 be handed to C as a callback (as `qsort`'s comparator, say).
 
 In a native module the program's functions are internal symbols named
