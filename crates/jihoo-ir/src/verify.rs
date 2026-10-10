@@ -61,8 +61,32 @@ pub fn verify(m: &Module) -> Result<(), String> {
         }
         for (t, is_ret) in e.params.iter().map(|t| (t, false)).chain([(&e.ret, true)]) {
             cx.check_type(t).map_err(|err| format!("in extern @{}: {err}", e.name))?;
-            if !types::c_compatible(t, is_ret) {
+            if !types::c_compatible(t, is_ret, &cx.c_structs()) {
                 return Err(format!("in extern @{}: {} cannot be passed to or from C", e.name, t.jir()));
+            }
+        }
+    }
+
+    // Exported functions: C symbols of their own, with C's types.
+    let mut exported = std::collections::HashSet::new();
+    for f in &m.funcs {
+        let Some(sym) = &f.export else { continue };
+        if !m.profile.is_compiled() {
+            return Err(format!("@{}: only native and freestanding functions can be exported to C", f.name));
+        }
+        if !exported.insert(sym.as_str()) {
+            return Err(format!("@{sym} is exported twice"));
+        }
+        if cx.externs.contains_key(sym.as_str()) {
+            return Err(format!("@{sym} is both exported and an extern function"));
+        }
+        // The backend defines the entry point under that name.
+        if sym == if m.profile == Profile::Native { "main" } else { "_start" } {
+            return Err(format!("@{}: `{sym}` cannot be exported", f.name));
+        }
+        for (t, is_ret) in f.params.iter().map(|t| (t, false)).chain([(&f.ret, true)]) {
+            if !types::c_compatible(t, is_ret, &cx.c_structs()) {
+                return Err(format!("exported @{}: {} cannot be passed to or from C", f.name, t.jir()));
             }
         }
     }
@@ -87,6 +111,11 @@ pub fn verify(m: &Module) -> Result<(), String> {
 }
 
 impl Cx<'_> {
+    /// The structs of the module, for [`types::c_compatible`].
+    fn c_structs(&self) -> impl Fn(&str) -> Option<Vec<Type>> + '_ {
+        |name| Some(self.structs.get(name)?.fields.iter().map(|(_, t)| t.clone()).collect())
+    }
+
     /// The parameters, result, and whether it is variadic, of the function or
     /// extern function `name`.
     fn callee(&self, name: &str) -> Option<(&[Type], &Type, bool)> {
@@ -260,7 +289,7 @@ impl Cx<'_> {
                         } else {
                             args.iter().zip(params).try_for_each(|(a, t)| expect(a, t))?;
                             for a in &args[params.len()..] {
-                                if !types::c_compatible(ty(a)?, false) {
+                                if !types::c_compatible(ty(a)?, false, &|_| None) {
                                     return Err(at(format!("{} cannot be passed to C", ty(a)?.jir())));
                                 }
                             }

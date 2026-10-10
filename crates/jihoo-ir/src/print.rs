@@ -69,7 +69,11 @@ impl Display for Module {
 impl Display for Function {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let params = self.params.iter().map(|t| t.jir()).collect::<Vec<_>>().join(", ");
-        writeln!(f, "fn @{}({params}) -> {} {{", self.name, self.ret.jir())?;
+        write!(f, "fn @{}({params}) -> {}", self.name, self.ret.jir())?;
+        if let Some(sym) = &self.export {
+            write!(f, " export @{sym}")?;
+        }
+        writeln!(f, " {{")?;
         write!(f, "  regs")?;
         for t in &self.regs {
             write!(f, " {}", t.jir())?;

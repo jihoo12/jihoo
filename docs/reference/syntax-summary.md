@@ -12,6 +12,7 @@ attribute  = "#![" ("native" | "freestanding") "]"
 item       = "import" path ("as" NAME)?
            | "pub"? "fn" NAME "(" params ")" ("->" type)? block
            | "pub"? "extern" "fn" NAME "(" params ("," "...")? ")" ("->" type)?
+           | "pub"? "export" "fn" NAME "(" params ")" ("->" type)? block
            | "pub"? "struct" NAME ("(" params ")")? "{" ("pub"? NAME ":" type) sep* "}"
            | "pub"? "enum" NAME ("(" params ")")? "{" (NAME ("(" types ")")?) sep* "}"
            | "pub"? "const" NAME (":" type)? "=" expr
@@ -101,7 +102,7 @@ single  = "_" | NAME | INT | "-" INT | "true" | "false"
 
 ```text
 as      asm     break   cell      chan    comptime  const   continue
-else    enum    extern  false     fn      go        if      import
-let     macro   match   pub       quote   ref       return  select
-struct  true    while
+else    enum    export  extern    false   fn        go      if
+import  let     macro   match     pub     quote     ref     return
+select  struct  true    while
 ```

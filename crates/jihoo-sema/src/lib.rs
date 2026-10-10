@@ -210,9 +210,21 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
     // Only the C functions the program uses are part of it, so declaring a
     // library of them (`lib/libc.jh`) costs nothing and takes no names.
     externs.retain(|(_, e)| env.extern_used(&e.name));
-    // A C symbol and a jihoo function would share one JIR name.
+    // Exported functions are C symbols too, one definition each.
+    let mut exported: HashMap<&str, Pos> = HashMap::new();
+    for f in mods.iter().flat_map(|m| &m.program.funcs).filter(|f| f.is_export) {
+        if exported.insert(&f.name, f.pos).is_some() {
+            errors.push(Error::new(f.pos, format!("C symbol `{}` is exported twice", f.name)));
+        }
+        if externs.iter().any(|(_, e)| e.name == f.name) {
+            let msg = format!("`{}` is exported here and declared as an extern C function the program calls", f.name);
+            errors.push(Error::new(f.pos, msg));
+        }
+    }
+    // A C symbol and a jihoo function would share one JIR name (an exported
+    // one is reported above).
     for (pos, e) in &externs {
-        if funcs.iter().any(|f| f.name == e.name) {
+        if funcs.iter().any(|f| f.name == e.name) && !exported.contains_key(e.name.as_str()) {
             let msg = format!("C function `{}` has the same name as the function `{}`; rename the function", e.name, e.name);
             errors.push(Error::new(*pos, msg));
         }
@@ -439,7 +451,9 @@ impl<'a> FnCx<'a> {
         }
 
         self.block(&f.body)?;
-        self.finish(name, sig.ret.clone(), f.body.end)
+        let mut func = self.finish(name, sig.ret.clone(), f.body.end)?;
+        func.export = f.is_export.then(|| f.name.clone());
+        Ok(func)
     }
 
     /// Closes open blocks, drops unreachable ones, and builds the function.
@@ -477,7 +491,7 @@ impl<'a> FnCx<'a> {
             })
             .collect();
 
-        Ok(ir::Function { name: name.to_string(), params: self.sig.params.clone(), ret, regs: self.regs, blocks })
+        Ok(ir::Function { name: name.to_string(), export: None, params: self.sig.params.clone(), ret, regs: self.regs, blocks })
     }
 
     /// Blocks reachable from the entry, in breadth-first order (entry first).
@@ -1338,8 +1352,9 @@ impl<'a> FnCx<'a> {
                     let mut regs = self.call_args(pos, &format!("`{name}`"), &sig.params, fixed)?;
                     for a in rest {
                         let r = self.expr(a, None)?;
-                        if !ir::types::c_compatible(self.ty(r), false) {
-                            let msg = format!("{} cannot be passed to C; pass a pointer to it", self.ty(r));
+                        // Through `...` C takes only what fits a register.
+                        if !ir::types::c_compatible(self.ty(r), false, &|_| None) {
+                            let msg = format!("{} cannot be passed to C as a variable argument; pass a pointer to it", self.ty(r));
                             return Err(Error::new(a.pos, msg));
                         }
                         regs.push(r);

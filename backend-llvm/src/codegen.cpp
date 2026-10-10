@@ -15,15 +15,19 @@
 // a hidden `sret` pointer. Freestanding modules get weak `memcpy`/`memmove`/
 // `memset` definitions, since there is no libc to provide them.
 //
-// Native modules link with libc: `extern` functions are declared with the C
-// calling convention, the program's functions are named `jihoo.<name>` so they
-// cannot clash with C symbols, and C's `main` calls `jihoo.main`.
+// The program's functions are named `jihoo.<name>` so they cannot clash with C
+// symbols (but a freestanding `_start`). Native modules link with libc:
+// `extern` functions are declared with the C calling convention, structs
+// passed as the target's C ABI says (cabi.cpp), C's `main` calls `jihoo.main`,
+// and `print` calls the C library. An exported function gets a C function of
+// its own name that calls it.
 //
 // Array element access is bounds-checked and integer division is checked for a
 // zero divisor; both trap (`llvm.trap`) when the check fails. Raw pointer
 // arithmetic is not checked.
 
 #include "codegen.h"
+#include "cabi.h"
 
 #include <algorithm>
 #include <unordered_map>
@@ -228,6 +232,12 @@ InlineAsm *syscall_asm(LLVMContext &ctx, const Triple &triple, size_t nargs) {
   return InlineAsm::get(ty, insn, cons, /*hasSideEffects=*/true);
 }
 
+// A C function the module calls, and how its C signature passes its values.
+struct CFunc {
+  const jir::ExternFn *def;
+  cabi::Signature sig;
+};
+
 class FnGen {
  public:
   // `fns` holds every function and extern function by JIR name; `externs` says
@@ -235,8 +245,8 @@ class FnGen {
   // a freestanding `_start`). `native` modules link with libc.
   FnGen(const jir::Function &f, Function *llfn, Module &mod, const Types &types,
         const std::unordered_map<std::string, Function *> &fns,
-        const std::unordered_map<std::string, const jir::ExternFn *> &externs, const Triple &triple,
-        bool exit_on_return, bool native)
+        const std::unordered_map<std::string, CFunc> &externs, const Triple &triple, bool exit_on_return,
+        bool native)
       : f_(f), fn_(llfn), mod_(mod), types_(types), fns_(fns), externs_(externs), triple_(triple),
         exit_on_return_(exit_on_return), native_(native), ctx_(mod.getContext()), b_(ctx_), i64_(Type::getInt64Ty(ctx_)) {}
 
@@ -272,7 +282,7 @@ class FnGen {
   Module &mod_;
   const Types &types_;
   const std::unordered_map<std::string, Function *> &fns_;
-  const std::unordered_map<std::string, const jir::ExternFn *> &externs_;
+  const std::unordered_map<std::string, CFunc> &externs_;
   const Triple &triple_;
   bool exit_on_return_;
   bool native_;
@@ -305,31 +315,88 @@ class FnGen {
     if (!sret) store(inst.dst, result);
   }
 
-  // Calls C function `e` (declared as `fn`) with the operands of `inst`.
-  // Arguments past the fixed parameters get C's default promotions: bools and
-  // integers narrower than `int` widen to 32 bits, and `f32` to `f64`.
-  void call_extern(const jir::ExternFn &e, Function *fn, const jir::Inst &inst) {
+  // Calls C function `x` (declared as `fn`) with the operands of `inst`, as
+  // its C signature says. Arguments past the fixed parameters get C's default
+  // promotions: bools and integers narrower than `int` widen to 32 bits, and
+  // `f32` to `f64`.
+  void call_extern(const CFunc &x, Function *fn, const jir::Inst &inst) {
+    const jir::ExternFn &e = *x.def;
+    const cabi::Signature &s = x.sig;
     size_t n = inst.args.size();
     if (n < e.params.size() || (!e.variadic && n != e.params.size()))
       fail(f_.name, "wrong number of arguments to @" + e.name);
     std::vector<Value *> args;
+    // A struct result in memory: C writes it straight into the register.
+    if (s.ret.kind == cabi::Arg::Indirect) args.push_back(slot(inst.dst));
     for (size_t i = 0; i < n; i++) {
-      const jir::Type &t = type(inst.args[i]);
-      Value *v = load(inst.args[i]);
-      if (i >= e.params.size()) {
-        if (t.kind == jir::Type::Bool) v = b_.CreateZExt(v, b_.getInt32Ty());
-        else if (t.kind == jir::Type::Int && t.bits < 32) v = b_.CreateIntCast(v, b_.getInt32Ty(), t.is_signed);
-        else if (t.kind == jir::Type::Float && t.bits == 32) v = b_.CreateFPExt(v, b_.getDoubleTy());
-        else if (t.kind != jir::Type::Int && t.kind != jir::Type::Float && t.kind != jir::Type::Ptr && t.kind != jir::Type::Fn)
-          fail(f_.name, t.str() + " cannot be passed to C");
-      } else if (t != e.params[i]) {
-        fail(f_.name, "argument " + std::to_string(i + 1) + " to @" + e.name + " has the wrong type");
+      uint32_t r = inst.args[i];
+      const jir::Type &t = type(r);
+      if (i < e.params.size()) {
+        if (t != e.params[i]) fail(f_.name, "argument " + std::to_string(i + 1) + " to @" + e.name + " has the wrong type");
+        c_arg(s.params[i], r, args);
+        continue;
       }
+      Value *v = load(r);
+      if (t.kind == jir::Type::Bool) v = b_.CreateZExt(v, b_.getInt32Ty());
+      else if (t.kind == jir::Type::Int && t.bits < 32) v = b_.CreateIntCast(v, b_.getInt32Ty(), t.is_signed);
+      else if (t.kind == jir::Type::Float && t.bits == 32) v = b_.CreateFPExt(v, b_.getDoubleTy());
+      else if (t.kind != jir::Type::Int && t.kind != jir::Type::Float && t.kind != jir::Type::Ptr && t.kind != jir::Type::Fn)
+        fail(f_.name, t.str() + " cannot be passed to C");
       args.push_back(v);
     }
     CallInst *c = b_.CreateCall(fn->getFunctionType(), fn, args);
-    c->setAttributes(fn->getAttributes());  // the sign/zero extensions the C ABI wants
-    store(inst.dst, e.ret.kind == jir::Type::Unit ? unit() : c);
+    c->setAttributes(fn->getAttributes());  // extensions, `sret` and `byval`, as C wants
+    switch (s.ret.kind) {
+      case cabi::Arg::Direct: store(inst.dst, e.ret.kind == jir::Type::Unit ? unit() : c); return;
+      case cabi::Arg::Expand: {
+        // The struct comes back in registers, as `mem`.
+        Value *tmp = temp(s.ret.mem, type(inst.dst));
+        b_.CreateStore(c, tmp);
+        memcopy(slot(inst.dst), tmp, type(inst.dst));
+        return;
+      }
+      case cabi::Arg::Indirect: return;
+    }
+  }
+
+  // Adds the C arguments that pass register `r` as `a` says to `args`.
+  void c_arg(const cabi::Arg &a, uint32_t r, std::vector<Value *> &args) {
+    switch (a.kind) {
+      case cabi::Arg::Direct: args.push_back(load(r)); return;
+      case cabi::Arg::Expand: {
+        // The struct's bytes, read as the parts the registers take.
+        Value *tmp = temp(a.mem, type(r));
+        memcopy(tmp, slot(r), type(r));
+        if (a.parts.size() == 1) {
+          args.push_back(b_.CreateLoad(a.mem, tmp));
+        } else {
+          for (unsigned j = 0; j < a.parts.size(); j++)
+            args.push_back(b_.CreateLoad(a.parts[j], b_.CreateStructGEP(a.mem, tmp, j)));
+        }
+        return;
+      }
+      case cabi::Arg::Indirect:
+        if (a.byval) {
+          args.push_back(slot(r));  // LLVM copies it onto the stack
+        } else {
+          // The callee may change the copy, so it is not the register itself.
+          Value *copy = temp(types_.lower(type(r)), type(r));
+          memcopy(copy, slot(r), type(r));
+          args.push_back(copy);
+        }
+        return;
+    }
+  }
+
+  // A temporary of LLVM type `ty` that also holds a `t`, in the entry block (so
+  // a loop does not grow the stack).
+  AllocaInst *temp(Type *ty, const jir::Type &t) {
+    BasicBlock &entry = fn_->getEntryBlock();
+    IRBuilder<> eb(&entry, entry.getFirstInsertionPt());
+    AllocaInst *a = eb.CreateAlloca(ty);
+    const DataLayout &dl = mod_.getDataLayout();
+    a->setAlignment(std::max({a->getAlign(), dl.getABITypeAlign(types_.lower(t)), Align(8)}));
+    return a;
   }
 
   // `print %r` in a native module, through the C library's stdout: integers
@@ -685,7 +752,7 @@ class FnGen {
         auto it = fns_.find(inst.text);
         if (it == fns_.end()) fail(f_.name, "call to unknown function @" + inst.text);
         if (auto e = externs_.find(inst.text); e != externs_.end())
-          call_extern(*e->second, it->second, inst);
+          call_extern(e->second, it->second, inst);
         else
           call(it->second->getFunctionType(), it->second, inst, 0, "@" + inst.text);
         return;
@@ -1272,30 +1339,118 @@ Function *print_float_fn(Module &m) {
   return fn;
 }
 
-// Declares C function `e`, with the extensions the C ABI wants for narrow
-// integers and bools.
-Function *declare_extern(Module &m, const Types &types, const jir::ExternFn &e) {
-  LLVMContext &ctx = m.getContext();
-  auto scalar = [&](const jir::Type &t) {
-    if (t.kind != jir::Type::Bool && t.kind != jir::Type::Int && t.kind != jir::Type::Float && t.kind != jir::Type::Ptr &&
-        t.kind != jir::Type::Fn)
-      throw CodegenError("extern @" + e.name + ": " + t.str() + " cannot be passed to or from C");
+// The extension the C ABI wants for a narrow integer or a bool.
+Attribute::AttrKind c_extension(const jir::Type &t) {
+  if (t.kind == jir::Type::Bool) return Attribute::ZExt;
+  if (t.kind == jir::Type::Int && t.bits < 32) return t.is_signed ? Attribute::SExt : Attribute::ZExt;
+  return Attribute::None;
+}
+
+// The C signature of a function with jihoo `params` and `ret`. Only scalars,
+// structs and a `unit` result reach here (the verifier checks).
+cabi::Signature c_signature(const Module &m, const Types &types, const Triple &triple, const std::vector<jir::Type> &params,
+                            const jir::Type &ret, bool variadic, const std::string &what) {
+  auto lower = [&](const jir::Type &t) -> Type * {
+    if (t.kind == jir::Type::Array || t.kind == jir::Type::Str || t.kind == jir::Type::Unit)
+      throw CodegenError(what + ": " + t.str() + " cannot be passed to or from C");
+    if (t.kind == jir::Type::Struct) types.struct_type(t.name);  // not an enum
     return types.lower(t);
   };
-  std::vector<Type *> params;
-  for (const auto &t : e.params) params.push_back(scalar(t));
-  Type *ret = e.ret.kind == jir::Type::Unit ? Type::getVoidTy(ctx) : scalar(e.ret);
-  auto *fn = Function::Create(FunctionType::get(ret, params, e.variadic), GlobalValue::ExternalLinkage, e.name, m);
+  std::vector<Type *> lowered;
+  for (const auto &t : params) lowered.push_back(lower(t));
+  return cabi::lower(triple, m.getDataLayout(), m.getContext(), lowered,
+                     ret.kind == jir::Type::Unit ? nullptr : lower(ret), variadic);
+}
+
+// The attributes C signature `s` puts on `fn`: extensions of narrow scalars,
+// `sret` for a result in memory and `byval` for structs copied onto the stack.
+void c_attributes(Function *fn, const cabi::Signature &s, const Types &types, const std::vector<jir::Type> &params,
+                  const jir::Type &ret) {
+  LLVMContext &ctx = fn->getContext();
+  if (s.ret.kind == cabi::Arg::Indirect)
+    fn->addParamAttr(0, Attribute::getWithStructRetType(ctx, types.lower(ret)));
+  else if (c_extension(ret) != Attribute::None)
+    fn->addRetAttr(c_extension(ret));
+  for (unsigned i = 0; i < params.size(); i++) {
+    const cabi::Arg &a = s.params[i];
+    if (a.kind == cabi::Arg::Indirect && a.byval) {
+      fn->addParamAttr(s.first[i], Attribute::getWithByValType(ctx, types.lower(params[i])));
+      fn->addParamAttr(s.first[i], Attribute::getWithAlignment(ctx, Align(8)));
+    } else if (a.kind == cabi::Arg::Direct && c_extension(params[i]) != Attribute::None) {
+      fn->addParamAttr(s.first[i], c_extension(params[i]));
+    } else if (a.kind == cabi::Arg::Expand && a.stack_align) {
+      for (unsigned j = 0; j < a.parts.size(); j++)
+        fn->addParamAttr(s.first[i] + j, Attribute::getWithStackAlignment(ctx, Align(a.stack_align)));
+    }
+  }
+}
+
+// Declares C function `e` with its C signature.
+CFunc declare_extern(Module &m, const Types &types, const Triple &triple, const jir::ExternFn &e, Function *&fn) {
+  cabi::Signature s = c_signature(m, types, triple, e.params, e.ret, e.variadic, "extern @" + e.name);
+  fn = Function::Create(s.type, GlobalValue::ExternalLinkage, e.name, m);
   if (fn->getName() != e.name) throw CodegenError("extern @" + e.name + " clashes with another symbol");
-  auto ext = [](const jir::Type &t) {
-    if (t.kind == jir::Type::Bool) return Attribute::ZExt;
-    if (t.kind == jir::Type::Int && t.bits < 32) return t.is_signed ? Attribute::SExt : Attribute::ZExt;
-    return Attribute::None;
+  c_attributes(fn, s, types, e.params, e.ret);
+  return {&e, s};
+}
+
+// Defines C function `f.export_name`, which takes its arguments the C way and
+// calls `jihoo_fn`, the program's function `f`, with them.
+void define_export(Module &m, const Types &types, const Triple &triple, const jir::Function &f, Function *jihoo_fn) {
+  const std::string &sym = f.export_name;
+  cabi::Signature s = c_signature(m, types, triple, f.params, f.ret, false, "exported @" + f.name);
+  if (m.getFunction(sym)) throw CodegenError("exported @" + f.name + ": the symbol `" + sym + "` is taken");
+  auto *fn = Function::Create(s.type, GlobalValue::ExternalLinkage, sym, m);
+  c_attributes(fn, s, types, f.params, f.ret);
+
+  LLVMContext &ctx = m.getContext();
+  IRBuilder<> b(BasicBlock::Create(ctx, "entry", fn));
+  const DataLayout &dl = m.getDataLayout();
+  // Room for a struct and the registers it came in, which may be a little larger.
+  auto temp = [&](Type *ty, const jir::Type &t) {
+    AllocaInst *a = b.CreateAlloca(ty);
+    a->setAlignment(std::max({a->getAlign(), dl.getABITypeAlign(types.lower(t)), Align(8)}));
+    return a;
   };
-  for (unsigned i = 0; i < e.params.size(); i++)
-    if (ext(e.params[i]) != Attribute::None) fn->addParamAttr(i, ext(e.params[i]));
-  if (ext(e.ret) != Attribute::None) fn->addRetAttr(ext(e.ret));
-  return fn;
+  std::vector<Value *> args;
+  Value *ret_tmp = nullptr;
+  if (Types::is_agg(f.ret)) {
+    // The program's function writes a struct result through a pointer: C's
+    // own, or a temporary to return the registers from.
+    if (s.ret.kind == cabi::Arg::Indirect) {
+      args.push_back(fn->getArg(0));
+    } else {
+      ret_tmp = temp(s.ret.mem, f.ret);
+      args.push_back(ret_tmp);
+    }
+  }
+  for (unsigned i = 0; i < f.params.size(); i++) {
+    const cabi::Arg &a = s.params[i];
+    Value *first = fn->getArg(s.first[i]);
+    switch (a.kind) {
+      case cabi::Arg::Direct: args.push_back(first); break;
+      case cabi::Arg::Indirect: args.push_back(first); break;  // the callee copies it
+      case cabi::Arg::Expand: {
+        // The registers, stored back as the struct's bytes.
+        Value *tmp = temp(a.mem, f.params[i]);
+        if (a.parts.size() == 1) {
+          b.CreateStore(first, tmp);
+        } else {
+          for (unsigned j = 0; j < a.parts.size(); j++)
+            b.CreateStore(fn->getArg(s.first[i] + j), b.CreateStructGEP(a.mem, tmp, j));
+        }
+        args.push_back(tmp);
+        break;
+      }
+    }
+  }
+  Value *result = b.CreateCall(jihoo_fn, args);
+  if (s.ret.kind == cabi::Arg::Expand)
+    b.CreateRet(b.CreateLoad(s.ret.mem, ret_tmp));
+  else if (s.ret.kind == cabi::Arg::Indirect || f.ret.kind == jir::Type::Unit)
+    b.CreateRetVoid();
+  else
+    b.CreateRet(result);
 }
 
 // Defines C's `int main(int argc, char **argv)`, which calls the program's
@@ -1333,21 +1488,21 @@ std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, co
 
   // Declare everything first so calls can refer to any function.
   std::unordered_map<std::string, Function *> fns;
-  std::unordered_map<std::string, const jir::ExternFn *> externs;
+  std::unordered_map<std::string, CFunc> externs;
   for (const auto &e : m.externs) {
     if (fns.count(e.name)) throw CodegenError("duplicate extern @" + e.name);
-    fns[e.name] = declare_extern(*mod, types, e);
-    externs[e.name] = &e;
+    externs.emplace(e.name, declare_extern(*mod, types, triple, e, fns[e.name]));
   }
   const std::string entry_name = native ? "main" : "_start";
   for (const auto &f : m.funcs) {
     if (fns.count(f.name)) throw CodegenError("duplicate function @" + f.name);
     bool is_start = !native && f.name == "_start";
-    // Natively, the program's own functions get a prefix so they cannot clash
-    // with C symbols (C's `main` is defined below and calls `jihoo.main`).
+    // The program's own functions get a prefix so they cannot clash with C
+    // symbols: C's `main` (defined below, calling `jihoo.main`), the C
+    // functions exported functions are defined as, and the C library's.
     auto *fn = Function::Create(types.signature(f),
                                 is_start ? GlobalValue::ExternalLinkage : GlobalValue::InternalLinkage,
-                                native ? "jihoo." + f.name : f.name, mod.get());
+                                is_start ? f.name : "jihoo." + f.name, mod.get());
     if (!native) {
       // No libc to fall back on: never turn loops into memcpy/memset calls.
       fn->addFnAttr("no-builtins");
@@ -1366,15 +1521,20 @@ std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, co
 
   for (const auto &f : m.funcs)
     FnGen(f, fns[f.name], *mod, types, fns, externs, triple, !native && f.name == "_start", native).run();
+  for (const auto &f : m.funcs)
+    if (!f.export_name.empty()) define_export(*mod, types, triple, f, fns[f.name]);
   if (native) {
     define_c_main(*mod, fns["main"], *entry);
   } else {
-    for (const char *kind : {"memcpy", "memmove", "memset"}) define_mem_function(*mod, kind);
-    define_fmod(*mod, Type::getDoubleTy(ctx), "fmod");
-    define_fmod(*mod, Type::getFloatTy(ctx), "fmodf");
-    for (const char *kind : {"floor", "ceil", "trunc", "round"}) {
-      define_rounding(*mod, Type::getDoubleTy(ctx), kind);
-      define_rounding(*mod, Type::getFloatTy(ctx), kind);
+    // What the C library would define, unless the program exports its own.
+    auto missing = [&](const std::string &name) { return !mod->getFunction(name); };
+    for (const char *kind : {"memcpy", "memmove", "memset"})
+      if (missing(kind)) define_mem_function(*mod, kind);
+    if (missing("fmod")) define_fmod(*mod, Type::getDoubleTy(ctx), "fmod");
+    if (missing("fmodf")) define_fmod(*mod, Type::getFloatTy(ctx), "fmodf");
+    for (std::string kind : {"floor", "ceil", "trunc", "round"}) {
+      if (missing(kind)) define_rounding(*mod, Type::getDoubleTy(ctx), kind);
+      if (missing(kind + "f")) define_rounding(*mod, Type::getFloatTy(ctx), kind);
     }
   }
 

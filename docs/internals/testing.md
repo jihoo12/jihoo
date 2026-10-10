@@ -61,11 +61,21 @@ VM bug where a copy saw later updates of the original was found by about 1 in
 values above `i64::MAX` show it. Run a few thousand seeds after changing the
 VM or the backend.
 
-## Native output
+## Crossing into C
 
-`native_print_matches_the_vm` in `crates/jihoo-cli/tests/differential.rs`
-prints integers, text and some ten thousand floats natively and on the VM and
-compares them byte for byte.
+`crates/jihoo-cli/tests/differential.rs` also checks what crosses into C:
+`native_print_matches_the_vm` prints integers, text and some ten thousand
+floats natively and on the VM and compares them byte for byte, and
+`native_structs_cross_into_c` builds `tests/ffi/structs.jh` with
+`tests/ffi/structs.c`, which pass structs of every kind the C ABIs treat
+differently to each other by value, both ways. It runs for this machine; to
+run it for the other target too, give a C compiler and a way to run its
+programs:
+
+```sh
+JIHOO_CROSS_CC=aarch64-unknown-linux-gnu-gcc JIHOO_CROSS_RUN=qemu-aarch64 \
+  JIHOO_LLC=$PWD/backend-llvm/build/jihoo-llc cargo test --test differential structs
+```
 
 ## Backend tests
 

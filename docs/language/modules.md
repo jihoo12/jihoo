@@ -28,7 +28,7 @@ import names unqualified.
 ## Visibility
 
 Items are private to their module unless marked `pub`: `pub fn`, `pub struct`,
-`pub enum`, `pub const`, `pub macro`, `pub extern fn`. A `pub`
+`pub enum`, `pub const`, `pub macro`, `pub extern fn`, `pub export fn`. A `pub`
 enum's variants are public too. Using a private item from another module is an
 error that names it:
 

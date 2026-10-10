@@ -22,30 +22,53 @@ then links the result.
 
 ## What each profile gets
 
-- **Native.** The program's functions are internal symbols named
-  `jihoo.<name>`, so they never clash with C symbols. The module defines C's
-  `int main(int argc, char **argv)`, which calls `jihoo.main` and returns its
-  result truncated to `int` (0 for `unit`). `extern fn`s are external
-  declarations, called with the C calling convention. `print` calls the C
-  library: `printf` for integers, `puts` for bools and strings, and for floats
-  `jihoo.print_float`, which the module defines. It finds the shortest digits
-  that read back (`strtod`, `strtof`) from the exact digits `snprintf` gives,
-  rounding ties up as the VM does, so native and VM output agree to the byte.
-- **Freestanding.** `_start` is the only external symbol. Returning from it
-  makes the `exit` syscall (60 on x86_64, 93 on aarch64) with the result. The
-  module defines weak `memcpy`, `memmove`, `memset`, `fmod`, `fmodf`,
-  `floor`, `ceil`, `trunc`, `round` and their `f` forms, which LLVM may call
-  (on x86_64 without SSE4.1, the rounding intrinsics become calls), since
-  there is no libc to provide them.
+In both compiled profiles the program's functions are internal symbols named
+`jihoo.<name>`, so they never clash with C symbols, and each exported function
+is also an external C function of its own name (see below).
+
+- **Native.** The module defines C's `int main(int argc, char **argv)`, which
+  calls `jihoo.main` and returns its result truncated to `int` (0 for `unit`).
+  `extern fn`s are external declarations, called with the C calling
+  convention. `print` calls the C library: `printf` for integers, `puts` for
+  bools and strings, and for floats `jihoo.print_float`, which the module
+  defines. It finds the shortest digits that read back (`strtod`, `strtof`)
+  from the exact digits `snprintf` gives, rounding ties up as the VM does, so
+  native and VM output agree to the byte.
+- **Freestanding.** `_start` is the only external symbol besides exported
+  functions. Returning from it makes the `exit` syscall (60 on x86_64, 93 on
+  aarch64) with the result. The module defines weak `memcpy`, `memmove`,
+  `memset`, `fmod`, `fmodf`, `floor`, `ceil`, `trunc`, `round` and their `f`
+  forms, which LLVM may call (on x86_64 without SSE4.1, the rounding
+  intrinsics become calls), since there is no libc to provide them; an
+  exported function of one of those names takes its place.
 
 ## Calling convention
 
-Aggregates (structs, enums and arrays) are passed by pointer: the caller passes
-the address of its copy and the callee copies it into its own storage, and an
-aggregate result is written through a hidden first parameter. Scalars and
-pointers are passed the C way. This is why C functions only take scalars and
-pointers, and why jihoo functions with scalar signatures work as C callbacks.
-The details are in [JIR](../jir.md#native-abi).
+Between the program's own functions, aggregates (structs, enums and arrays)
+are passed by pointer: the caller passes the address of its copy and the callee
+copies it into its own storage, and an aggregate result is written through a
+hidden first parameter. Scalars and pointers are passed the C way, which is
+why jihoo functions with scalar signatures work as C callbacks. The details
+are in [JIR](../jir.md#native-abi).
+
+## The C ABI
+
+C passes structs by value its own way, which LLVM leaves to the compiler of
+the calling language, as clang does for C. `backend-llvm/src/cabi.cpp` decides
+it for each parameter and result of an `extern fn` or exported function, by
+the target's rules: on x86_64 (System V) by the class of each eightbyte of a
+struct of up to 16 bytes, with the free registers counted so a struct goes
+wholly in registers or wholly on the stack (`byval`); on aarch64 (AAPCS64) as
+up to four floats in SIMD registers (`[N x float]`), else up to 16 bytes in
+general registers (`i64`, `[2 x i64]`), else by pointer to a copy. Larger
+results go through `sret`.
+
+A call to C copies each struct into a temporary laid out as its registers and
+loads them from there, and stores a returned one back the same way. An
+exported function `f` gets a C function that does the reverse and calls
+`jihoo.f`. `tests/ffi/structs.jh` and `structs.c` pass every kind of struct
+both ways; the C signatures match what clang makes for the same C on both
+targets.
 
 ## Checks and traps
 

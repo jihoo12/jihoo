@@ -30,7 +30,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 1 | the first version that is bumped on change; the header must come first |
 | 2 | the `target` header |
 | 3 | `stringify`, and hygiene marks in the code `quote` builds |
-| 4 | float operations (`sqrt`, `floor`, `ceil`, `trunc`, `round`, `abs`, `copysign`) and `bitcast`; `print` in native modules |
+| 4 | float operations (`sqrt`, `floor`, `ceil`, `trunc`, `round`, `abs`, `copysign`) and `bitcast`; `print` in native modules; structs to and from C by value, and `export` |
 
 ## Example
 
@@ -95,8 +95,8 @@ fn ...                               ; zero or more functions
 | profile        | runs on        | GC  | allowed builtins | pointers | C functions |
 |----------------|----------------|-----|------------------|----------|-------------|
 | `hosted`       | VM             | yes | `print`, `to_str` | no      | no          |
-| `native`       | LLVM + libc    | no  | `print`, `syscall`, `asm` | yes | `extern`    |
-| `freestanding` | LLVM, no libc  | no  | `syscall`, `asm` | yes      | no          |
+| `native`       | LLVM + libc    | no  | `print`, `syscall`, `asm` | yes | `extern`, `export` |
+| `freestanding` | LLVM, no libc  | no  | `syscall`, `asm` | yes      | `export`    |
 
 The target is the machine the module was made for: its `syscall` numbers and
 `asm` are that machine's, since the frontend picked per-target modules for it
@@ -120,15 +120,18 @@ extern @printf(*u8, ...) -> i32
 A C function the module calls, by its symbol name, with the C calling
 convention. `call` and `funcref` name it like any other function, and a module
 cannot have a function and an extern function of the same name. Its parameter
-and result types are integers, floats, `bool`, pointers and function types made of
-those, and a `unit` result (C's `void`); structs, enums and arrays go by
-pointer. Integers narrower than 32 bits and bools are sign- or zero-extended as
-the C ABI requires.
+and result types are *C types*: integers, floats, `bool`, pointers, function
+types taking and returning those, structs whose fields are those (or arrays of
+them, or such structs; at least one field), and a `unit` result (C's `void`).
+Enums and arrays go by pointer. Integers narrower than 32 bits and bools are
+sign- or zero-extended as the C ABI requires, and structs are passed and
+returned as the target's C ABI says ([Native ABI](#native-abi)).
 
 With `...`, the function takes more arguments after the listed ones, like
 `printf`. A `call` may pass any integer, float, `bool`, pointer or function value
 there, and they get C's default promotions (bools and integers narrower than 32
-bits widen to 32, `f32` to `f64`). A variadic extern cannot be a `funcref`.
+bits widen to 32, `f32` to `f64`). Structs cannot go there. A variadic extern
+cannot be a `funcref`.
 
 ## Types
 
@@ -208,6 +211,20 @@ bb0:
   `%0 .. %(params-1)`.
 - Blocks are numbered `bb0, bb1, ...` in order. `bb0` is the entry block.
 - Every block ends with exactly one terminator.
+
+### Exported functions
+
+```
+fn @geo.area($Rect) -> f64 export @rect_area {
+```
+
+In a native or freestanding module, `export @sym` after the result type also
+defines the function as the C function `sym`, which C code linked with the
+program can call with the C calling convention. The function is still called
+from JIR by its own name. Its parameter and result types are C types, as for
+[extern functions](#extern-functions); a symbol is exported once, is not also an
+extern function, and is not the entry point (`main` natively, `_start`
+freestanding).
 
 Registers are **not** SSA: a register may be written more than once (the frontend
 maps each `let` variable to one register), but always with values of its declared
@@ -386,25 +403,45 @@ arguments. The frontend names the functions it lifts out of anonymous functions
 
 ## Native ABI
 
-`jihoo-llc` passes aggregates (structs and arrays) by pointer: the caller passes
-the address of its copy and the callee copies it into its own storage, and an
-aggregate result is written through a hidden first parameter. Aggregates are
-moved with `memcpy`; a freestanding module defines weak `memcpy`, `memmove`,
-`memset`, `fmod` and `fmodf` (which float `rem` becomes), and `floor`, `ceil`,
-`trunc`, `round` and their `f` forms (which LLVM calls where the machine has
-no instruction for them), because it has no libc; a native one uses libc's and
-libm's.
+Between the program's own functions, `jihoo-llc` passes aggregates (structs
+and arrays) by pointer: the caller passes the address of its copy and the
+callee copies it into its own storage, and an aggregate result is written
+through a hidden first parameter. Aggregates are moved with `memcpy`; a
+freestanding module defines weak `memcpy`, `memmove`, `memset`, `fmod` and
+`fmodf` (which float `rem` becomes), and `floor`, `ceil`, `trunc`, `round` and
+their `f` forms (which LLVM calls where the machine has no instruction for
+them), because it has no libc; a native one uses libc's and libm's.
 
-This is not the C ABI for aggregates, which is why extern functions only take
-scalars. Scalars and pointers are passed the C way, so a jihoo function whose
-parameters and result are floats, integers of at least 32 bits, pointers or `unit` can
-be handed to C as a callback (as `qsort`'s comparator, say).
+Scalars and pointers are passed the C way, so a jihoo function whose
+parameters and result are floats, integers of at least 32 bits, pointers or
+`unit` can be handed to C as a callback (as `qsort`'s comparator, say).
 
-In a native module the program's functions are internal symbols named
-`jihoo.<name>`, so they never clash with C symbols, and the module defines C's
-`int main(int argc, char **argv)`, which calls `jihoo.main` and returns its
-result truncated to `int` (0 for `unit`). Native objects are position
-independent, since the C compiler that links them usually makes a PIE.
+### The C ABI
+
+Calls to extern functions and the C functions of exported ones follow the
+target's C ABI, structs included, as a C compiler would:
+
+- **x86_64** (System V): a struct of at most 16 bytes is split into
+  eightbytes. One holding only floats goes in an SSE register, any other in a
+  general register; if the registers a struct needs are not all free, the whole
+  struct goes on the stack. Larger structs go on the stack (`byval`), and a
+  larger result is written through a pointer the caller passes first.
+- **aarch64** (AAPCS64): a struct of one to four floats of one type goes in as
+  many SIMD registers; any other struct of at most 16 bytes in one or two
+  general registers. A larger struct is passed as a pointer to a copy the
+  caller makes, and a larger result is written through a pointer in `x8`.
+
+An exported function's C function takes its arguments that way and calls the
+program's function with them.
+
+### Symbols
+
+The program's functions are internal symbols named `jihoo.<name>`, so they
+never clash with C symbols, except a freestanding module's `_start`. An
+exported function is also the external symbol it exports. A native module
+defines C's `int main(int argc, char **argv)`, which calls `jihoo.main` and
+returns its result truncated to `int` (0 for `unit`). Native objects are
+position independent, since the C compiler that links them usually makes a PIE.
 
 ## Planned
 

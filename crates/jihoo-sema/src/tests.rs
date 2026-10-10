@@ -1314,10 +1314,12 @@ fn native_programs_call_c() {
 fn extern_rules() {
     assert!(err("extern fn puts(s: *u8) -> i32\nfn main() {}").contains("need native mode"));
     assert!(err("#![freestanding]\nextern fn puts(s: *u8) -> i32\nfn _start() {}").contains("need native mode"));
-    let e = err(&native("struct P { x: i64 }\nextern fn f(p: P)"));
-    assert!(e.contains("cannot be passed to C; pass a pointer"), "{e}");
-    assert!(err(&native("extern fn f() -> [u8; 4]")).contains("cannot be returned from C"));
-    assert!(err(&native("extern fn f(cb: fn([u8; 2]))")).contains("cannot be passed to C"));
+    // Structs go by value (see `structs_cross_into_c_by_value`); arrays and
+    // enums by pointer.
+    let e = err(&native("enum P { A }\nextern fn f(p: P)"));
+    assert!(e.contains("cannot be passed to or from C; pass a pointer"), "{e}");
+    assert!(err(&native("extern fn f() -> [u8; 4]")).contains("cannot be returned to or from C"));
+    assert!(err(&native("extern fn f(cb: fn([u8; 2]))")).contains("cannot be passed to or from C"));
     let e = err(&native("struct P { x: i64 }\nextern fn printf(fmt: *u8, ...) -> i32\nfn f() { printf(\"\", P { x: 1 }) }"));
     assert!(e.contains("cannot be passed to C"), "{e}");
     assert!(err(&native("extern fn puts(s: *u8) -> i32\nfn f() { puts(1) }")).contains("must be *u8, found i64"));
@@ -1416,4 +1418,40 @@ fn float_builtins() {
     let mut out = Vec::new();
     jihoo_vm::run(&m, &mut out).unwrap();
     assert_eq!(String::from_utf8(out).unwrap(), "103.0\n");
+}
+
+#[test]
+fn structs_cross_into_c_by_value() {
+    // Structs of scalars, arrays and structs go by value, to C and back.
+    let src = "struct P { x: f64, y: f64 }\nstruct Q { p: P, tag: [u8; 3], next: *Q, f: fn(i32) -> i32 }\n\
+               extern fn move(p: P, q: Q) -> Q\n\
+               export fn mid(a: P, b: P) -> P { return P { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } }\n\
+               fn f() { let p = mid(P { x: 1, y: 2 }, P { x: 3, y: 4 }) }";
+    let m = check(&native(src)).unwrap();
+    assert_eq!(m.func("mid").unwrap().export.as_deref(), Some("mid"));
+    assert!(m.to_string().contains("fn @mid($P, $P) -> $P export @mid {"), "{m}");
+    check(&fs("struct P { x: i32 }\nexport fn get(p: P) -> i32 { return p.x }")).unwrap();
+    // C has no enums or empty structs, and through `...` only scalars go.
+    let e = err(&native("enum E { A, B }\nstruct S { e: E }\nextern fn f(s: S)"));
+    assert!(e.contains("S cannot be passed to or from C"), "{e}");
+    assert!(err(&native("struct S {}\nextern fn f() -> S")).contains("S cannot be returned to or from C"));
+    assert!(err(&native("struct S { f: fn(S) }\nexport fn f(s: S) {}")).contains("cannot be passed to or from C"));
+    let e = err(&native("struct P { x: i32 }\nextern fn printf(fmt: *u8, ...) -> i32\nfn f() { printf(\"\", P { x: 1 }) }"));
+    assert!(e.contains("P cannot be passed to C as a variable argument"), "{e}");
+    // Exported functions are compiled, named once, and not the entry point.
+    assert!(err("export fn f() {}\nfn main() {}").contains("need native or freestanding mode"));
+    assert!(err(&native("export fn g(comptime n: i64) {}")).contains("cannot have `comptime` parameters"));
+    assert!(err("#![native]\nexport fn main() {}").contains("`main` is the program's entry point and cannot be exported"));
+    let e = check_files(&[
+        ("main.jh", "#![native]\nimport a\nexport fn twice(x: i32) -> i32 { return x * 2 }\nfn main() {}"),
+        ("a.jh", "pub export fn twice(x: i32) -> i32 { return x + x }"),
+    ])
+    .unwrap_err();
+    assert!(e.contains("C symbol `twice` is exported twice"), "{e}");
+    let e = check_files(&[
+        ("main.jh", "#![native]\nimport c\nexport fn puts(s: *u8) -> i32 { return 0 }\nfn main() { c.puts(\"hi\") }"),
+        ("c.jh", "pub extern fn puts(s: *u8) -> i32"),
+    ])
+    .unwrap_err();
+    assert!(e.contains("`puts` is exported here and declared as an extern C function the program calls"), "{e}");
 }

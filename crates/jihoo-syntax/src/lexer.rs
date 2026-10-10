@@ -41,6 +41,7 @@ pub enum Tok {
     Import,
     Pub,
     Extern,
+    Export,
 
     LParen,
     RParen,
@@ -425,6 +426,7 @@ impl<'a> Lexer<'a> {
                     "import" => Tok::Import,
                     "pub" => Tok::Pub,
                     "extern" => Tok::Extern,
+                    "export" => Tok::Export,
                     _ => Tok::Ident(word.to_string()),
                 }
             }

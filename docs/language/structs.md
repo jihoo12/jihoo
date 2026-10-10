@@ -89,7 +89,8 @@ const H = size_of(Header)    // 16: 1 byte, 3 padding, 4, then 8
 ```
 
 A struct whose layout matches a C struct can be shared with C through a
-pointer ([Calling C](calling-c.md)). Types containing `str`, `ref`, `cell` or
+pointer, or passed to and returned from C functions by value
+([Calling C](calling-c.md#structs-by-value)). Types containing `str`, `ref`, `cell` or
 `chan` exist only on the VM and have no layout.
 
 ## Equality

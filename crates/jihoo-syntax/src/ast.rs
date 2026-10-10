@@ -98,6 +98,9 @@ pub struct FnDecl {
     pub is_extern: bool,
     /// An extern function ending in `...`, like `printf`.
     pub variadic: bool,
+    /// `export fn name(...)`: also callable from C, as the symbol `name`, with
+    /// the C calling convention (native and freestanding).
+    pub is_export: bool,
     pub name: String,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,

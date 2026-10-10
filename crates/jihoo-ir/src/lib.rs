@@ -175,6 +175,9 @@ pub struct EnumDef {
 #[derive(Debug, Clone)]
 pub struct Function {
     pub name: String,
+    /// Native and freestanding only: the C symbol this function is also
+    /// defined as, for C to call with the C calling convention (`export fn`).
+    pub export: Option<String>,
     pub params: Vec<Type>,
     pub ret: Type,
     /// Type of every register. Arguments arrive in `%0 .. %(params-1)`, so this

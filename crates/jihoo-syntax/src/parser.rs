@@ -297,22 +297,22 @@ impl Parser {
                     macro_calls.push(ItemMacro { pos, name, args });
                 }
                 Tok::Import => imports.push(self.import()?),
-                Tok::Fn | Tok::Macro | Tok::Extern => funcs.push(self.fn_decl(false)?),
+                Tok::Fn | Tok::Macro | Tok::Extern | Tok::Export => funcs.push(self.fn_decl(false)?),
                 Tok::Struct | Tok::Enum => structs.push(self.struct_decl(false)?),
                 Tok::Const => consts.push(self.const_decl(false)?),
                 Tok::Pub => {
                     self.bump();
                     match self.peek() {
-                        Tok::Fn | Tok::Macro | Tok::Extern => funcs.push(self.fn_decl(true)?),
+                        Tok::Fn | Tok::Macro | Tok::Extern | Tok::Export => funcs.push(self.fn_decl(true)?),
                         Tok::Struct | Tok::Enum => structs.push(self.struct_decl(true)?),
                         Tok::Const => consts.push(self.const_decl(true)?),
-                        _ => return Err(self.unexpected("`fn`, `extern`, `macro`, `struct`, `enum` or `const` after `pub`")),
+                        _ => return Err(self.unexpected("`fn`, `extern`, `export`, `macro`, `struct`, `enum` or `const` after `pub`")),
                     }
                 }
                 Tok::InnerAttr(_) => {
                     return Err(Error::new(self.pos(), "`#![...]` must come before any item"))
                 }
-                _ => return Err(self.unexpected("`fn`, `extern`, `macro`, `struct`, `enum`, `const` or `import`")),
+                _ => return Err(self.unexpected("`fn`, `extern`, `export`, `macro`, `struct`, `enum`, `const` or `import`")),
             }
         }
         Ok(Program { attrs: vec![], imports, structs, consts, funcs, macro_calls })
@@ -409,14 +409,18 @@ impl Parser {
         Ok(StructDecl { pos, is_pub, name, params, fields, variants: None })
     }
 
-    /// `fn`, `macro`, or `extern fn` (a C function: no body, and `...` may end
-    /// its parameters).
+    /// `fn`, `macro`, `extern fn` (a C function: no body, and `...` may end its
+    /// parameters) or `export fn` (a function C may call).
     fn fn_decl(&mut self, is_pub: bool) -> PResult<FnDecl> {
         let is_macro = *self.peek() == Tok::Macro;
         let is_extern = *self.peek() == Tok::Extern;
-        let pos = self.bump().pos; // `fn`, `macro` or `extern`
+        let is_export = *self.peek() == Tok::Export;
+        let pos = self.bump().pos; // `fn`, `macro`, `extern` or `export`
         if is_extern {
             self.expect(&Tok::Fn, "`fn` after `extern`")?;
+        }
+        if is_export {
+            self.expect(&Tok::Fn, "`fn` after `export`")?;
         }
         let (_, name) = self.ident("function name")?;
         self.expect(&Tok::LParen, "`(`")?;
@@ -444,10 +448,10 @@ impl Parser {
         let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
         if is_extern {
             let body = Block { stmts: vec![], end: pos };
-            return Ok(FnDecl { pos, is_pub, is_macro, is_extern, variadic, name, params, ret, body });
+            return Ok(FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, body });
         }
         let body = self.block()?;
-        Ok(FnDecl { pos, is_pub, is_macro, is_extern, variadic, name, params, ret, body })
+        Ok(FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, body })
     }
 
     fn type_expr(&mut self) -> PResult<TypeExpr> {
@@ -1336,6 +1340,7 @@ fn punct(t: &Tok) -> &'static str {
         Tok::Import => "import",
         Tok::Pub => "pub",
         Tok::Extern => "extern",
+        Tok::Export => "export",
         Tok::Ellipsis => "...",
         Tok::Dollar => "$",
         Tok::LParen => "(",

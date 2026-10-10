@@ -39,7 +39,7 @@ fn _start() -> i64 {
 | memory          | GC, managed by the VM   | manual (`malloc`, or `alloc`)  | manual (`alloc` over `mmap`)      |
 | string literals | `str`                   | `*u8`, NUL-terminated          | `*u8`, NUL-terminated             |
 | output          | `print`                 | `print`, or C (`libc.printf`)  | `syscall` (`io.puts`)             |
-| C functions     | no                      | `extern fn`, C files, `-l`     | no                                |
+| C functions     | no                      | `extern fn`, `export fn`, C files, `-l` | `export fn`              |
 | pointers        | no                      | `*T`, `&x`, `*p`, `p[i]`       | `*T`, `&x`, `*p`, `p[i]`          |
 | syscalls / asm  | no                      | yes                            | yes                               |
 | `ref`, `cell`, tasks, capturing closures | yes | no                  | no                                |

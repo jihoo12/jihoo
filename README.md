@@ -109,19 +109,19 @@ nix build
 
 v0. In every profile: static types with local inference; `bool`, `i8`…`u64`
 and `f32`/`f64`, with exact float builtins (`sqrt`, `floor`, `round`, ...);
-structs, bounds-checked arrays and enums with `match`;
-function values; generic functions and structs; modules with private items
-and fields; compile-time
+structs, bounds-checked arrays and enums with `match`; function values; generic
+functions and structs; modules with private items and fields; compile-time
 evaluation (`const`, `comptime`) and macros, both run on the VM.
 
 - **hosted:** `str`, `print`, `ref` for recursive data, `cell` for shared
   state, closures, tasks with channels and `select`.
 - **native and freestanding:** pointers, `syscall` and inline asm, for x86_64
   and aarch64 Linux (`--target` builds for either, and modules can have one
-  file per target); closures passed to `comptime` parameters; the `alloc`,
-  `io` and `sys` libraries.
+  file per target); closures passed to `comptime` parameters; functions C can
+  call (`export fn`); the `alloc`, `io` and `sys` libraries.
 - **native:** `print`; C functions through `extern fn` and the `libc` module,
-  C files and libraries linked in; the `coro` library.
+  structs passed to C by value, C files and libraries linked in; the `coro`
+  library.
 
 See the [examples](examples) and the [roadmap](docs/internals/roadmap.md).
 

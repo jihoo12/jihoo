@@ -380,3 +380,44 @@ fn native_print_matches_the_vm() {
     assert_eq!(vm, nat);
     std::fs::remove_dir_all(&work).unwrap();
 }
+
+/// Structs cross into C by value both ways, as each target's C ABI says:
+/// `tests/ffi/structs.jh` calls the C functions of `tests/ffi/structs.c`, and
+/// they call its exported functions back. With `JIHOO_CROSS_CC` (a C compiler
+/// for the other target) and `JIHOO_CROSS_RUN` (a way to run its programs,
+/// such as `qemu-aarch64`), it runs for the other target too.
+#[test]
+fn native_structs_cross_into_c() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let work = common::work_dir("ffi-structs");
+    let ffi = repo_root().join("tests/ffi");
+    let bin = work.join("structs");
+    let status =
+        Command::new(JIHOO).arg("build").arg(ffi.join("structs.jh")).arg(ffi.join("structs.c")).arg("-o").arg(&bin).status().unwrap();
+    assert!(status.success());
+    let out = Command::new(&bin).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "the check with this number failed");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ok\n");
+
+    if let (Some(cc), Some(run)) = (std::env::var_os("JIHOO_CROSS_CC"), std::env::var_os("JIHOO_CROSS_RUN")) {
+        let other = if cfg!(target_arch = "aarch64") { "x86_64" } else { "aarch64" };
+        let cross = work.join("structs-cross");
+        let status = Command::new(JIHOO)
+            .args(["build", "--target", other])
+            .arg(ffi.join("structs.jh"))
+            .arg(ffi.join("structs.c"))
+            .arg("-o")
+            .arg(&cross)
+            .env("JIHOO_CC", cc)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let out = Command::new(run).arg(&cross).output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "on {other}, the check with this number failed");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "ok\n");
+    }
+    std::fs::remove_dir_all(&work).unwrap();
+}

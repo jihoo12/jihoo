@@ -162,6 +162,7 @@ struct Block {
 
 struct Function {
   std::string name;
+  std::string export_name;  // the C symbol it is also defined as, or empty
   std::vector<Type> params;
   Type ret;
   std::vector<Type> regs;  // starts with the parameter types

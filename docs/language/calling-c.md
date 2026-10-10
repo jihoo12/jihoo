@@ -29,9 +29,9 @@ declarations such as `lib/libc.jh` costs nothing.
 
 ## Types across the boundary
 
-Only numbers, `bool`, pointers and function types made of those cross into C,
-and `unit` as C's `void`. Structs, enums and arrays go by pointer (`&p`), since
-each C ABI passes them by value differently.
+Numbers, `bool`, pointers, function types made of those, and structs of those
+cross into C, and `unit` as C's `void`. Enums, which C does not have, and arrays
+go by pointer (`&p`).
 
 | C | jihoo |
 |---|-------|
@@ -43,13 +43,69 @@ each C ABI passes them by value differently.
 | `T *` | `*T` |
 | `void *` | `*u8` |
 | `void` (result) | no `-> R` |
+| `struct { ... }` | a struct with the same fields, in order |
 
 String literals are already NUL-terminated `*u8`s, so they can be passed
 directly.
 
 Arguments past `...` get C's default promotions: narrow integers and bools
 widen to 32 bits, and `f32` to `f64`. So pass an `i64` with `%ld`, and an
-`i32` with `%d`.
+`i32` with `%d`. Structs cannot be passed through `...`.
+
+## Structs by value
+
+A struct whose fields are numbers, `bool`s, pointers, function types, arrays of
+those or such structs is a C struct: it has C's layout
+([Structs](structs.md#layout)), and it is passed to and returned from C by
+value, the way the target's C ABI says. A small struct goes in registers, a
+large one in memory, and the backend does what a C compiler does for both
+targets ([JIR](../jir.md#the-c-abi)).
+
+```c
+// geo.c
+typedef struct { double x, y; } Vec2;
+Vec2 vec2_scale(Vec2 v, double k) { return (Vec2){v.x * k, v.y * k}; }
+```
+
+```jihoo
+#![native]
+struct Vec2 { x: f64, y: f64 }
+
+extern fn vec2_scale(v: Vec2, k: f64) -> Vec2
+
+fn main() {
+    let v = vec2_scale(Vec2 { x: 1.5, y: -2.0 }, 4.0)
+    print(v.x + v.y)        // -2.0
+}
+```
+
+A struct must have at least one field: C has no empty structs.
+
+## Exporting functions
+
+`export fn` defines a function that C code linked with the program can call, as
+the C function of the same name:
+
+```jihoo
+#![native]
+struct Vec2 { x: f64, y: f64 }
+
+export fn vec2_len2(v: Vec2) -> f64 {
+    return v.x * v.x + v.y * v.y
+}
+```
+
+```c
+typedef struct { double x, y; } Vec2;
+double vec2_len2(Vec2 v);      // defined by the jihoo program
+```
+
+Its parameters and result are C types, as for `extern fn`, and it cannot have
+`comptime` parameters. Inside the program it is an ordinary function. Each
+symbol is exported once in a program, cannot also be declared `extern fn` and
+called, and the entry point (`main`, `_start`) cannot be exported. `export fn`
+works in freestanding programs too, whose objects can then be linked into
+other code.
 
 ## Callbacks
 
@@ -87,9 +143,9 @@ compiler, `cc` unless `JIHOO_CC` names another ([Command line](../reference/comm
 ## Limits
 
 - C functions cannot run at compile time: `comptime` and macros run on the VM.
-- Structs cannot be passed to or returned from C by value yet, and jihoo
-  functions cannot be exported under C names; both are on the
-  [roadmap](../internals/roadmap.md).
+- A function value handed to C (a callback) takes and returns scalars only:
+  it uses jihoo's own calling convention, which passes structs by pointer.
+  Export a function to pass structs by value to it from C.
 - `print` and `libc.printf` write to the same buffered `stdout`, so they can be
   mixed.
 

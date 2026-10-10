@@ -307,16 +307,46 @@ pub fn struct_name_jir(name: &str) -> String {
     out
 }
 
+/// The field types of struct `name`, for [`c_compatible`]; `None` if there is
+/// no such struct. `&|_| None` allows no structs at all.
+pub type CStructs<'a> = dyn Fn(&str) -> Option<Vec<Type>> + 'a;
+
 /// Whether values of type `t` can be passed to or from C, as a parameter or
-/// (with `is_ret`) the result of an `extern fn`: integers, bools, pointers, and
-/// functions taking and returning those. Structs, enums and arrays are passed
-/// differently by every C ABI, so they cross by pointer.
-pub fn c_compatible(t: &Type, is_ret: bool) -> bool {
+/// (with `is_ret`) the result of an `extern fn` or `export fn`: integers,
+/// floats, bools, pointers, functions taking and returning those, and structs
+/// of those (and of arrays of them and of such structs), by value, laid out
+/// and passed as the target's C ABI says. Enums, which C does not have, and
+/// empty structs, which it does not allow, cross by pointer.
+pub fn c_compatible(t: &Type, is_ret: bool, structs: &CStructs<'_>) -> bool {
     match t {
         Type::Unit => is_ret,
+        Type::Struct(name) => c_struct(name, structs, 0),
+        _ => c_scalar(t),
+    }
+}
+
+/// A type C passes in one register. A function type is one of C's function
+/// pointers, so it takes and returns only these.
+fn c_scalar(t: &Type) -> bool {
+    match t {
         Type::Bool | Type::Int(_) | Type::Float(_) | Type::Ptr(_) => true,
-        Type::Fn(params, ret) => params.iter().all(|p| c_compatible(p, false)) && c_compatible(ret, true),
+        Type::Fn(params, ret) => params.iter().all(c_scalar) && (**ret == Type::Unit || c_scalar(ret)),
         _ => false,
+    }
+}
+
+/// `depth` stops at structs that contain themselves, which are errors of
+/// their own.
+fn c_struct(name: &str, structs: &CStructs<'_>, depth: u32) -> bool {
+    let Some(fields) = structs(name) else { return false };
+    depth < 64 && !fields.is_empty() && fields.iter().all(|f| c_field(f, structs, depth + 1))
+}
+
+fn c_field(t: &Type, structs: &CStructs<'_>, depth: u32) -> bool {
+    match t {
+        Type::Struct(name) => c_struct(name, structs, depth),
+        Type::Array(elem, n) => *n > 0 && c_field(elem, structs, depth),
+        _ => c_scalar(t),
     }
 }
 

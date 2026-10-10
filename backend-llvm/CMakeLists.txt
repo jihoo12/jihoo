@@ -12,6 +12,7 @@ add_executable(jihoo-llc
   src/main.cpp
   src/jir_parser.cpp
   src/codegen.cpp
+  src/cabi.cpp
 )
 
 target_include_directories(jihoo-llc SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})

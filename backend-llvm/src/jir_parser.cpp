@@ -558,6 +558,13 @@ Module parse(const std::string &text) {
         l.punct(")");
         l.punct("->");
         fn->ret = l.type();
+        // `export @sym`: also defined as C function `sym`.
+        if (!l.done() && l.toks[l.i].kind == TokKind::Word && l.toks[l.i].text == "export") {
+          l.i++;
+          const Tok &sym = l.next("a C symbol");
+          if (sym.kind != TokKind::Global) fail(no, "expected a C symbol like @name after `export`");
+          fn->export_name = sym.text;
+        }
         l.punct("{");
         need_regs = true;
       } else {

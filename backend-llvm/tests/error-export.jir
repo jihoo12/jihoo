@@ -1,0 +1,18 @@
+; The entry point's symbol cannot be exported.
+; expect: error the symbol `_start` is taken
+jir 4
+profile freestanding
+
+fn @f() -> unit export @_start {
+  regs unit
+bb0:
+  %0 = unit
+  ret %0
+}
+
+fn @_start() -> unit {
+  regs unit
+bb0:
+  %0 = unit
+  ret %0
+}

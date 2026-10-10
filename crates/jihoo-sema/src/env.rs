@@ -177,6 +177,17 @@ impl<'p> Env<'p> {
                 } else if f.is_extern && f.name == "main" {
                     errors.push(Error::new(f.pos, "`main` is the program's own entry point and cannot be extern"));
                 }
+                if f.is_export {
+                    if !profile.is_compiled() {
+                        let msg = "exported functions are called by C code, so they need native or freestanding mode";
+                        errors.push(Error::new(f.pos, msg));
+                    } else if f.name == profile.entry() {
+                        let msg = format!("`{}` is the program's entry point and cannot be exported", f.name);
+                        errors.push(Error::new(f.pos, msg));
+                    } else if let Some(p) = f.params.iter().find(|p| p.comptime) {
+                        errors.push(Error::new(p.pos, "exported functions cannot have `comptime` parameters"));
+                    }
+                }
                 if is_builtin(&f.name) {
                     errors.push(Error::new(f.pos, format!("`{}` is a builtin and cannot be redefined", f.name)));
                 } else if env.fn_decls.insert(env.item_key(m, &f.name), (m, f)).is_some() {
@@ -711,15 +722,19 @@ impl<'p> Env<'p> {
                         }
                     }
                 }
-                if decl.is_extern {
+                if decl.is_extern || decl.is_export {
+                    let structs = |s: &str| {
+                        let fields = self.struct_fields(decl.pos, s).ok()?;
+                        Some(fields.iter().map(|(_, t)| t.clone()).collect())
+                    };
                     for (p, t) in decl.params.iter().zip(&params) {
-                        if !ir::types::c_compatible(t, false) {
-                            let msg = format!("{t} cannot be passed to C; pass a pointer to it");
+                        if !ir::types::c_compatible(t, false, &structs) {
+                            let msg = format!("{t} cannot be passed to or from C; pass a pointer to it");
                             return Err(Error::new(p.ty.pos, msg));
                         }
                     }
-                    if !ir::types::c_compatible(&ret, true) {
-                        let msg = format!("{ret} cannot be returned from C; return it through a pointer");
+                    if !ir::types::c_compatible(&ret, true, &structs) {
+                        let msg = format!("{ret} cannot be returned to or from C; return it through a pointer");
                         return Err(Error::new(decl.ret.as_ref().map_or(decl.pos, |t| t.pos), msg));
                     }
                 }
