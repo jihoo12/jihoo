@@ -12,6 +12,7 @@
 
 pub mod gc;
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::Write;
@@ -94,7 +95,7 @@ struct Wait {
 
 pub struct Vm<'m> {
     module: &'m Module,
-    fn_index: HashMap<&'m str, usize>,
+    fn_index: Cow<'m, FnIndex>,
     heap: Heap,
     /// The frames of the running task.
     stack: Vec<Frame>,
@@ -122,6 +123,35 @@ pub struct Vm<'m> {
     uniques: u64,
 }
 
+/// The index of each function of a module by name. A VM makes its own, or
+/// borrows one kept up to date with a module that only grows, as compile-time
+/// evaluation does, so that a new VM costs nothing per function.
+#[derive(Debug, Clone, Default)]
+pub struct FnIndex(HashMap<String, usize>);
+
+impl FnIndex {
+    pub fn of(module: &Module) -> FnIndex {
+        FnIndex(module.funcs.iter().enumerate().map(|(i, f)| (f.name.clone(), i)).collect())
+    }
+
+    /// Notes that function `name` is at `index`, which must be where it is.
+    pub fn insert(&mut self, name: &str, index: usize) {
+        self.0.insert(name.to_string(), index);
+    }
+
+    pub fn get(&self, name: &str) -> Option<usize> {
+        self.0.get(name).copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// Runs `main` of a hosted module and returns its result.
 pub fn run(module: &Module, out: &mut dyn Write) -> Result<i64, VmError> {
     Vm::new(module).run_main(out)
@@ -129,10 +159,15 @@ pub fn run(module: &Module, out: &mut dyn Write) -> Result<i64, VmError> {
 
 impl<'m> Vm<'m> {
     pub fn new(module: &'m Module) -> Self {
-        let fn_index = module.funcs.iter().enumerate().map(|(i, f)| (f.name.as_str(), i)).collect();
+        Vm::with_index(module, Cow::Owned(FnIndex::of(module)))
+    }
+
+    /// A VM for `module` that uses `index`, which must index exactly its functions.
+    pub fn with_index(module: &'m Module, index: Cow<'m, FnIndex>) -> Self {
+        debug_assert_eq!(index.len(), module.funcs.len(), "the index does not match the module");
         Vm {
             module,
-            fn_index,
+            fn_index: index,
             heap: Heap::default(),
             stack: Vec::new(),
             tasks: Vec::new(),
@@ -177,7 +212,7 @@ impl<'m> Vm<'m> {
     /// Calls the function `name` with `args`, regardless of the module's profile.
     /// Instructions the VM cannot run (pointers, `syscall`) are runtime errors.
     pub fn call_named(&mut self, name: &str, args: &[Value], out: &mut dyn Write) -> Result<Value, VmError> {
-        let func = *self
+        let func = self
             .fn_index
             .get(name)
             .ok_or_else(|| VmError { func: name.into(), msg: "no such function".into() })?;
@@ -194,7 +229,14 @@ impl<'m> Vm<'m> {
 
     /// The function value for function `name`, if the module has it.
     pub fn func_value(&self, name: &str) -> Option<Value> {
-        self.fn_index.get(name).map(|&i| Value::Func(i as u32))
+        self.fn_index.get(name).map(|i| Value::Func(i as u32))
+    }
+
+    /// The index of function `name`, which an instruction names. Every function
+    /// a module calls is in it: the verifier checks a program, and compile-time
+    /// evaluation adds what it calls.
+    fn func_index(&self, name: &str) -> usize {
+        self.fn_index.get(name).unwrap_or_else(|| panic!("no function `{name}` in the module"))
     }
 
     /// The name of the function a `Value::Func` refers to.
@@ -208,7 +250,7 @@ impl<'m> Vm<'m> {
             let msg = format!("{} modules cannot run on the VM; use `jihoo build`", self.module.profile.as_str());
             return Err(err(&msg));
         }
-        let main = *self.fn_index.get("main").ok_or_else(|| err("no `main` function"))?;
+        let main = self.fn_index.get("main").ok_or_else(|| err("no `main` function"))?;
         match self.call(main, &[], out)? {
             Value::Int(n) => Ok(n),
             Value::Unit => Ok(0),
@@ -586,18 +628,18 @@ impl<'m> Vm<'m> {
                 return Err(self.error("pointers are not available on the VM"))
             }
             Inst::Call { dst, func, args } => {
-                let callee = self.fn_index[func.as_str()];
+                let callee = self.func_index(func);
                 let args: Vec<Value> = args.iter().map(|r| self.shared(*r)).collect();
                 self.push_frame(callee, &args, Some(*dst))?;
             }
             Inst::FuncRef { dst, func } => {
-                let v = Value::Func(self.fn_index[func.as_str()] as u32);
+                let v = Value::Func(self.func_index(func) as u32);
                 self.set(*dst, v);
             }
             // A closure is an aggregate of the function and the captured values,
             // which become its first arguments.
             Inst::Closure { dst, func, captures } => {
-                let mut values = vec![Value::Func(self.fn_index[func.as_str()] as u32)];
+                let mut values = vec![Value::Func(self.func_index(func) as u32)];
                 values.extend(captures.iter().map(|r| self.shared(*r)));
                 let r = self.alloc_agg(values);
                 self.set(*dst, Value::Agg(r));

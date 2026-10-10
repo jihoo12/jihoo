@@ -421,6 +421,29 @@ fn comptime_errors() {
     assert_eq!(errs.len(), 2, "{errs:?}");
 }
 
+#[test]
+fn comptime_runs_share_what_they_have_compiled() {
+    // Runs keep the functions earlier ones needed. One whose callee is broken
+    // adds nothing, so a later run of the same function fails the same way
+    // instead of finding half of it; runs that need only good functions work.
+    let src = "fn bad() -> i64 { return true }\nfn uses_bad() -> i64 { return bad() }\n\
+               fn good() -> i64 { return 2 }\nfn twice() -> i64 { return good() + good() }\n\
+               const A = uses_bad()\nconst B = twice()\nconst C = uses_bad() + twice()\nconst D = twice() + 1\n\
+               fn main() { print(B + D) }";
+    let errs = analyze(&jihoo_syntax::parse(src).unwrap()).unwrap_err();
+    let msgs: Vec<String> = errs.iter().map(|e| e.to_string()).collect();
+    assert_eq!(msgs.iter().filter(|m| m.contains("`bad` has errors")).count(), 2, "{msgs:?}");
+    assert!(!msgs.iter().any(|m| m.contains("twice") || m.contains("good")), "{msgs:?}");
+    assert_eq!(run(&src.replace("bad() -> i64 { return true }", "bad() -> i64 { return 1 }")), "9\n");
+
+    // A function that is compiled because a run needs it can itself need runs
+    // (here for `N`, its array length), which add to the same module.
+    let src = "fn three() -> i64 { return 3 }\nconst N = three()\n\
+               fn make() -> [i64; N] { return [N; N] }\nconst X = make()[1] + N + comptime three()\n\
+               fn main() { print(X) }";
+    assert_eq!(run(src), "9\n");
+}
+
 // ---- generics (comptime parameters) ----
 
 const MAX: &str = "fn max(comptime T: type, a: T, b: T) -> T {\n  if a > b { return a }\n  return b\n}\n";

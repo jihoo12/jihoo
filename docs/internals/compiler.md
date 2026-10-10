@@ -27,9 +27,12 @@ inside `f`) is reported as a cycle.
 
 `crates/jihoo-sema/src/comptime.rs` evaluates `const`, `comptime`, array
 lengths, comptime arguments and macros. The expression is lowered into a helper
-function, and that function plus everything it can call is put into a temporary
-module and run on the VM, with a step limit. The result is converted back into
-JIR constants. Since this runs on the VM, it works for freestanding programs
+function, which runs on the VM with a step limit, and the result is converted
+back into JIR constants. The functions runs need are kept in one module per
+compilation that only grows: a run adds its helper and whatever it calls that
+no earlier run needed, so a thousand constants that call the same functions
+copy them once, not a thousand times. A run adds nothing unless everything it
+calls compiles, so every function in that module has all its callees there. Since this runs on the VM, it works for freestanding programs
 too, but cannot use pointers, `syscall`, `asm` or C functions.
 
 ## Generics

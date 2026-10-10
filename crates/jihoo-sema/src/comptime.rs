@@ -5,16 +5,22 @@
 //! every function it can call, is run on the VM — for freestanding programs too.
 //! The result is turned back into IR constants where the expression was used.
 //!
+//! The functions that runs need are gathered in one module per compilation
+//! (`ComptimeModule`), which only grows: a run copies in only what no earlier
+//! run needed, so a program with many constants does not copy the functions
+//! they share again for each.
+//!
 //! Compile-time code cannot use what the VM does not have: pointers and `syscall`.
 //! `print` works and writes to the compiler's stderr.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::rc::Rc;
 
 use jihoo_ir::{Inst, Reg, Terminator, Type};
 use jihoo_syntax::ast::Expr;
 use jihoo_syntax::{Error, Pos};
-use jihoo_vm::{Value, Vm};
+use jihoo_vm::{FnIndex, Value, Vm};
 
 use crate::env::{Env, Sig};
 use crate::generic::Bindings;
@@ -22,6 +28,45 @@ use crate::FnCx;
 
 /// Instruction budget for one compile-time evaluation.
 const FUEL: u64 = if cfg!(test) { 1_000_000 } else { 100_000_000 };
+
+/// The functions compile-time runs have needed so far, each with everything
+/// it calls, and their index. Runs only add to it. A run holds its own `Rc`s,
+/// so a run started while converting another's result (which can lower more
+/// code) adds to a copy instead of changing what the first one runs.
+pub(crate) struct ComptimeModule {
+    module: Rc<jihoo_ir::Module>,
+    index: Rc<FnIndex>,
+}
+
+impl ComptimeModule {
+    pub(crate) fn new(profile: jihoo_ir::Profile) -> Self {
+        let module = jihoo_ir::Module {
+            profile,
+            target: jihoo_ir::Target::host(),
+            structs: vec![],
+            enums: vec![],
+            externs: vec![],
+            funcs: vec![],
+        };
+        ComptimeModule { module: Rc::new(module), index: Rc::default() }
+    }
+
+    fn has(&self, name: &str) -> bool {
+        self.index.get(name).is_some()
+    }
+
+    fn add(&mut self, funcs: Vec<jihoo_ir::Function>) {
+        let module = Rc::make_mut(&mut self.module);
+        let index = Rc::make_mut(&mut self.index);
+        for f in funcs {
+            // A run started while this one gathered may have added it already.
+            if index.get(&f.name).is_none() {
+                index.insert(&f.name, module.funcs.len());
+                module.funcs.push(f);
+            }
+        }
+    }
+}
 
 /// A value computed at compile time, independent of the VM that computed it.
 #[derive(Debug, Clone, PartialEq)]
@@ -72,8 +117,8 @@ impl Env<'_> {
     }
 
     /// Runs function `entry` on the VM with `args` and returns its result of type
-    /// `ty`. `funcs` are functions that exist only for this run (such as a
-    /// `comptime` helper); everything they call is looked up and compiled.
+    /// `ty`. `funcs` are functions made for this run (such as a `comptime`
+    /// helper); everything they call is looked up and compiled.
     pub fn run(
         &self,
         pos: Pos,
@@ -82,14 +127,18 @@ impl Env<'_> {
         args: &[ConstValue],
         ty: &Type,
     ) -> Result<ConstValue, Error> {
-        if funcs.is_empty() {
+        // Only what no earlier run needed: everything a function in the
+        // compile-time module calls is in it already. Nothing is added unless
+        // all of it can be, so that stays true when a callee has errors.
+        let known = |name: &str| self.comptime.borrow().has(name);
+        if funcs.is_empty() && !known(entry) {
             funcs.push((*self.function(entry)?).clone());
         }
         let mut seen: HashSet<String> = funcs.iter().map(|f| f.name.clone()).collect();
         let mut i = 0;
         while i < funcs.len() {
             for callee in callees(&funcs[i]) {
-                if !seen.insert(callee.clone()) {
+                if known(&callee) || !seen.insert(callee.clone()) {
                     continue;
                 }
                 if self.is_extern_symbol(&callee) {
@@ -112,15 +161,12 @@ impl Env<'_> {
             i += 1;
         }
 
-        let module = jihoo_ir::Module {
-            profile: self.profile,
-            target: jihoo_ir::Target::host(),
-            structs: vec![],
-            enums: vec![],
-            externs: vec![],
-            funcs,
+        self.comptime.borrow_mut().add(funcs);
+        let (module, index) = {
+            let ct = self.comptime.borrow();
+            (ct.module.clone(), ct.index.clone())
         };
-        let mut vm = Vm::new(&module).with_fuel(FUEL).with_uniques(self.uniques.get());
+        let mut vm = Vm::with_index(&module, Cow::Borrowed(&index)).with_fuel(FUEL).with_uniques(self.uniques.get());
         let mut values = Vec::new();
         for a in args {
             values.push(match a {

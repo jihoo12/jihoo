@@ -95,6 +95,8 @@ pub(crate) struct Env<'p> {
     funcs: Memo<Rc<ir::Function>>,
     /// Numbers the helper functions made for `comptime` expressions.
     pub comptime_ids: Cell<u32>,
+    /// What compile-time runs have needed so far.
+    pub(crate) comptime: RefCell<crate::comptime::ComptimeModule>,
     /// Numbers the functions made from anonymous functions (`fn.N`).
     pub lambda_ids: Cell<u32>,
     /// Those functions, and whether each is part of the program (the ones made
@@ -145,6 +147,7 @@ impl<'p> Env<'p> {
             consts: Memo::new(),
             funcs: Memo::new(),
             comptime_ids: Cell::new(0),
+            comptime: RefCell::new(crate::comptime::ComptimeModule::new(profile)),
             lambda_ids: Cell::new(0),
             lambdas: RefCell::new(Vec::new()),
             eq_helpers: RefCell::new(HashMap::new()),
