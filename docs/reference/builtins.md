@@ -46,22 +46,31 @@ clear sign (`0x7ff8000000000000`, or `0x7fc00000` for an `f32`), and
 Unlike the other builtins, these names can be taken: a module that defines a
 function called `sqrt` (or declares `extern fn sqrt`) calls its own `sqrt`.
 
+## Hosted and native
+
+| builtin | result | description |
+|---------|--------|-------------|
+| `print(x)` | `unit` | writes a number, `bool` or text and a newline to stdout: a `str` on the VM, a NUL-terminated `*u8` (such as a string literal) natively |
+
+`print` writes integers in decimal, bools as `true`/`false`, and floats as the
+shortest text that reads back as the same value (`0.1`, `1.0`, `1e100`, `inf`,
+`NaN`), the same on the VM and natively. To print other values, print their
+parts. During compile-time evaluation `print` writes to stderr. Natively it
+writes through the C library's `stdout`, which is buffered: output written
+other ways (`libc.write`, `syscall`) can come before it, and a program that
+traps loses what is still buffered. Freestanding programs have no `print`; the
+`io` library writes to file descriptors.
+
 ## Hosted
 
 | builtin | result | description |
 |---------|--------|-------------|
-| `print(x)` | `unit` | writes a number, `bool` or `str` and a newline to stdout |
 | `to_str(x)` | `str` | a number or `bool` as text, as `print` would write it (also in macros) |
 | `ref e` | `ref T` | a new [reference](../language/references.md) to a copy of `e` |
 | `cell(v)` | `cell T` | a new [cell](../language/cells.md) holding a copy of `v` |
 | `chan(T)`, `chan(T, n)` | `chan T` | a new [channel](../language/tasks-and-channels.md), unbuffered or buffering `n` values |
 | `send(c, v)` | `unit` | sends `v`, waiting while the channel is full |
 | `recv(c)` | `T` | receives a value, waiting until there is one |
-
-`print` writes integers in decimal, bools as `true`/`false`, and floats as the
-shortest text that reads back as the same value (`0.1`, `1.0`, `1e100`, `inf`,
-`NaN`). To print other values, print their parts. During compile-time
-evaluation `print` writes to stderr.
 
 ## Native and freestanding
 

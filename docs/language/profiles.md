@@ -38,7 +38,7 @@ fn _start() -> i64 {
 | backend         | VM                      | LLVM, linked by `cc` with libc | LLVM, static binary via `ld.lld`  |
 | memory          | GC, managed by the VM   | manual (`malloc`, or `alloc`)  | manual (`alloc` over `mmap`)      |
 | string literals | `str`                   | `*u8`, NUL-terminated          | `*u8`, NUL-terminated             |
-| output          | `print`                 | C (`libc.printf`)              | `syscall` (`io.puts`)             |
+| output          | `print`                 | `print`, or C (`libc.printf`)  | `syscall` (`io.puts`)             |
 | C functions     | no                      | `extern fn`, C files, `-l`     | no                                |
 | pointers        | no                      | `*T`, `&x`, `*p`, `p[i]`       | `*T`, `&x`, `*p`, `p[i]`          |
 | syscalls / asm  | no                      | yes                            | yes                               |
@@ -91,7 +91,7 @@ error that names the feature, so a program never silently changes meaning
 between profiles:
 
 ```text
-error: hello.jh:3:5: `print` needs std and is not available in freestanding mode
+error: hello.jh:3:5: `print` needs the VM or the C library, so it is not available in freestanding mode (write to a file descriptor instead, as `io.puts` does)
 ```
 
 A library module may state what it needs with the same attributes. A library

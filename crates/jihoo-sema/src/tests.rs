@@ -1300,7 +1300,10 @@ fn native_programs_call_c() {
     // Pointers, `&`, syscall and asm work as in freestanding code; GC types do not.
     check(&native("fn f() -> i64 { let x = 1\n let p = &x\n return *p + syscall(39) }")).unwrap();
     assert!(err(&native("fn f(s: str) {}")).contains("not available in native mode"));
-    assert!(err(&native("fn f() { print(1) }")).contains("not available in native mode"));
+    // `print` works natively, where text is a C string (`*u8`); not freestanding.
+    check(&native("fn f(p: *u8, q: *i32) { print(1)\n print(\"hi\")\n print(p)\n print(1.5)\n print(q != q) }")).unwrap();
+    assert!(err(&native("fn f(q: *i32) { print(q) }")).contains("cannot print a value of type *i32"));
+    assert!(err(&fs("fn f() { print(1) }")).contains("not available in freestanding mode"));
     // `main` may take C's argc and argv.
     check("#![native]\nfn main(argc: i32, argv: **u8) -> i64 { return argc as i64 }").unwrap();
     assert!(err("#![native]\nfn main(n: i64) {}").contains("(argc: i32, argv: **u8)"));

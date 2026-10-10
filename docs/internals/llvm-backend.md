@@ -26,7 +26,11 @@ then links the result.
   `jihoo.<name>`, so they never clash with C symbols. The module defines C's
   `int main(int argc, char **argv)`, which calls `jihoo.main` and returns its
   result truncated to `int` (0 for `unit`). `extern fn`s are external
-  declarations, called with the C calling convention.
+  declarations, called with the C calling convention. `print` calls the C
+  library: `printf` for integers, `puts` for bools and strings, and for floats
+  `jihoo.print_float`, which the module defines. It finds the shortest digits
+  that read back (`strtod`, `strtof`) from the exact digits `snprintf` gives,
+  rounding ties up as the VM does, so native and VM output agree to the byte.
 - **Freestanding.** `_start` is the only external symbol. Returning from it
   makes the `exit` syscall (60 on x86_64, 93 on aarch64) with the result. The
   module defines weak `memcpy`, `memmove`, `memset`, `fmod`, `fmodf`,

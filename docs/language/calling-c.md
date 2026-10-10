@@ -90,6 +90,7 @@ compiler, `cc` unless `JIHOO_CC` names another ([Command line](../reference/comm
 - Structs cannot be passed to or returned from C by value yet, and jihoo
   functions cannot be exported under C names; both are on the
   [roadmap](../internals/roadmap.md).
-- There is no `print` in native programs; use `libc.printf`.
+- `print` and `libc.printf` write to the same buffered `stdout`, so they can be
+  mixed.
 
 See `examples/native.jh`.

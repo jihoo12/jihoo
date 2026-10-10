@@ -30,7 +30,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 1 | the first version that is bumped on change; the header must come first |
 | 2 | the `target` header |
 | 3 | `stringify`, and hygiene marks in the code `quote` builds |
-| 4 | float operations (`sqrt`, `floor`, `ceil`, `trunc`, `round`, `abs`, `copysign`) and `bitcast` |
+| 4 | float operations (`sqrt`, `floor`, `ceil`, `trunc`, `round`, `abs`, `copysign`) and `bitcast`; `print` in native modules |
 
 ## Example
 
@@ -95,7 +95,7 @@ fn ...                               ; zero or more functions
 | profile        | runs on        | GC  | allowed builtins | pointers | C functions |
 |----------------|----------------|-----|------------------|----------|-------------|
 | `hosted`       | VM             | yes | `print`, `to_str` | no      | no          |
-| `native`       | LLVM + libc    | no  | `syscall`, `asm` | yes      | `extern`    |
+| `native`       | LLVM + libc    | no  | `print`, `syscall`, `asm` | yes | `extern`    |
 | `freestanding` | LLVM, no libc  | no  | `syscall`, `asm` | yes      | no          |
 
 The target is the machine the module was made for: its `syscall` numbers and
@@ -336,7 +336,7 @@ runtime error and native code traps.
 | syntax                          | operands              | result | meaning |
 |---------------------------------|-----------------------|--------|---------|
 | `%d = syscall(%n, %a, ...)`     | int or `*T`, 1 to 7 operands | `i64` | native and freestanding only: raw Linux syscall `%n` |
-| `print %a`                      | number, `bool` or `str` |      | hosted only: print the value and a newline (floats as the shortest text that reads back exactly: `0.1`, `1.0`, `1e100`, `inf`, `NaN`) |
+| `print %a`                      | number, `bool`, and `str` (hosted) or `*u8` (native) |      | hosted and native: print the value and a newline (floats as the shortest text that reads back exactly, ties rounded up: `0.1`, `1.0`, `1e100`, `inf`, `NaN`; a `*u8` is a NUL-terminated string); natively through the C library's `stdout` |
 | `%d = to_str %a`                | number or `bool`      | `str`  | hosted (and macros): the value as text, as `print` writes it |
 | `%d = unique %p`                | `str`                 | `str`  | compile time only: `p` plus a number unique in this compilation |
 | `%d = stringify %c`             | `expr`, `stmts` or `items` | `str` | compile time only: the source text of code, with the hygiene marks of its names removed |

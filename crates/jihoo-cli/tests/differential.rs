@@ -338,3 +338,45 @@ fn native_programs_do_not_run_on_the_vm() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("native programs do not run on the VM"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `print` in native code writes what the VM writes: integers of every type,
+/// bools, text, and floats as the shortest text that reads back exactly (every
+/// power of two, where the nearest decimal of a length may not read back but
+/// the next one does, and random bit patterns of both float types).
+#[test]
+fn native_print_matches_the_vm() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let body = "fn main() -> i64 {\n\
+        print(\"text\")\n  print(true)\n  print(1 == 2)\n\
+        print(-128 as i8)\n  print(255 as u8)\n  print(-32768 as i16)\n  print(65535 as u16)\n\
+        print(-2147483648 as i32)\n  print(4294967295 as u32)\n  print(-9223372036854775807 - 1)\n  let big: u64 = 18446744073709551615\n  print(big)\n\
+        let fixed = [0.0, -0.0, 1.0, -1.0, 0.1, 0.3, 1.0 / 3.0, 1e15, 1e16, 1e17, 123456789.125, 1e-4, 9.999e-5, 1e-5,\n\
+                     5e-324, 1.7976931348623157e308, 2.0 / 0.0, -2.0 / 0.0, 0.0 / 0.0, 100.0, 1234.5, 0.000123]\n\
+        let i = 0\n  while i < len(fixed) {\n    print(fixed[i])\n    print(fixed[i] as f32)\n    i += 1\n  }\n\
+        let p = 1.0\n  i = 0\n  while i < 1100 {\n    print(p)\n    print(1.0 / p)\n    p *= 2.0\n    i += 1\n  }\n\
+        let q: f32 = 1.0\n  i = 0\n  while i < 150 {\n    print(q)\n    print(1.0 / q)\n    q *= 2.0\n    i += 1\n  }\n\
+        let s: u64 = 99\n  i = 0\n  while i < 4000 {\n    s = s * 6364136223846793005 + 1442695040888963407\n\
+            print(from_bits(s))\n    print(from_bits((s >> 32) as u32))\n    i += 1\n  }\n\
+        return 0\n}\n";
+    let work = common::work_dir("print");
+    let hosted = work.join("p.jh");
+    std::fs::write(&hosted, body).unwrap();
+    let vm = Command::new(JIHOO).arg("run").arg(&hosted).output().unwrap();
+    assert!(vm.status.success(), "{}", String::from_utf8_lossy(&vm.stderr));
+
+    let native = work.join("pn.jh");
+    std::fs::write(&native, format!("#![native]\n{body}")).unwrap();
+    let bin = work.join("pn");
+    assert_eq!(exit_code(Command::new(JIHOO).arg("build").arg(&native).arg("-o").arg(&bin)), 0);
+    let nat = Command::new(&bin).output().unwrap();
+    let (vm, nat) = (String::from_utf8_lossy(&vm.stdout), String::from_utf8_lossy(&nat.stdout));
+    assert!(vm.lines().count() > 10000);
+    for (n, (a, b)) in vm.lines().zip(nat.lines()).enumerate() {
+        assert_eq!(a, b, "line {}", n + 1);
+    }
+    assert_eq!(vm, nat);
+    std::fs::remove_dir_all(&work).unwrap();
+}

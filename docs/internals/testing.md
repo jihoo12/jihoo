@@ -61,6 +61,12 @@ VM bug where a copy saw later updates of the original was found by about 1 in
 values above `i64::MAX` show it. Run a few thousand seeds after changing the
 VM or the backend.
 
+## Native output
+
+`native_print_matches_the_vm` in `crates/jihoo-cli/tests/differential.rs`
+prints integers, text and some ten thousand floats natively and on the VM and
+compares them byte for byte.
+
 ## Backend tests
 
 `backend-llvm/tests/` holds hand-written JIR modules that `ctest` compiles

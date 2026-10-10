@@ -120,8 +120,8 @@ evaluation (`const`, `comptime`) and macros, both run on the VM.
   and aarch64 Linux (`--target` builds for either, and modules can have one
   file per target); closures passed to `comptime` parameters; the `alloc`,
   `io` and `sys` libraries.
-- **native:** C functions through `extern fn` and the `libc` module, C files and
-  libraries linked in; the `coro` library.
+- **native:** `print`; C functions through `extern fn` and the `libc` module,
+  C files and libraries linked in; the `coro` library.
 
 See the [examples](examples) and the [roadmap](docs/internals/roadmap.md).
 

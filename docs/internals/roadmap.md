@@ -33,11 +33,12 @@
 17. Float builtins, the same in every profile: `sqrt`, `floor`, `ceil`,
     `trunc`, `round`, `abs`, `copysign`, and a float's bits (`to_bits`,
     `from_bits`).
+18. `print` in native programs, with the VM's output to the byte.
 
 ## Next
 
 - **Native code:** passing structs to C by value (per-target C ABI lowering);
-  exporting jihoo functions under C names; a `print` for native code.
+  exporting jihoo functions under C names.
 - **Tooling:** a Rust-side JIR parser, so that `jihoo run file.jir` works.
 
 ## Library layers

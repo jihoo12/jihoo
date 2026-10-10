@@ -1170,15 +1170,18 @@ impl<'a> FnCx<'a> {
     fn call(&mut self, pos: Pos, name: &str, args: &[Expr], expected: Option<&Type>) -> Result<Reg, Error> {
         match name {
             "print" => {
-                if self.profile() != Profile::Hosted {
-                    let msg = format!("`print` needs std and is not available in {} mode", self.profile().as_str());
+                if !Type::can_print(self.profile()) {
+                    let msg = "`print` needs the VM or the C library, so it is not available in freestanding mode \
+                               (write to a file descriptor instead, as `io.puts` does)";
                     return Err(Error::new(pos, msg));
                 }
                 let [arg] = args else {
                     return Err(Error::new(pos, "`print` takes exactly 1 argument"));
                 };
                 let r = self.expr(arg, None)?;
-                if !self.ty(r).is_printable() {
+                // Macros run on the VM, where text is a `str`.
+                let profile = if self.in_macro { Profile::Hosted } else { self.profile() };
+                if !self.ty(r).is_printable(profile) {
                     return Err(Error::new(arg.pos, format!("cannot print a value of type {}", self.ty(r))));
                 }
                 self.emit(Inst::Print { src: r });

@@ -193,6 +193,10 @@ class Types {
   }
 };
 
+// `print` in native modules (defined below).
+FunctionCallee libc_fn(Module &m, const char *name);
+Function *print_float_fn(Module &m);
+
 // Builds the inline asm for a raw Linux syscall. args[0] is the syscall number;
 // all operands are i64.
 InlineAsm *syscall_asm(LLVMContext &ctx, const Triple &triple, size_t nargs) {
@@ -228,13 +232,13 @@ class FnGen {
  public:
   // `fns` holds every function and extern function by JIR name; `externs` says
   // which are extern. With `exit_on_return`, returning exits the process (for
-  // a freestanding `_start`).
+  // a freestanding `_start`). `native` modules link with libc.
   FnGen(const jir::Function &f, Function *llfn, Module &mod, const Types &types,
         const std::unordered_map<std::string, Function *> &fns,
         const std::unordered_map<std::string, const jir::ExternFn *> &externs, const Triple &triple,
-        bool exit_on_return)
+        bool exit_on_return, bool native)
       : f_(f), fn_(llfn), mod_(mod), types_(types), fns_(fns), externs_(externs), triple_(triple),
-        exit_on_return_(exit_on_return), ctx_(mod.getContext()), b_(ctx_), i64_(Type::getInt64Ty(ctx_)) {}
+        exit_on_return_(exit_on_return), native_(native), ctx_(mod.getContext()), b_(ctx_), i64_(Type::getInt64Ty(ctx_)) {}
 
   void run() {
     auto *entry = BasicBlock::Create(ctx_, "entry", fn_);
@@ -271,6 +275,7 @@ class FnGen {
   const std::unordered_map<std::string, const jir::ExternFn *> &externs_;
   const Triple &triple_;
   bool exit_on_return_;
+  bool native_;
   LLVMContext &ctx_;
   IRBuilder<> b_;
   Type *i64_;
@@ -325,6 +330,34 @@ class FnGen {
     CallInst *c = b_.CreateCall(fn->getFunctionType(), fn, args);
     c->setAttributes(fn->getAttributes());  // the sign/zero extensions the C ABI wants
     store(inst.dst, e.ret.kind == jir::Type::Unit ? unit() : c);
+  }
+
+  // `print %r` in a native module, through the C library's stdout: integers
+  // with `printf`, bools and C strings (`*u8`) with `puts`, floats with
+  // `jihoo.print_float`.
+  void print(uint32_t r) {
+    if (!native_) fail(f_.name, "`print` needs the C library; it is only available in hosted and native modules");
+    const jir::Type &t = type(r);
+    Value *v = load(r);
+    auto str = [&](const char *s) { return b_.CreateGlobalString(s, ".str.print", 0, &mod_); };
+    switch (t.kind) {
+      case jir::Type::Int:
+        b_.CreateCall(libc_fn(mod_, "printf"), {str(t.is_signed ? "%lld\n" : "%llu\n"), b_.CreateIntCast(v, i64_, t.is_signed)});
+        return;
+      case jir::Type::Bool:
+        b_.CreateCall(libc_fn(mod_, "puts"), {b_.CreateSelect(v, str("true"), str("false"))});
+        return;
+      case jir::Type::Ptr:
+        if (*t.pointee != jir::Type::integer(8, false)) break;
+        b_.CreateCall(libc_fn(mod_, "puts"), {v});
+        return;
+      case jir::Type::Float:
+        if (t.bits == 32) v = b_.CreateFPExt(v, b_.getDoubleTy());
+        b_.CreateCall(print_float_fn(mod_), {v, b_.getInt1(t.bits == 32)});
+        return;
+      default: break;
+    }
+    fail(f_.name, "cannot print " + t.str());
   }
 
   void memcopy(Value *dst, Value *src, const jir::Type &t) {
@@ -817,7 +850,7 @@ class FnGen {
         store(inst.dst, has_out ? result : unit());
         return;
       }
-      case Op::Print: fail(f_.name, "`print` needs the VM and cannot be compiled natively");
+      case Op::Print: print(arg_reg(0)); return;
     }
   }
 
@@ -1010,6 +1043,235 @@ void define_rounding(Module &m, Type *ft, const std::string &kind) {
   b.CreateRet(b.CreateBinaryIntrinsic(Intrinsic::copysign, r, x));
 }
 
+// The C library functions `print` uses, declared once (or as the program
+// declared them: the types are C's).
+FunctionCallee libc_fn(Module &m, const char *name) {
+  LLVMContext &ctx = m.getContext();
+  Type *i32 = Type::getInt32Ty(ctx), *ptr = PointerType::get(ctx, 0), *dbl = Type::getDoubleTy(ctx);
+  std::string n = name;
+  FunctionType *ty = n == "printf"                    ? FunctionType::get(i32, {ptr}, true)
+                     : n == "snprintf"              ? FunctionType::get(i32, {ptr, Type::getInt64Ty(ctx), ptr}, true)
+                     : n == "strtod"                ? FunctionType::get(dbl, {ptr, ptr}, false)
+                     : n == "strtof"                ? FunctionType::get(Type::getFloatTy(ctx), {ptr, ptr}, false)
+                                                    : FunctionType::get(i32, {ptr}, false);  // puts, atoi
+  return m.getOrInsertFunction(name, ty);
+}
+
+// Defines `void jihoo.print_float(double x, i1 is_f32)`, which prints `x` (an
+// `f32` if `is_f32`) and a newline the way the VM does: the shortest decimal
+// that reads back as `x` in its type, with a `.` or an exponent (`1.0`, `0.1`,
+// `1e100`, `1.5e-7`; exponents for magnitudes below 1e-4 and from 1e16 on),
+// or `inf`, `-inf`, `NaN`.
+//
+// The search reads the first 18 digits of x exactly, from `%.40e` or, if
+// that may have rounded them, `%.767e` (a double has at most 767 significant
+// digits, and the C library prints them exactly). For L = 1, 2, ... digits:
+// the L digit decimal c nearest to x, with ties rounded up as the VM does
+// (`printf` would round them to even), is the first L digits as an integer
+// M, plus one if the next digit is 5 or more. If c reads back as x, it is the
+// shortest such decimal and the nearest. If not, the decimal on the other
+// side of x (M or M + 1) may still read back (when x is a power of two, whose
+// neighbor below is closer than the one above), and then it is the one.
+Function *print_float_fn(Module &m) {
+  if (Function *f = m.getFunction("jihoo.print_float")) return f;
+  LLVMContext &ctx = m.getContext();
+  Type *dbl = Type::getDoubleTy(ctx), *i64 = Type::getInt64Ty(ctx), *i32 = Type::getInt32Ty(ctx);
+  Type *i8 = Type::getInt8Ty(ctx);
+  auto *fn = Function::Create(FunctionType::get(Type::getVoidTy(ctx), {dbl, Type::getInt1Ty(ctx)}, false),
+                              GlobalValue::InternalLinkage, "jihoo.print_float", m);
+  fn->addFnAttr(Attribute::NoInline);
+  Value *x = fn->getArg(0), *is_f32 = fn->getArg(1);
+  auto block = [&](const char *n) { return BasicBlock::Create(ctx, n, fn); };
+  IRBuilder<> b(block("entry"));
+  auto str = [&](const char *s) { return b.CreateGlobalString(s, ".str.print", 0, &m); };
+  auto call = [&](const char *name, std::vector<Value *> args) { return b.CreateCall(libc_fn(m, name), args); };
+  auto puts_and_return = [&](Value *s) {
+    call("puts", {s});
+    b.CreateRetVoid();
+  };
+
+  // `d.<767 digits>e-XXX` and a NUL.
+  const uint64_t kDigits = 767, kExact = kDigits + 8;
+  Value *exact = b.CreateAlloca(ArrayType::get(i8, kExact));
+  Value *num = b.CreateAlloca(ArrayType::get(i8, 40));
+  // 10^0 .. 10^17.
+  std::vector<Constant *> pows;
+  for (uint64_t k = 0, v = 1; k <= 17; k++, v *= 10) pows.push_back(ConstantInt::get(i64, v));
+  auto *pow_ty = ArrayType::get(i64, pows.size());
+  auto *pow_table = new GlobalVariable(m, pow_ty, true, GlobalValue::PrivateLinkage, ConstantArray::get(pow_ty, pows),
+                                       "jihoo.pow10");
+  auto pow10 = [&](Value *k) { return b.CreateLoad(i64, b.CreateGEP(pow_ty, pow_table, {b.getInt64(0), k})); };
+  // Digit `i` of x as a number: `exact` holds `d.ddd...`, so the digits after
+  // the first are one byte further on.
+  auto digit = [&](Value *i) {
+    Value *at = b.CreateSelect(b.CreateICmpEQ(i, b.getInt64(0)), i, b.CreateAdd(i, b.getInt64(1)));
+    Value *c = b.CreateLoad(i8, b.CreateGEP(i8, exact, at));
+    return b.CreateSub(b.CreateZExt(c, i64), b.getInt64('0'));
+  };
+
+  // NaN, infinities and zeros.
+  BasicBlock *nan = block("nan"), *not_nan = block("not_nan"), *inf = block("inf"), *finite = block("finite"),
+             *zero = block("zero"), *nonzero = block("nonzero");
+  b.CreateCondBr(b.CreateFCmpUNO(x, x), nan, not_nan);
+  b.SetInsertPoint(nan);
+  puts_and_return(str("NaN"));
+  b.SetInsertPoint(not_nan);
+  Value *ax = b.CreateUnaryIntrinsic(Intrinsic::fabs, x);
+  Value *negative = b.CreateICmpSLT(b.CreateBitCast(x, i64), b.getInt64(0));
+  b.CreateCondBr(b.CreateFCmpOEQ(ax, ConstantFP::getInfinity(dbl)), inf, finite);
+  b.SetInsertPoint(inf);
+  puts_and_return(b.CreateSelect(negative, str("-inf"), str("inf")));
+  b.SetInsertPoint(finite);
+  b.CreateCondBr(b.CreateFCmpOEQ(ax, ConstantFP::get(dbl, 0.0)), zero, nonzero);
+  b.SetInsertPoint(zero);
+  puts_and_return(b.CreateSelect(negative, str("-0.0"), str("0.0")));
+
+  b.SetInsertPoint(nonzero);
+  Value *sign = b.CreateSelect(negative, str("-"), str(""));
+  Value *ax32 = b.CreateFPTrunc(ax, b.getFloatTy());
+  // The first 18 digits are all the search reads. 41 digits, rounded, have
+  // them unless rounding carried into them, which leaves digits 19 to 41 all
+  // zero; only then are all the digits needed.
+  call("snprintf", {exact, b.getInt64(kExact), str("%.40e"), ax});
+  BasicBlock *check = block("carry"), *all = block("all_digits"), *have = block("have_digits");
+  b.CreateBr(check);
+  b.SetInsertPoint(check);
+  PHINode *k = b.CreatePHI(i64, 2);
+  k->addIncoming(b.getInt64(18), nonzero);
+  Value *zero_digit = b.CreateICmpEQ(digit(k), b.getInt64(0));
+  Value *k1 = b.CreateAdd(k, b.getInt64(1));
+  k->addIncoming(k1, check);
+  BasicBlock *carry_done = block("carry_done");
+  b.CreateCondBr(b.CreateAnd(zero_digit, b.CreateICmpULT(k1, b.getInt64(41))), check, carry_done);
+  // No rounding at all happened if x = m * 2^q has 41 digits or fewer: an
+  // integer below 1e41, or q >= -34 (m * 5^-q has at most 16 + 25 digits).
+  b.SetInsertPoint(carry_done);
+  Value *bits = b.CreateBitCast(ax, i64);
+  Value *field = b.CreateLShr(bits, b.getInt64(52));
+  Value *frac = b.CreateAnd(bits, b.getInt64((1ull << 52) - 1));
+  Value *subnormal = b.CreateICmpEQ(field, b.getInt64(0));
+  Value *m_int = b.CreateSelect(subnormal, frac, b.CreateOr(frac, b.getInt64(1ull << 52)));
+  Value *q = b.CreateSub(b.CreateSelect(subnormal, b.getInt64(1), field), b.getInt64(1075));
+  q = b.CreateAdd(q, b.CreateBinaryIntrinsic(Intrinsic::cttz, m_int, b.getTrue()));
+  Value *short_int = b.CreateAnd(b.CreateICmpSGE(q, b.getInt64(0)), b.CreateFCmpOLT(ax, ConstantFP::get(dbl, 1e41)));
+  Value *short_frac = b.CreateAnd(b.CreateICmpSLT(q, b.getInt64(0)), b.CreateICmpSGE(q, b.getInt64(-34)));
+  Value *exact41 = b.CreateOr(short_int, short_frac);
+  b.CreateCondBr(b.CreateAnd(zero_digit, b.CreateNot(exact41)), all, have);
+  b.SetInsertPoint(all);
+  call("snprintf", {exact, b.getInt64(kExact), str("%.767e"), ax});
+  b.CreateBr(have);
+  b.SetInsertPoint(have);
+  PHINode *precision = b.CreatePHI(i64, 2);
+  precision->addIncoming(b.getInt64(40), carry_done);
+  precision->addIncoming(b.getInt64(kDigits), all);
+  // The exponent of the first digit, after `d.<digits>e`.
+  Value *e = call("atoi", {b.CreateGEP(i8, exact, b.CreateAdd(precision, b.getInt64(3)))});
+  BasicBlock *loop = block("digits"), *found = block("found");
+  b.CreateBr(loop);
+
+  // Whether mant * 10^shift reads back as x, in the type of x.
+  auto reads_back = [&](Value *mant, Value *shift) {
+    call("snprintf", {num, b.getInt64(40), str("%llue%d"), mant, shift});
+    BasicBlock *as32 = block("as_f32"), *as64 = block("as_f64"), *done = block("read_back");
+    b.CreateCondBr(is_f32, as32, as64);
+    b.SetInsertPoint(as32);
+    Value *same32 = b.CreateFCmpOEQ(call("strtof", {num, ConstantPointerNull::get(b.getPtrTy())}), ax32);
+    b.CreateBr(done);
+    b.SetInsertPoint(as64);
+    Value *same64 = b.CreateFCmpOEQ(call("strtod", {num, ConstantPointerNull::get(b.getPtrTy())}), ax);
+    b.CreateBr(done);
+    b.SetInsertPoint(done);
+    PHINode *same = b.CreatePHI(b.getInt1Ty(), 2);
+    same->addIncoming(same32, as32);
+    same->addIncoming(same64, as64);
+    return same;
+  };
+  // An L digit decimal M (which may have grown to 10^L) as (digits, exponent
+  // of the first one).
+  auto normalize = [&](Value *mant, Value *len) {
+    Value *over = b.CreateICmpEQ(mant, pow10(len));
+    Value *len1 = b.CreateSub(len, b.getInt64(1));
+    return std::make_pair(b.CreateSelect(over, pow10(len1), mant),
+                          b.CreateSelect(over, b.CreateAdd(e, b.getInt32(1)), e));
+  };
+  auto shift_of = [&](Value *e_first, Value *len) {
+    return b.CreateSub(e_first, b.CreateTrunc(b.CreateSub(len, b.getInt64(1)), i32));
+  };
+
+  b.SetInsertPoint(loop);
+  PHINode *len = b.CreatePHI(i64, 2), *prefix = b.CreatePHI(i64, 2);
+  len->addIncoming(b.getInt64(1), have);
+  prefix->addIncoming(b.getInt64(0), have);
+  Value *mant = b.CreateAdd(b.CreateMul(prefix, b.getInt64(10)), digit(b.CreateSub(len, b.getInt64(1))));
+  Value *up = b.CreateICmpUGE(digit(len), b.getInt64(5));
+  auto [near_m, near_e] = normalize(b.CreateAdd(mant, b.CreateZExt(up, i64)), len);
+  BasicBlock *near_ok = block("nearest"), *try_other = block("other");
+  // 17 digits always read back.
+  Value *last = b.CreateICmpEQ(len, b.getInt64(17));
+  b.CreateCondBr(b.CreateOr(last, reads_back(near_m, shift_of(near_e, len))), near_ok, try_other);
+  b.SetInsertPoint(near_ok);
+  b.CreateBr(found);
+
+  b.SetInsertPoint(try_other);
+  auto [other_m, other_e] = normalize(b.CreateAdd(mant, b.CreateZExt(b.CreateNot(up), i64)), len);
+  BasicBlock *other_ok = block("other_ok"), *next = block("next");
+  b.CreateCondBr(reads_back(other_m, shift_of(other_e, len)), other_ok, next);
+  b.SetInsertPoint(other_ok);
+  b.CreateBr(found);
+  b.SetInsertPoint(next);
+  len->addIncoming(b.CreateAdd(len, b.getInt64(1)), next);
+  prefix->addIncoming(mant, next);
+  b.CreateBr(loop);
+
+  // The digits, without trailing zeros, and the exponent of the first one.
+  b.SetInsertPoint(found);
+  PHINode *fm = b.CreatePHI(i64, 2), *fe = b.CreatePHI(i32, 2);
+  fm->addIncoming(near_m, near_ok);
+  fe->addIncoming(near_e, near_ok);
+  fm->addIncoming(other_m, other_ok);
+  fe->addIncoming(other_e, other_ok);
+  BasicBlock *strip = block("strip"), *stripped = block("stripped");
+  b.CreateBr(strip);
+  b.SetInsertPoint(strip);
+  PHINode *m_digits = b.CreatePHI(i64, 2);
+  m_digits->addIncoming(fm, found);
+  Value *tens = b.CreateURem(m_digits, b.getInt64(10));
+  Value *fewer = b.CreateUDiv(m_digits, b.getInt64(10));
+  m_digits->addIncoming(fewer, strip);
+  b.CreateCondBr(b.CreateICmpEQ(tens, b.getInt64(0)), strip, stripped);
+  b.SetInsertPoint(stripped);
+  Value *n = call("snprintf", {num, b.getInt64(40), str("%llu"), m_digits});
+  Value *zeros = str("0000000000000000");
+
+  // Exponents outside [-4, 16): `1.5e-7`, `1e16` (the limits of the type of x).
+  BasicBlock *sci = block("sci"), *dec = block("dec"), *dec_int = block("dec_int"), *dec_frac = block("dec_frac"),
+             *dec_small = block("dec_small"), *big = block("big");
+  Value *lo = b.CreateSelect(is_f32, ConstantFP::get(dbl, double(1e-4f)), ConstantFP::get(dbl, 1e-4));
+  Value *hi = b.CreateSelect(is_f32, ConstantFP::get(dbl, double(1e16f)), ConstantFP::get(dbl, 1e16));
+  b.CreateCondBr(b.CreateOr(b.CreateFCmpOLT(ax, lo), b.CreateFCmpOGE(ax, hi)), sci, dec);
+  b.SetInsertPoint(sci);
+  Value *point = b.CreateSelect(b.CreateICmpSGT(n, b.getInt32(1)), str("."), str(""));
+  call("printf", {str("%s%.1s%s%se%d\n"), sign, num, point, b.CreateGEP(b.getInt8Ty(), num, b.getInt64(1)), fe});
+  b.CreateRetVoid();
+
+  b.SetInsertPoint(dec);
+  b.CreateCondBr(b.CreateICmpSLT(fe, b.getInt32(0)), dec_small, big);
+  b.SetInsertPoint(dec_small);  // 0.000ddd
+  call("printf", {str("%s0.%.*s%s\n"), sign, b.CreateSub(b.getInt32(-1), fe), zeros, num});
+  b.CreateRetVoid();
+  b.SetInsertPoint(big);
+  Value *int_digits = b.CreateAdd(fe, b.getInt32(1));
+  b.CreateCondBr(b.CreateICmpSLE(n, int_digits), dec_int, dec_frac);
+  b.SetInsertPoint(dec_int);  // ddd000.0
+  call("printf", {str("%s%s%.*s.0\n"), sign, num, b.CreateSub(int_digits, n), zeros});
+  b.CreateRetVoid();
+  b.SetInsertPoint(dec_frac);  // ddd.ddd
+  Value *rest = b.CreateGEP(b.getInt8Ty(), num, b.CreateSExt(int_digits, i64));
+  call("printf", {str("%s%.*s.%s\n"), sign, int_digits, num, rest});
+  b.CreateRetVoid();
+  return fn;
+}
+
 // Declares C function `e`, with the extensions the C ABI wants for narrow
 // integers and bools.
 Function *declare_extern(Module &m, const Types &types, const jir::ExternFn &e) {
@@ -1103,7 +1365,7 @@ std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, co
   if (!entry->params.empty() && !native) throw CodegenError("@_start must take no parameters");
 
   for (const auto &f : m.funcs)
-    FnGen(f, fns[f.name], *mod, types, fns, externs, triple, !native && f.name == "_start").run();
+    FnGen(f, fns[f.name], *mod, types, fns, externs, triple, !native && f.name == "_start", native).run();
   if (native) {
     define_c_main(*mod, fns["main"], *entry);
   } else {

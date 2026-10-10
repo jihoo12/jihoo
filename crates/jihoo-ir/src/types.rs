@@ -221,8 +221,21 @@ impl Type {
         matches!(self, Type::Expr | Type::Stmts | Type::Items)
     }
 
-    pub fn is_printable(&self) -> bool {
-        matches!(self, Type::Int(_) | Type::Float(_) | Type::Bool | Type::Str)
+    /// What `print` takes in `profile`: numbers, bools, and text, which is a
+    /// `str` on the VM and a NUL-terminated `*u8` natively.
+    pub fn is_printable(&self, profile: Profile) -> bool {
+        match self {
+            Type::Int(_) | Type::Float(_) | Type::Bool => true,
+            Type::Str => profile == Profile::Hosted,
+            Type::Ptr(t) => profile == Profile::Native && **t == Type::U8,
+            _ => false,
+        }
+    }
+
+    /// Whether `print` exists in `profile`: on the VM, and natively with the C
+    /// library.
+    pub fn can_print(profile: Profile) -> bool {
+        profile != Profile::Freestanding
     }
 
     pub fn is_syscall_arg(&self) -> bool {
