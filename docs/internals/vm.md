@@ -41,7 +41,8 @@ updates them in place when it can.
 
 - Each object has a *shared* bit, set when a second reference to it may appear:
   a `copy` to another register, an argument, a field or element of another
-  object, a captured or sent value, or a part read out of a parent.
+  object, a captured or sent value, a part read out of a parent, or a part of
+  an object that is copied (the copy and the original then both hold it).
 - `setfield`, `setelem` and `setpath` whose result replaces their source
   register update an unshared object in place, and copy a shared one; the copy
   is unshared again. So in `while i < n { a[i] = f(i) }` only the first write

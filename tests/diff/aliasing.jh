@@ -1,0 +1,41 @@
+// Copies stay independent after nested updates. The VM updates unshared
+// objects in place; copying an outer value shares its inner ones, which must
+// then be copied too, as they always are natively.
+
+struct P {
+    x: i64
+}
+
+struct S {
+    p: P
+    q: P
+}
+
+fn entry() -> i64 {
+    let score = 0
+
+    let a = [[1], [2]]
+    a[1][0] = 2                       // a[1] is a fresh row
+    let b = a
+    a[0][0] = 5                       // copies a's outer array, not its rows
+    a[1][0] = 9
+    if b[1][0] == 2 && b[0][0] == 1 { score = score + 1 }
+    if a[1][0] == 9 && a[0][0] == 5 { score = score + 2 }
+
+    let s = S { p: P { x: 1 }, q: P { x: 1 } }
+    s.q.x = 2
+    let t = s
+    s.p.x = 5
+    s.q.x = 9
+    if t.q.x == 2 && t.p.x == 1 { score = score + 4 }
+    if s.q.x == 9 && s.p.x == 5 { score = score + 8 }
+
+    let g = [[[1]], [[2]]]
+    g[1][0][0] = 3
+    let h = g
+    g[0][0][0] = 4
+    g[1][0][0] = 5
+    if h[1][0][0] == 3 { score = score + 16 }
+
+    return score // 31 when everything holds
+}

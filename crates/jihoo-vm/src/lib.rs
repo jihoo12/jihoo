@@ -935,7 +935,7 @@ impl<'m> Vm<'m> {
                 self.heap.items_mut(objs[k])[at[k]] = new;
                 new = Value::Agg(objs[k]);
             } else {
-                let mut values = self.heap.items(objs[k]).to_vec();
+                let mut values = self.copy_items(objs[k]);
                 values[at[k]] = new;
                 self.temp_roots.push(new);
                 new = Value::Agg(self.alloc_agg(values));
@@ -943,6 +943,16 @@ impl<'m> Vm<'m> {
         }
         self.temp_roots.clear();
         Ok(new)
+    }
+
+    /// The parts of aggregate `obj`, for a copy of it. The copy and `obj` both
+    /// refer to each part, so none may be updated in place any more.
+    fn copy_items(&mut self, obj: GcRef) -> Vec<Value> {
+        let values = self.heap.items(obj).to_vec();
+        for v in &values {
+            self.share(*v);
+        }
+        values
     }
 
     fn agg_of(&self, v: Value) -> Result<GcRef, VmError> {
@@ -968,7 +978,7 @@ impl<'m> Vm<'m> {
             self.heap.items_mut(obj)[i] = v;
             return;
         }
-        let mut values = self.heap.items(obj).to_vec();
+        let mut values = self.copy_items(obj);
         values[i] = v;
         // `src` and `v`'s register still hold their values, so everything in
         // `values` stays rooted if this allocation collects.
@@ -1586,9 +1596,27 @@ fn main() {
         Some(x) => print(x[0])          // 70
         None => {}
     }
+    // Copying an outer value must not leave an inner one updatable in place:
+    // the copy and the original both hold the inner rows.
+    let g = [[1], [2]]
+    g[1][0] = 3                         // g[1] is a fresh, unshared row
+    let h = g
+    g[0][0] = 4                         // copies g's outer array
+    g[1][0] = 5
+    print(h[1][0])                      // 3
+    g[1][0] = 6
+    let k = fn() -> i64 { return g[1][0] }
+    g[0][0] = 7
+    g[1][0] = 8
+    print(k())                          // 6
+    let c2 = chan([[i64; 1]; 2], 1)
+    send(c2, g)
+    g[0][0] = 9
+    g[1][0] = 10
+    print(recv(c2)[1][0])               // 8
 }
 enum Option(T: type) { Some(T), None }";
-        let expected = "1\n109\n2\n3\n9\n0\n9\n50\n60\n1\n1\n5\n70\n";
+        let expected = "1\n109\n2\n3\n9\n0\n9\n50\n60\n1\n1\n5\n70\n3\n6\n8\n";
         let (r, out) = run_limited(src, false);
         r.unwrap();
         assert_eq!(out, expected);
