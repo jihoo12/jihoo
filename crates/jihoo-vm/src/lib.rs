@@ -11,13 +11,16 @@
 //! waits on a channel, it is a deadlock.
 
 pub mod gc;
+mod program;
 
-use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
 use std::io::Write;
+use std::rc::Rc;
 
 use gc::{GcRef, Heap, Waiter};
+use program::{int_binary, Op};
+pub use program::Program;
 use jihoo_ir::{BinOp, FloatTy, Function, Inst, IntTy, Module, PathStep, Profile, Reg, SelectCase, Terminator, Type, UnOp};
 
 const MAX_CALL_DEPTH: usize = 10_000;
@@ -95,7 +98,8 @@ struct Wait {
 
 pub struct Vm<'m> {
     module: &'m Module,
-    fn_index: Cow<'m, FnIndex>,
+    /// The module prepared to run (see `program.rs`).
+    program: Rc<Program>,
     heap: Heap,
     /// The frames of the running task.
     stack: Vec<Frame>,
@@ -117,39 +121,15 @@ pub struct Vm<'m> {
     /// as the VM lives: between allocating an argument and passing it to
     /// `call_named`, no frame holds it.
     pinned: Vec<Value>,
+    /// Register vectors of returned frames, reused for new ones so that a
+    /// call allocates nothing.
+    reg_pool: Vec<Vec<Value>>,
+    /// Check every in-place update (`JIHOO_VM_CHECK`, see `check_in_place`).
+    check: bool,
     /// Instructions left before execution is stopped, if limited.
     fuel: Option<u64>,
     /// The next number `unique` hands out.
     uniques: u64,
-}
-
-/// The index of each function of a module by name. A VM makes its own, or
-/// borrows one kept up to date with a module that only grows, as compile-time
-/// evaluation does, so that a new VM costs nothing per function.
-#[derive(Debug, Clone, Default)]
-pub struct FnIndex(HashMap<String, usize>);
-
-impl FnIndex {
-    pub fn of(module: &Module) -> FnIndex {
-        FnIndex(module.funcs.iter().enumerate().map(|(i, f)| (f.name.clone(), i)).collect())
-    }
-
-    /// Notes that function `name` is at `index`, which must be where it is.
-    pub fn insert(&mut self, name: &str, index: usize) {
-        self.0.insert(name.to_string(), index);
-    }
-
-    pub fn get(&self, name: &str) -> Option<usize> {
-        self.0.get(name).copied()
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
 }
 
 /// Runs `main` of a hosted module and returns its result.
@@ -159,15 +139,17 @@ pub fn run(module: &Module, out: &mut dyn Write) -> Result<i64, VmError> {
 
 impl<'m> Vm<'m> {
     pub fn new(module: &'m Module) -> Self {
-        Vm::with_index(module, Cow::Owned(FnIndex::of(module)))
+        Vm::with_program(module, Rc::new(Program::of(module)))
     }
 
-    /// A VM for `module` that uses `index`, which must index exactly its functions.
-    pub fn with_index(module: &'m Module, index: Cow<'m, FnIndex>) -> Self {
-        debug_assert_eq!(index.len(), module.funcs.len(), "the index does not match the module");
+    /// A VM for `module` that runs `program`, which must be made from exactly
+    /// its functions. Compile-time evaluation keeps one that grows with its
+    /// module, so that a new VM costs nothing per function.
+    pub fn with_program(module: &'m Module, program: Rc<Program>) -> Self {
+        debug_assert_eq!(program.len(), module.funcs.len(), "the program does not match the module");
         Vm {
             module,
-            fn_index: index,
+            program,
             heap: Heap::default(),
             stack: Vec::new(),
             tasks: Vec::new(),
@@ -178,6 +160,8 @@ impl<'m> Vm<'m> {
             next_token: 0,
             temp_roots: Vec::new(),
             pinned: Vec::new(),
+            reg_pool: Vec::new(),
+            check: std::env::var_os("JIHOO_VM_CHECK").is_some_and(|v| !v.is_empty() && v != "0"),
             fuel: None,
             uniques: 0,
         }
@@ -192,6 +176,12 @@ impl<'m> Vm<'m> {
     /// The next number `unique` would hand out.
     pub fn uniques(&self) -> u64 {
         self.uniques
+    }
+
+    /// Checks every in-place update, whatever `JIHOO_VM_CHECK` says.
+    pub fn with_check(mut self, on: bool) -> Self {
+        self.check = on;
+        self
     }
 
     /// Stops execution with an error after `steps` instructions. Used for
@@ -213,7 +203,7 @@ impl<'m> Vm<'m> {
     /// Instructions the VM cannot run (pointers, `syscall`) are runtime errors.
     pub fn call_named(&mut self, name: &str, args: &[Value], out: &mut dyn Write) -> Result<Value, VmError> {
         let func = self
-            .fn_index
+            .program
             .get(name)
             .ok_or_else(|| VmError { func: name.into(), msg: "no such function".into() })?;
         self.call(func, args, out)
@@ -229,14 +219,15 @@ impl<'m> Vm<'m> {
 
     /// The function value for function `name`, if the module has it.
     pub fn func_value(&self, name: &str) -> Option<Value> {
-        self.fn_index.get(name).map(|i| Value::Func(i as u32))
+        self.program.get(name).map(|i| Value::Func(i as u32))
     }
 
     /// The index of function `name`, which an instruction names. Every function
     /// a module calls is in it: the verifier checks a program, and compile-time
     /// evaluation adds what it calls.
+    #[inline]
     fn func_index(&self, name: &str) -> usize {
-        self.fn_index.get(name).unwrap_or_else(|| panic!("no function `{name}` in the module"))
+        self.program.get(name).unwrap_or_else(|| panic!("no function `{name}` in the module"))
     }
 
     /// The name of the function a `Value::Func` refers to.
@@ -250,7 +241,7 @@ impl<'m> Vm<'m> {
             let msg = format!("{} modules cannot run on the VM; use `jihoo build`", self.module.profile.as_str());
             return Err(err(&msg));
         }
-        let main = self.fn_index.get("main").ok_or_else(|| err("no `main` function"))?;
+        let main = self.program.get("main").ok_or_else(|| err("no `main` function"))?;
         match self.call(main, &[], out)? {
             Value::Int(n) => Ok(n),
             Value::Unit => Ok(0),
@@ -268,6 +259,7 @@ impl<'m> Vm<'m> {
         self.slice = TIME_SLICE;
         self.push_frame(func, args, None)?;
         let module = self.module;
+        let program = self.program.clone();
 
         loop {
             if let Some(fuel) = &mut self.fuel {
@@ -279,23 +271,49 @@ impl<'m> Vm<'m> {
             self.slice = self.slice.saturating_sub(1);
 
             let frame = self.stack.last_mut().unwrap();
-            let f = &module.funcs[frame.func];
-            let block = &f.blocks[frame.block];
-            if frame.ip < block.insts.len() {
-                let inst = &block.insts[frame.ip];
+            let ops = program.block(frame.func, frame.block);
+            if frame.ip < ops.len() {
+                let ip = frame.ip;
                 frame.ip += 1;
-                self.exec(f, inst, out)?;
-                if self.blocked {
-                    self.blocked = false;
-                    self.switch_task()?;
-                } else if matches!(inst, Inst::Call { .. } | Inst::CallIndirect { .. }) {
-                    self.safepoint()?;
+                match &ops[ip] {
+                    Op::Const { dst, value } => self.set(*dst, *value),
+                    Op::Copy { dst, src } => {
+                        let v = self.get(*src);
+                        if dst != src {
+                            self.share(v);
+                        }
+                        self.set(*dst, v);
+                    }
+                    Op::Int { dst, op, ty, lhs, rhs } => {
+                        let (x, y) = (self.int(*lhs)?, self.int(*rhs)?);
+                        let Some(v) = int_binary(*op, *ty, x, y) else {
+                            return Err(self.error("division by zero"));
+                        };
+                        self.set(*dst, v);
+                    }
+                    Op::Call { dst, func, args } => {
+                        let frame = self.call_frame(*func as usize, &[], args, Some(*dst));
+                        self.push(frame)?;
+                        self.safepoint()?;
+                    }
+                    Op::FuncRef { dst, func } => self.set(*dst, Value::Func(*func)),
+                    Op::Inst => {
+                        let f = &module.funcs[frame.func];
+                        let inst = &f.blocks[frame.block].insts[ip];
+                        self.exec(f, inst, out)?;
+                        if self.blocked {
+                            self.blocked = false;
+                            self.switch_task()?;
+                        } else if matches!(inst, Inst::CallIndirect { .. }) {
+                            self.safepoint()?;
+                        }
+                    }
                 }
                 continue;
             }
 
             let from = frame.block;
-            match &block.term {
+            match &module.funcs[frame.func].blocks[from].term {
                 Terminator::Jump(b) => {
                     frame.block = b.0 as usize;
                     frame.ip = 0;
@@ -316,6 +334,7 @@ impl<'m> Vm<'m> {
                 Terminator::Ret(r) => {
                     let v = frame.regs[r.0 as usize];
                     let done = self.stack.pop().unwrap();
+                    self.reg_pool.push(done.regs);
                     if let Some(caller) = self.stack.last_mut() {
                         caller.regs[done.ret_dst.unwrap().0 as usize] = v;
                     } else if self.current == 0 {
@@ -436,20 +455,45 @@ impl<'m> Vm<'m> {
         }
     }
 
-    fn frame(&self, func: usize, args: &[Value], ret_dst: Option<Reg>) -> Frame {
-        let f = &self.module.funcs[func];
-        let mut regs = vec![Value::Unit; f.regs.len()];
+    fn frame(&mut self, func: usize, args: &[Value], ret_dst: Option<Reg>) -> Frame {
+        let mut regs = self.regs_for(func);
         regs[..args.len()].copy_from_slice(args);
         Frame { func, block: 0, ip: 0, regs, ret_dst }
     }
 
+    /// Registers for a new frame of `func`, all unit, from the pool if it can.
+    #[inline]
+    fn regs_for(&mut self, func: usize) -> Vec<Value> {
+        let mut regs = self.reg_pool.pop().unwrap_or_default();
+        regs.clear();
+        regs.resize(self.module.funcs[func].regs.len(), Value::Unit);
+        regs
+    }
+
     fn push_frame(&mut self, func: usize, args: &[Value], ret_dst: Option<Reg>) -> Result<(), VmError> {
+        let frame = self.frame(func, args, ret_dst);
+        self.push(frame)
+    }
+
+    #[inline]
+    fn push(&mut self, frame: Frame) -> Result<(), VmError> {
         if self.stack.len() >= MAX_CALL_DEPTH {
             return Err(self.error("stack overflow"));
         }
-        let frame = self.frame(func, args, ret_dst);
         self.stack.push(frame);
         Ok(())
+    }
+
+    /// A frame calling `func` with `first` (a closure's captured values) and
+    /// then the values of `args`, which get a second reference.
+    #[inline]
+    fn call_frame(&mut self, func: usize, first: &[Value], args: &[Reg], ret_dst: Option<Reg>) -> Frame {
+        let mut regs = self.regs_for(func);
+        regs[..first.len()].copy_from_slice(first);
+        for (i, r) in args.iter().enumerate() {
+            regs[first.len() + i] = self.shared(*r);
+        }
+        Frame { func, block: 0, ip: 0, regs, ret_dst }
     }
 
     /// The function a function value calls, and the arguments it passes first
@@ -473,25 +517,14 @@ impl<'m> Vm<'m> {
 
     fn exec(&mut self, f: &'m Function, inst: &'m Inst, out: &mut dyn Write) -> Result<(), VmError> {
         match inst {
-            Inst::Const { dst, value } => {
-                let v = match f.reg_type(*dst) {
-                    Type::Bool => Value::Bool(*value != 0),
-                    _ => Value::Int(*value),
-                };
-                self.set(*dst, v);
+            // Prepared as `Op`s and run by `call`.
+            Inst::Const { .. } | Inst::FConst { .. } | Inst::Copy { .. } | Inst::Call { .. } | Inst::FuncRef { .. } => {
+                unreachable!("prepared as an `Op` and run by `call`")
             }
-            Inst::FConst { dst, value } => self.set(*dst, Value::float(*value)),
             Inst::Unit { dst } => self.set(*dst, Value::Unit),
             Inst::Str { dst, value } => {
                 let r = self.alloc_str(value);
                 self.set(*dst, Value::Str(r));
-            }
-            Inst::Copy { dst, src } => {
-                let v = self.get(*src);
-                if dst != src {
-                    self.share(v);
-                }
-                self.set(*dst, v);
             }
             Inst::Unary { dst, op, src } => {
                 let v = match (op, f.reg_type(*dst)) {
@@ -627,15 +660,6 @@ impl<'m> Vm<'m> {
             | Inst::ElemPtr { .. } => {
                 return Err(self.error("pointers are not available on the VM"))
             }
-            Inst::Call { dst, func, args } => {
-                let callee = self.func_index(func);
-                let args: Vec<Value> = args.iter().map(|r| self.shared(*r)).collect();
-                self.push_frame(callee, &args, Some(*dst))?;
-            }
-            Inst::FuncRef { dst, func } => {
-                let v = Value::Func(self.func_index(func) as u32);
-                self.set(*dst, v);
-            }
             // A closure is an aggregate of the function and the captured values,
             // which become its first arguments.
             Inst::Closure { dst, func, captures } => {
@@ -645,14 +669,13 @@ impl<'m> Vm<'m> {
                 self.set(*dst, Value::Agg(r));
             }
             Inst::CallIndirect { dst, callee, args } => {
-                let (callee, mut all) = self.callee(*callee)?;
-                all.extend(args.iter().map(|r| self.shared(*r)));
-                self.push_frame(callee, &all, Some(*dst))?;
+                let (callee, captured) = self.callee(*callee)?;
+                let frame = self.call_frame(callee, &captured, args, Some(*dst));
+                self.push(frame)?;
             }
             Inst::Spawn { callee, args } => {
-                let (callee, mut all) = self.callee(*callee)?;
-                all.extend(args.iter().map(|r| self.shared(*r)));
-                let frame = self.frame(callee, &all, None);
+                let (callee, captured) = self.callee(*callee)?;
+                let frame = self.call_frame(callee, &captured, args, None);
                 self.tasks.push(Task { stack: vec![frame], waiting: None });
                 self.ready.push_back(self.tasks.len() - 1);
             }
@@ -821,35 +844,8 @@ impl<'m> Vm<'m> {
                 }
             });
         }
-        if let (Type::Int(t), Int(x), Int(y)) = (operand, a, b) {
-            let (ux, uy) = (x as u64, y as u64);
-            let signed = t.signed();
-            return Ok(match op {
-                BinOp::Add => Int(t.wrap(x.wrapping_add(y))),
-                BinOp::Sub => Int(t.wrap(x.wrapping_sub(y))),
-                BinOp::Mul => Int(t.wrap(x.wrapping_mul(y))),
-                BinOp::Div | BinOp::Rem if y == 0 => return Err(self.error("division by zero")),
-                BinOp::Div if signed => Int(t.wrap(x.wrapping_div(y))),
-                BinOp::Div => Int(t.wrap((ux / uy) as i64)),
-                BinOp::Rem if signed => Int(t.wrap(x.wrapping_rem(y))),
-                BinOp::Rem => Int(t.wrap((ux % uy) as i64)),
-                BinOp::Eq => Bool(x == y),
-                BinOp::Ne => Bool(x != y),
-                BinOp::Lt => Bool(if signed { x < y } else { ux < uy }),
-                BinOp::Le => Bool(if signed { x <= y } else { ux <= uy }),
-                BinOp::Gt => Bool(if signed { x > y } else { ux > uy }),
-                BinOp::Ge => Bool(if signed { x >= y } else { ux >= uy }),
-                // Canonical values of one type have the same high bits, so these
-                // stay canonical.
-                BinOp::And => Int(x & y),
-                BinOp::Or => Int(x | y),
-                BinOp::Xor => Int(x ^ y),
-                BinOp::Shl => Int(t.wrap(x.wrapping_shl(y as u32 & (t.bits() - 1)))),
-                // Canonical form already sign- or zero-extends, so a 64-bit shift of
-                // the right kind gives the right result for every width.
-                BinOp::Shr if signed => Int(x >> (y as u32 & (t.bits() - 1))),
-                BinOp::Shr => Int((ux >> (y as u32 & (t.bits() - 1))) as i64),
-            });
+        if let (&Type::Int(t), Int(x), Int(y)) = (operand, a, b) {
+            return int_binary(op, t, x, y).ok_or_else(|| self.error("division by zero"));
         }
         Ok(match (op, a, b) {
             (BinOp::Add, Str(x), Str(y)) => {
@@ -895,14 +891,40 @@ impl<'m> Vm<'m> {
 
     fn maybe_collect(&mut self) {
         if self.heap.should_collect() {
-            let mut waiting: Vec<Value> =
-                self.tasks.iter().filter_map(|t| t.waiting.as_ref()).flat_map(|w| w.chans.iter().map(|c| Value::Chan(*c))).collect();
-            waiting.extend(&self.temp_roots);
-            let roots = roots(&self.stack, &self.tasks, &self.pinned, &waiting);
+            let extra = self.extra_roots();
+            let roots = roots(&self.stack, &self.tasks, &self.pinned, &extra);
             self.heap.collect(roots);
         }
     }
 
+    /// The roots besides registers and pinned values: the channels tasks wait
+    /// on, and objects made in the middle of an instruction.
+    fn extra_roots(&self) -> Vec<Value> {
+        let mut extra: Vec<Value> =
+            self.tasks.iter().filter_map(|t| t.waiting.as_ref()).flat_map(|w| w.chans.iter().map(|c| Value::Chan(*c))).collect();
+        extra.extend(&self.temp_roots);
+        extra
+    }
+
+    /// With `JIHOO_VM_CHECK`, makes sure that `obj`, about to be updated in
+    /// place, has no reference but the one the update replaces: anything else
+    /// that refers to it would see the change, which breaks value semantics.
+    /// The shared bit is meant to rule that out (see `share`); this checks it
+    /// against the heap itself, which is slow, so only when asked.
+    fn check_in_place(&self, obj: GcRef) {
+        if !self.check {
+            return;
+        }
+        let extra = self.extra_roots();
+        let n = self.heap.references_to(roots(&self.stack, &self.tasks, &self.pinned, &extra), obj);
+        assert!(
+            n == 1,
+            "JIHOO_VM_CHECK: {obj:?} is updated in place in {}, but {n} references to it are live",
+            self.module.funcs[self.stack.last().unwrap().func].name
+        );
+    }
+
+    #[inline]
     fn bounds_check(&self, agg: GcRef, index: Reg) -> Result<usize, VmError> {
         let i = self.int(index)?;
         let len = self.heap.items(agg).len();
@@ -912,15 +934,17 @@ impl<'m> Vm<'m> {
         Ok(i as usize)
     }
 
+    #[inline(always)]
     fn agg_ref(&self, r: Reg) -> Result<GcRef, VmError> {
         match self.get(r) {
             Value::Agg(s) => Ok(s),
-            v => Err(self.error(&format!("expected a struct or array, found {}", type_name(v)))),
+            v => Err(self.type_error("a struct or array", v)),
         }
     }
 
     /// Notes that `v`, if it is an object, may now have another reference, so
     /// it must not be updated in place any more.
+    #[inline(always)]
     fn share(&mut self, v: Value) -> Value {
         if let Value::Agg(r) = v {
             self.heap.mark_shared(r);
@@ -929,6 +953,7 @@ impl<'m> Vm<'m> {
     }
 
     /// The value of `r`, which is about to be copied somewhere while `r` keeps it.
+    #[inline(always)]
     fn shared(&mut self, r: Reg) -> Value {
         let v = self.get(r);
         self.share(v)
@@ -969,6 +994,11 @@ impl<'m> Vm<'m> {
                 in_place
             })
             .collect();
+        for (k, &place) in places.iter().enumerate() {
+            if place {
+                self.check_in_place(objs[k]);
+            }
+        }
         // Rebuild inside out. Nothing is changed in place before every copy is
         // made, so the old objects stay reachable from `root`.
         let mut new = v;
@@ -1017,6 +1047,7 @@ impl<'m> Vm<'m> {
     /// updated in place; otherwise it is copied.
     fn update(&mut self, dst: Reg, src: Reg, obj: GcRef, i: usize, v: Value) {
         if dst == src && !self.heap.is_shared(obj) {
+            self.check_in_place(obj);
             self.heap.items_mut(obj)[i] = v;
             return;
         }
@@ -1028,35 +1059,49 @@ impl<'m> Vm<'m> {
         self.set(dst, Value::Agg(new));
     }
 
+    #[inline(always)]
     fn get(&self, r: Reg) -> Value {
         self.stack.last().unwrap().regs[r.0 as usize]
     }
 
+    #[inline(always)]
     fn set(&mut self, r: Reg, v: Value) {
         self.stack.last_mut().unwrap().regs[r.0 as usize] = v;
     }
 
+    #[inline(always)]
     fn float(&self, r: Reg) -> Result<f64, VmError> {
         match self.get(r) {
             Value::Float(x) => Ok(f64::from_bits(x)),
-            v => Err(self.error(&format!("expected a float, found {}", type_name(v)))),
+            v => Err(self.type_error("a float", v)),
         }
     }
 
+    #[inline(always)]
     fn int(&self, r: Reg) -> Result<i64, VmError> {
         match self.get(r) {
             Value::Int(n) => Ok(n),
-            v => Err(self.error(&format!("expected i64, found {}", type_name(v)))),
+            v => Err(self.type_error("i64", v)),
         }
     }
 
+    #[inline(always)]
     fn bool(&self, r: Reg) -> Result<bool, VmError> {
         match self.get(r) {
             Value::Bool(b) => Ok(b),
-            v => Err(self.error(&format!("expected bool, found {}", type_name(v)))),
+            v => Err(self.type_error("bool", v)),
         }
     }
 
+    /// A register held a value of the wrong kind: only for a broken module,
+    /// since the verifier checks types, so kept out of the way of the fast path.
+    #[cold]
+    #[inline(never)]
+    fn type_error(&self, expected: &str, v: Value) -> VmError {
+        self.error(&format!("expected {expected}, found {}", type_name(v)))
+    }
+
+    #[cold]
     fn error(&self, msg: &str) -> VmError {
         let func = match self.stack.last() {
             Some(f) => self.module.funcs[f.func].name.clone(),
@@ -1168,7 +1213,7 @@ mod tests {
     fn run_src(src: &str) -> (i64, String) {
         let m = compile(src);
         let mut out = Vec::new();
-        let code = run(&m, &mut out).unwrap();
+        let code = Vm::new(&m).with_check(true).run_main(&mut out).unwrap();
         (code, String::from_utf8(out).unwrap())
     }
 
@@ -1375,9 +1420,12 @@ fn main() {
         assert!(vm.heap().stats().collections >= 2);
     }
 
+    /// Runs `src`, with the in-place check on (`JIHOO_VM_CHECK`), so that every
+    /// test also checks that the VM never updates in place what another live
+    /// reference can see.
     fn run_limited(src: &str, stress: bool) -> (Result<i64, VmError>, String) {
         let m = compile(src);
-        let mut vm = Vm::new(&m).with_fuel(1_000_000);
+        let mut vm = Vm::new(&m).with_fuel(1_000_000).with_check(true);
         vm.heap_mut().set_stress(stress);
         let mut out = Vec::new();
         let r = vm.run_main(&mut out);

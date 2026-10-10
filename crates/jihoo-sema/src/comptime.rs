@@ -13,14 +13,13 @@
 //! Compile-time code cannot use what the VM does not have: pointers and `syscall`.
 //! `print` works and writes to the compiler's stderr.
 
-use std::borrow::Cow;
 use std::collections::HashSet;
 use std::rc::Rc;
 
 use jihoo_ir::{Inst, Reg, Terminator, Type};
 use jihoo_syntax::ast::Expr;
 use jihoo_syntax::{Error, Pos};
-use jihoo_vm::{FnIndex, Value, Vm};
+use jihoo_vm::{Program, Value, Vm};
 
 use crate::env::{Env, Sig};
 use crate::generic::Bindings;
@@ -30,12 +29,12 @@ use crate::FnCx;
 const FUEL: u64 = if cfg!(test) { 1_000_000 } else { 100_000_000 };
 
 /// The functions compile-time runs have needed so far, each with everything
-/// it calls, and their index. Runs only add to it. A run holds its own `Rc`s,
+/// it calls, and that module prepared for the VM. Runs only add to it. A run holds its own `Rc`s,
 /// so a run started while converting another's result (which can lower more
 /// code) adds to a copy instead of changing what the first one runs.
 pub(crate) struct ComptimeModule {
     module: Rc<jihoo_ir::Module>,
-    index: Rc<FnIndex>,
+    program: Rc<Program>,
 }
 
 impl ComptimeModule {
@@ -48,23 +47,22 @@ impl ComptimeModule {
             externs: vec![],
             funcs: vec![],
         };
-        ComptimeModule { module: Rc::new(module), index: Rc::default() }
+        ComptimeModule { module: Rc::new(module), program: Rc::default() }
     }
 
     fn has(&self, name: &str) -> bool {
-        self.index.get(name).is_some()
+        self.program.get(name).is_some()
     }
 
     fn add(&mut self, funcs: Vec<jihoo_ir::Function>) {
         let module = Rc::make_mut(&mut self.module);
-        let index = Rc::make_mut(&mut self.index);
         for f in funcs {
             // A run started while this one gathered may have added it already.
-            if index.get(&f.name).is_none() {
-                index.insert(&f.name, module.funcs.len());
+            if self.program.get(&f.name).is_none() {
                 module.funcs.push(f);
             }
         }
+        Rc::make_mut(&mut self.program).extend(module);
     }
 }
 
@@ -162,11 +160,11 @@ impl Env<'_> {
         }
 
         self.comptime.borrow_mut().add(funcs);
-        let (module, index) = {
+        let (module, program) = {
             let ct = self.comptime.borrow();
-            (ct.module.clone(), ct.index.clone())
+            (ct.module.clone(), ct.program.clone())
         };
-        let mut vm = Vm::with_index(&module, Cow::Borrowed(&index)).with_fuel(FUEL).with_uniques(self.uniques.get());
+        let mut vm = Vm::with_program(&module, program).with_fuel(FUEL).with_uniques(self.uniques.get());
         let mut values = Vec::new();
         for a in args {
             values.push(match a {

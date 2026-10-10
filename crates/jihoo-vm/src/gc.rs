@@ -248,6 +248,31 @@ impl Heap {
         self.next_gc = (self.live_bytes * 2).max(INITIAL_THRESHOLD);
     }
 
+    /// How many references to `target` there are in `roots` and in the objects
+    /// reachable from them (garbage does not count: nothing can see through
+    /// it). For checking that an object updated in place has only the one
+    /// reference that the update replaces. Walks the whole live heap.
+    pub fn references_to<'a>(&self, roots: impl IntoIterator<Item = &'a Value>, target: GcRef) -> usize {
+        let mut count = 0;
+        let mut seen = vec![false; self.slots.len()];
+        let mut work = Vec::new();
+        for r in roots.into_iter().filter_map(Value::gc_ref) {
+            count += usize::from(r == target);
+            work.push(r);
+        }
+        let mut children = Vec::new();
+        while let Some(r) = work.pop() {
+            if std::mem::replace(&mut seen[r.index as usize], true) {
+                continue;
+            }
+            children.clear();
+            self.obj(r).children(&mut children);
+            count += children.iter().filter(|&&c| c == target).count();
+            work.extend_from_slice(&children);
+        }
+        count
+    }
+
     pub fn stats(&self) -> HeapStats {
         HeapStats {
             live_objects: self.slots.iter().filter(|s| s.obj.is_some()).count(),
@@ -260,6 +285,20 @@ impl Heap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn references_are_counted_from_the_roots() {
+        let mut heap = Heap::default();
+        let child = Value::Agg(heap.alloc_agg(vec![Value::Int(1)]));
+        let target = child.gc_ref().unwrap();
+        let parent = Value::Agg(heap.alloc_agg(vec![child, child]));
+        // Garbage that refers to `target` does not count.
+        heap.alloc_agg(vec![child]);
+        assert_eq!(heap.references_to([&parent], target), 2);
+        assert_eq!(heap.references_to([&parent, &child], target), 3);
+        assert_eq!(heap.references_to([&child], target), 1);
+        assert_eq!(heap.references_to([], target), 0);
+    }
 
     #[test]
     #[should_panic(expected = "use of freed object")]

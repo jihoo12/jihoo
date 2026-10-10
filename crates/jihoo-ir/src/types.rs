@@ -23,6 +23,7 @@ impl IntTy {
     pub const ALL: [IntTy; 8] =
         [IntTy::I8, IntTy::I16, IntTy::I32, IntTy::I64, IntTy::U8, IntTy::U16, IntTy::U32, IntTy::U64];
 
+    #[inline]
     pub fn bits(self) -> u32 {
         match self {
             IntTy::I8 | IntTy::U8 => 8,
@@ -32,6 +33,7 @@ impl IntTy {
         }
     }
 
+    #[inline]
     pub fn signed(self) -> bool {
         matches!(self, IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64)
     }
@@ -67,6 +69,7 @@ impl IntTy {
 
     /// Wraps an arbitrary 64-bit pattern to this type's canonical i64 form:
     /// sign-extended for signed types, zero-extended for unsigned ones.
+    #[inline]
     pub fn wrap(self, v: i64) -> i64 {
         let shift = 64 - self.bits();
         if self.signed() {

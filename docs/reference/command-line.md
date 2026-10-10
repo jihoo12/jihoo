@@ -69,6 +69,7 @@ generics, expanded macros, folded constants.
 | `JIHOO_LD` | the linker for freestanding programs | `ld.lld` in `PATH` |
 | `JIHOO_CC` | the C compiler that links native programs | `cc` in `PATH` |
 | `JIHOO_GC_STRESS` | `1`: collect garbage before every allocation, to find GC bugs | off |
+| `JIHOO_VM_CHECK` | `1`: before every in-place update, check that nothing else refers to the object, to find sharing bugs | off |
 
 The Nix package sets these so that everything is found; from a source checkout,
 set `JIHOO_LLC` to the backend you built

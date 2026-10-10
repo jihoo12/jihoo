@@ -5,6 +5,26 @@ profile. It is a register machine: each JIR function's registers become a frame
 of values, and instructions are executed one by one, with bounds and division
 checks that report errors instead of crashing.
 
+## Running JIR
+
+The VM runs JIR as it is, with a little prepared first: `Program`
+(`crates/jihoo-vm/src/program.rs`) turns each instruction into an `Op` once per
+function, so that what would otherwise be worked out every time is ready. A
+call has the callee's index, not its name to look up; a constant is the value
+it puts in its register; an integer operation knows its type. The other
+instructions run from the JIR. Frames take their register vectors from a pool
+of returned ones, so a call allocates nothing.
+
+Compile-time evaluation keeps one module and its `Program` for a whole
+compilation and adds to both as it needs functions
+([Compiler](compiler.md#compile-time-evaluation)), so starting a VM for one
+constant costs nothing per function.
+
+Each step still finds the frame and its registers through the call stack, so
+the VM spends about 20 cycles on a simple instruction. Fewer would take a
+different register layout (one flat register stack, unchecked indexing), which
+it does not have yet.
+
 ## Tasks
 
 Tasks (`go f(x)`) run on one OS thread, interleaved by a deterministic
@@ -54,6 +74,16 @@ updates them in place when it can.
   channels are mutable too, since tasks share them to communicate.
 
 Filling and sorting a 20000-element array went from 9.9 s to 0.6 s with this.
+
+The shared bit has to be right everywhere a reference is made, and a mistake
+is silent: a copy changes along with its original. `JIHOO_VM_CHECK=1` checks
+the bit against the heap: before every in-place update it counts the live
+references to the object, from the roots and every object reachable from them,
+and stops with a panic unless there is exactly one, the one being replaced. It
+walks the heap at every update, so it is only for tests; the VM's own tests
+always run with it, and running the fuzzer with it
+([Testing](testing.md#fuzzing)) finds sharing bugs on the VM alone, without
+comparing against LLVM.
 
 ## Values
 

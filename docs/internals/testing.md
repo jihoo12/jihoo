@@ -8,6 +8,7 @@ ctest --test-dir backend-llvm/build         # the backend on its own, with hand-
 JIHOO_LLC=$PWD/backend-llvm/build/jihoo-llc cargo test --test differential
 JIHOO_LLC=$PWD/backend-llvm/build/jihoo-llc JIHOO_FUZZ_SEEDS=2000 cargo test --release --test fuzz
 JIHOO_GC_STRESS=1 cargo test                 # with a collection at every allocation
+JIHOO_VM_CHECK=1 cargo test                  # checking every in-place update against the heap
 nix flake check                              # everything, with the packaged toolchain
 ```
 
@@ -79,6 +80,16 @@ and `docs/jir.md` name the same JIR version, and keeps a fingerprint of
 `docs/jir.md`: after editing it, the test fails until you decide whether the
 change needs a new version ([Versions](../jir.md#versions)) and update the
 fingerprint it prints.
+
+## VM checks
+
+`JIHOO_VM_CHECK=1` makes the VM count, before every in-place update, the live
+references to the object it updates, and panic unless there is only the one
+being replaced ([VM and GC](vm.md#value-semantics-and-in-place-updates)). The
+VM's unit tests always run this way. Run the fuzzer with it after touching how
+the VM shares objects: it finds a sharing bug from the VM's run alone, before
+any output differs. With the bug of 18e4a33 put back, 11 of the 64 default
+seeds failed this way, with no backend at all.
 
 ## GC stress
 
