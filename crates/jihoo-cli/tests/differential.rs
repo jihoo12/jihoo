@@ -1,14 +1,11 @@
-//! Runs every program in `tests/diff/` on the VM and natively, and compares the
-//! exit status. See `tests/diff/README.md`.
+//! Runs every program in `tests/diff/` on the VM and natively, and compares
+//! what they print with `out` and their exit status. See `tests/diff/README.md`.
 
-use std::path::{Path, PathBuf};
+mod common;
+
 use std::process::Command;
 
-const JIHOO: &str = env!("CARGO_BIN_EXE_jihoo");
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
-}
+use common::{repo_root, Profile, JIHOO};
 
 fn exit_code(cmd: &mut Command) -> i32 {
     let out = cmd.output().expect("failed to spawn");
@@ -18,13 +15,11 @@ fn exit_code(cmd: &mut Command) -> i32 {
 
 #[test]
 fn vm_and_native_agree() {
-    let native = std::env::var_os("JIHOO_LLC").is_some();
-    if !native {
+    let compiled = common::compiled_enabled();
+    if !compiled {
         eprintln!("JIHOO_LLC is not set: checking the VM only");
     }
-
-    let work = std::env::temp_dir().join(format!("jihoo-diff-{}", std::process::id()));
-    std::fs::create_dir_all(&work).unwrap();
+    let work = common::work_dir("diff");
 
     let mut files: Vec<_> = std::fs::read_dir(repo_root().join("tests/diff"))
         .unwrap()
@@ -37,28 +32,17 @@ fn vm_and_native_agree() {
     for file in files {
         let name = file.file_stem().unwrap().to_string_lossy().into_owned();
         let body = std::fs::read_to_string(&file).unwrap();
-
-        let hosted = work.join(format!("{name}.hosted.jh"));
-        std::fs::write(&hosted, format!("{body}\nfn main() -> i64 {{ return entry() }}\n")).unwrap();
-        let vm = exit_code(Command::new(JIHOO).arg("run").arg(&hosted));
-
-        if native {
+        let vm = common::run(&body, Profile::Hosted, &work, &name).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(vm.status.is_some());
+        if compiled {
             // Both compiled profiles: freestanding (`_start`, no libc) and
             // native (C's `main`, linked with libc).
-            for (profile, entry) in [("freestanding", "_start"), ("native", "main")] {
-                let src = work.join(format!("{name}.{profile}.jh"));
-                let bin = work.join(format!("{name}.{profile}"));
-                std::fs::write(
-                    &src,
-                    format!("#![{profile}]\n{body}\nfn {entry}() -> i64 {{ return entry() }}\n"),
-                )
-                .unwrap();
-                assert_eq!(exit_code(Command::new(JIHOO).arg("build").arg(&src).arg("-o").arg(&bin)), 0);
-                let nat = exit_code(&mut Command::new(&bin));
-                assert_eq!(vm, nat, "{name}: VM exited with {vm}, {profile} build with {nat}");
+            for profile in [Profile::Freestanding, Profile::Native] {
+                let nat = common::run(&body, profile, &work, &name).unwrap_or_else(|e| panic!("{name}: {e}"));
+                assert_eq!(vm, nat, "{name}: the VM and the {} build differ", profile.name());
             }
         }
-        eprintln!("{name}: {vm}");
+        eprintln!("{name}: {:?}, {} lines of output", vm.status, vm.stdout.lines().count());
     }
 
     std::fs::remove_dir_all(&work).unwrap();
