@@ -1,0 +1,27 @@
+// Integer division must agree between the VM and LLVM, including the one
+// signed overflow: MIN / -1 wraps to MIN, and MIN % -1 is 0.
+
+fn div(a: i64, b: i64) -> i64 { return a / b }
+fn rem(a: i64, b: i64) -> i64 { return a % b }
+fn div8(a: i8, b: i8) -> i8 { return a / b }
+fn rem8(a: i8, b: i8) -> i8 { return a % b }
+fn div32(a: i32, b: i32) -> i32 { return a / b }
+fn divu(a: u64, b: u64) -> u64 { return a / b }
+fn remu(a: u8, b: u8) -> u8 { return a % b }
+
+fn entry() -> i64 {
+    let score = 0
+    let min = -9223372036854775807 - 1
+
+    if div(min, -1) == min && rem(min, -1) == 0 { score = score + 1 }
+    if div8(-128, -1) == -128 && rem8(-128, -1) == 0 { score = score + 2 }
+    if div32(-2147483647 - 1, -1) == -2147483647 - 1 { score = score + 4 }
+    if div(-7, 2) == -3 && rem(-7, 2) == -1 && rem(7, -2) == 1 { score = score + 8 }
+    if div(min, 3) == -3074457345618258602 && div(9, -1) == -9 { score = score + 16 }
+    // Unsigned: -1 as u64 is the largest value, not -1.
+    if divu(0 - 1, 0 - 1) == 1 && divu(0 - 1, 2) == 9223372036854775807 { score = score + 32 }
+    if remu(255, 16) == 15 { score = score + 64 }
+    if rem(min, min) == 0 && div(min, min) == 1 { score = score + 128 }
+
+    return score % 256 // 255 when everything holds
+}

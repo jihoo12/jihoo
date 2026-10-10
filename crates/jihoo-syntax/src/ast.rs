@@ -261,7 +261,8 @@ pub struct Expr {
 
 #[derive(Debug, Clone)]
 pub enum ExprKind {
-    Int(i64),
+    /// An integer literal, up to `u64::MAX`; `-5` is a negation of `5`.
+    Int(u64),
     /// A float literal: `f64` unless its context wants `f32`.
     Float(f64),
     Bool(bool),

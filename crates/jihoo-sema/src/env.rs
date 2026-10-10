@@ -378,8 +378,12 @@ impl<'p> Env<'p> {
 
     /// An array length: any integer expression, evaluated at compile time.
     pub fn array_len(&self, e: &Expr, b: &Rc<Bindings>) -> Result<u64, Error> {
+        // The lexer only produces non-negative literals.
         if let ExprKind::Int(n) = e.kind {
-            return Ok(n as u64); // the lexer only produces non-negative literals
+            if n > i64::MAX as u64 {
+                return Err(Error::new(e.pos, "array length must be between 0 and 2^63 - 1"));
+            }
+            return Ok(n);
         }
         let (ty, v) = self.comptime(e, Some(&Type::I64), b)?;
         match (ty, v) {

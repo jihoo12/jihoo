@@ -1,0 +1,32 @@
+// Integer literals at the limits of their types must mean the same on the VM
+// and natively: u64 values above i64::MAX, and i64::MIN written directly.
+
+fn top(x: u64) -> i64 {
+    match x {
+        0xffff_ffff_ffff_ffff => return 1
+        18446744073709551614 => return 2
+        _ => return 0
+    }
+}
+
+fn entry() -> i64 {
+    let score = 0
+
+    let max: u64 = 0xffff_ffff_ffff_ffff
+    if max == !0 && max / 2 == 9223372036854775807 { score = score + 1 }
+    let big: u64 = 9223372036854775808     // just above i64::MAX
+    if big - 1 == 9223372036854775807 && big > 9223372036854775807 { score = score + 2 }
+    if top(max) == 1 && top(max - 1) == 2 && top(0) == 0 { score = score + 4 }
+
+    let min = -9223372036854775808
+    if min == -9223372036854775807 - 1 && min < 0 { score = score + 8 }
+    let lo: i8 = -128
+    let hi: i8 = 127
+    if lo == hi + 1 { score = score + 16 }                // wraps
+    if (max as i64) == -1 && (min as u64) == big { score = score + 32 }
+    let u: u32 = 0xffff_ffff
+    if u + 1 == 0 && (u as u64) == 4294967295 { score = score + 64 }
+    if 0b1111_1111 as u8 == 255 { score = score + 128 }
+
+    return score % 256 // 255 when everything holds
+}

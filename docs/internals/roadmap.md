@@ -29,8 +29,7 @@
 
 - **Language:** automatic macro hygiene; field visibility.
 - **Native code:** passing structs to C by value (per-target C ABI lowering);
-  exporting jihoo functions under C names; a `print` for native code; checking
-  integer division by zero, as the VM does.
+  exporting jihoo functions under C names; a `print` for native code.
 - **Floats:** exact math builtins for every profile (`sqrt`, `floor`, ...,
   which IEEE defines exactly); reading a float's bits.
 - **Tooling:** a Rust-side JIR parser, so that `jihoo run file.jir` works.

@@ -42,8 +42,9 @@ The details are in [JIR](../jir.md#native-abi).
 ## Checks and traps
 
 - Array indexing is bounds-checked and traps (`llvm.trap`) when out of range.
-- Integer division by zero is not checked yet; it is undefined behavior, where
-  the VM reports an error.
+- Integer `/` and `%` trap when dividing by zero, where the VM reports an
+  error, and signed `MIN / -1` wraps to `MIN` (remainder 0) as on the VM. LLVM
+  leaves both undefined, so the backend checks the divisor before dividing.
 - Floats use no fast-math flags and no fused multiply-add, so results match the
   VM bit for bit.
 

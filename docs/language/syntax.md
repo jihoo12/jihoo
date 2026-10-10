@@ -88,9 +88,11 @@ patterns and `select`).
 | array   | `[1, 2, 3]`, `[0; 64]` | a list, or a value repeated a number of times ([Arrays](arrays.md)). |
 | struct  | `Point { x: 1, y: 2 }` | every field, in any order ([Structs](structs.md)). |
 
-Integer literals can be at most `9223372036854775807` (`i64`'s maximum), also
-in hex; write larger `u64` constants with operators, such as `!0` for all ones.
-A minus sign is the negation operator, not part of the literal.
+A minus sign is the negation operator, not part of the literal, but a negated
+literal is checked as a whole: `-128` fits in an `i8` and
+`-9223372036854775808` in an `i64`. A literal can be as large as `u64` allows
+(`0xffff_ffff_ffff_ffff`), as long as it fits the type it gets; without context
+that is `i64`, so `9223372036854775808` on its own is an error.
 
 ## Items
 

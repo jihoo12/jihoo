@@ -3,7 +3,9 @@ use crate::{Error, Pos};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
     Ident(String),
-    Int(i64),
+    /// Integer literals are never negative (`-` is an operator) and go up to
+    /// `u64::MAX`; their type decides whether they fit.
+    Int(u64),
     Float(f64),
     Str(String),
     /// `#![name]`
@@ -322,7 +324,7 @@ impl<'a> Lexer<'a> {
                         Err(_) => return Err(Error::new(pos, format!("float literal `{raw}` is not a valid number"))),
                     }
                 } else {
-                    let n = i64::from_str_radix(&digits, radix).map_err(|e| {
+                    let n = u64::from_str_radix(&digits, radix).map_err(|e| {
                         let why = match e.kind() {
                             std::num::IntErrorKind::PosOverflow => "is too large",
                             _ => "is not a valid number",

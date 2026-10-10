@@ -46,9 +46,10 @@ number is the width in bits.
   with [`as`](#conversions).
 - `+`, `-` and `*` wrap around on overflow, the same on the VM and natively
   (`255 as u8 + 1` is `0`). `/` and `%` truncate towards zero; `%` has the sign
-  of the left operand.
-- Dividing by zero is a runtime error on the VM (`division by zero`). In
-  compiled code it is not checked yet, and its behavior is undefined.
+  of the left operand. The one signed division that overflows, `MIN / -1`,
+  wraps to `MIN`, and `MIN % -1` is `0`.
+- Dividing by zero stops the program: the VM reports `division by zero`, and
+  compiled code traps, as for an out-of-bounds index.
 - Negation (`-x`) is only defined on signed integers.
 
 ## Floats

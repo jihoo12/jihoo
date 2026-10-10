@@ -13,7 +13,7 @@ otherwise run or expand forever, with an error that says which limit was hit.
 | VM time slice | 1000 instructions | not an error: the next task runs at the next safepoint ([Tasks](../language/tasks-and-channels.md#scheduling)) |
 | `syscall` arguments | the number and up to 6 arguments | compile error |
 | `asm` outputs | at most 1 | compile error |
-| integer literals | at most `9223372036854775807` | compile error; write larger `u64` values with operators |
+| integer literals | at most `18446744073709551615` (`u64::MAX`), and within their type | compile error |
 
 The GC starts collecting once the heap is larger than twice what survived the
 last collection, and not below 1 MiB ([VM and GC](../internals/vm.md#gc)). There

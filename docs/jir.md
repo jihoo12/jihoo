@@ -194,7 +194,7 @@ The result type is what the destination register must be declared as.
 | `%d = neg %a`                   | signed int or float   | same   | wrapping negation; for floats, flips the sign (also of 0 and NaN) |
 | `%d = not %a`                   | `bool` or int         | same   | logical not, or bitwise not of an integer |
 | `%d = add\|sub\|mul %a, %b`     | `T, T` (int)          | `T`    | wrapping arithmetic |
-| `%d = div\|rem %a, %b`          | `T, T` (int)          | `T`    | signed or unsigned by type; truncating (VM traps on zero; native: undefined for now) |
+| `%d = div\|rem %a, %b`          | `T, T` (int)          | `T`    | signed or unsigned by type; truncating; dividing by zero is a runtime error on the VM and traps natively; signed `MIN / -1` is `MIN`, and `MIN % -1` is 0 |
 | `%d = add\|sub\|mul\|div\|rem %a, %b` | `T, T` (float) | `T` | IEEE 754, rounded to nearest; `rem` is C's `fmod` (exact, sign of `%a`) |
 | `%d = and\|or\|xor %a, %b`      | `T, T` (int or `bool`) | `T`   | bitwise (for `bool`: logical, both sides evaluated) |
 | `%d = shl\|shr %a, %b`          | `T, T` (int)          | `T`    | shift by `%b` modulo the bit width; `shr` is arithmetic for signed types, logical for unsigned |

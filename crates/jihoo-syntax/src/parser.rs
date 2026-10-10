@@ -1343,7 +1343,9 @@ mod tests {
         };
         assert_eq!(lit("1_000"), 1000);
         assert_eq!(lit("0xff"), 255);
-        assert_eq!(lit("0x7fff_ffff_ffff_ffff"), i64::MAX);
+        assert_eq!(lit("0x7fff_ffff_ffff_ffff"), i64::MAX as u64);
+        assert_eq!(lit("0xffff_ffff_ffff_ffff"), u64::MAX);
+        assert_eq!(lit("18446744073709551615"), u64::MAX);
         assert_eq!(lit("0b1010"), 10);
         assert!(parse("fn f() { let x = 0x1_0000_0000_0000_0000 }").unwrap_err().msg.contains("too large"));
         assert!(parse("fn f() { let x = 0xg }").unwrap_err().msg.contains("not a valid number"));

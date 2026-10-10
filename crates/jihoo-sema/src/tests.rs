@@ -115,6 +115,18 @@ fn literals_take_their_type_from_context() {
 }
 
 #[test]
+fn literals_reach_the_limits_of_64_bit_types() {
+    check("fn main() { let x: u64 = 0xffff_ffff_ffff_ffff\n let y: u64 = 18446744073709551615 }").unwrap();
+    check("fn main() { let x = -9223372036854775808\n let y: i64 = -0x8000_0000_0000_0000 }").unwrap();
+    assert!(err("fn main() { let x = 9223372036854775808 }").contains("9223372036854775808 does not fit in i64"));
+    assert!(err("fn main() { let x: i64 = -9223372036854775809 }").contains("does not fit in i64"));
+    assert!(err("fn main() { let a: [u8; 9223372036854775808] = [0; 1] }").contains("array length"));
+    // u64 values keep their bit pattern in JIR.
+    let m = check("fn top() -> u64 { return 0xffff_ffff_ffff_ffff }\nfn main() {}").unwrap();
+    assert!(m.funcs[0].to_string().contains("const -1"), "{m}");
+}
+
+#[test]
 fn integer_types_do_not_mix() {
     assert!(err("fn main() { let a: u8 = 1\n let b = 2\n print(a + b) }").contains("cannot apply `+` to u8 and i64"));
     assert!(err("fn main() { let a: u8 = 1\n print(-a) }").contains("cannot apply `-` to u8"));

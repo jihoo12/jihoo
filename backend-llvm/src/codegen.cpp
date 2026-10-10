@@ -19,8 +19,9 @@
 // calling convention, the program's functions are named `jihoo.<name>` so they
 // cannot clash with C symbols, and C's `main` calls `jihoo.main`.
 //
-// Array element access is bounds-checked and traps (`llvm.trap`) when out of
-// range; raw pointer arithmetic is not checked.
+// Array element access is bounds-checked and integer division is checked for a
+// zero divisor; both trap (`llvm.trap`) when the check fails. Raw pointer
+// arithmetic is not checked.
 
 #include "codegen.h"
 
@@ -275,7 +276,7 @@ class FnGen {
   Type *i64_;
   std::vector<AllocaInst *> slots_;
   std::vector<BasicBlock *> blocks_;
-  BasicBlock *trap_ = nullptr;  // shared target of failed bounds checks
+  BasicBlock *trap_ = nullptr;  // shared target of failed bounds and division checks
   Value *sret_ = nullptr;       // where an aggregate result goes
 
   bool agg(uint32_t r) { return Types::is_agg(type(r)); }
@@ -353,18 +354,36 @@ class FnGen {
     if (dst != src) read_mem(dst, slot(src));
   }
 
-  // Continues in a new block if `index < len`, traps otherwise.
-  void bounds_check(Value *index, uint64_t len) {
+  // Continues in a new block if `ok` holds, traps otherwise.
+  void check(Value *ok, const char *name) {
     if (!trap_) {
-      trap_ = BasicBlock::Create(ctx_, "out_of_bounds", fn_);
+      trap_ = BasicBlock::Create(ctx_, "trap", fn_);
       IRBuilder<> tb(trap_);
       tb.CreateCall(Intrinsic::getOrInsertDeclaration(&mod_, Intrinsic::trap));
       tb.CreateUnreachable();
     }
-    auto *ok = BasicBlock::Create(ctx_, "in_bounds", fn_);
+    auto *next = BasicBlock::Create(ctx_, name, fn_);
+    b_.CreateCondBr(ok, next, trap_);
+    b_.SetInsertPoint(next);
+  }
+
+  // Continues in a new block if `index < len`, traps otherwise.
+  void bounds_check(Value *index, uint64_t len) {
     // Unsigned, so negative indices are out of range too.
-    b_.CreateCondBr(b_.CreateICmpULT(index, b_.getInt64(len)), ok, trap_);
-    b_.SetInsertPoint(ok);
+    check(b_.CreateICmpULT(index, b_.getInt64(len)), "in_bounds");
+  }
+
+  // Integer `div` or `rem` with the VM's semantics: dividing by zero traps
+  // (LLVM leaves it undefined), and the one signed overflow, MIN / -1, wraps
+  // to MIN with remainder 0 (LLVM leaves that undefined too).
+  Value *divide(bool rem, bool is_signed, Value *a, Value *b) {
+    check(b_.CreateICmpNE(b, ConstantInt::get(b->getType(), 0)), "nonzero");
+    if (!is_signed) return rem ? b_.CreateURem(a, b) : b_.CreateUDiv(a, b);
+    // Dividing by 1 instead of -1 is always defined; the result is then fixed up.
+    Value *minus_one = b_.CreateICmpEQ(b, ConstantInt::getSigned(b->getType(), -1));
+    Value *safe = b_.CreateSelect(minus_one, ConstantInt::get(b->getType(), 1), b);
+    if (rem) return b_.CreateSelect(minus_one, ConstantInt::get(a->getType(), 0), b_.CreateSRem(a, safe));
+    return b_.CreateSelect(minus_one, b_.CreateNeg(a), b_.CreateSDiv(a, safe));
   }
 
   // Array type of register `r`, which must hold an array (or point to one if `ptr`).
@@ -566,12 +585,8 @@ class FnGen {
           store(inst.dst, b_.CreateSub(arg(0), arg(1)));
         return;
       case Op::Mul: store(inst.dst, b_.CreateMul(arg(0), arg(1))); return;
-      // TODO: division by zero is undefined behaviour here; the VM traps instead.
-      case Op::Div:
-        store(inst.dst, is_signed(arg_reg(0)) ? b_.CreateSDiv(arg(0), arg(1)) : b_.CreateUDiv(arg(0), arg(1)));
-        return;
-      case Op::Rem:
-        store(inst.dst, is_signed(arg_reg(0)) ? b_.CreateSRem(arg(0), arg(1)) : b_.CreateURem(arg(0), arg(1)));
+      case Op::Div: case Op::Rem:
+        store(inst.dst, divide(inst.op == Op::Rem, is_signed(arg_reg(0)), arg(0), arg(1)));
         return;
       case Op::And: store(inst.dst, b_.CreateAnd(arg(0), arg(1))); return;
       case Op::Or: store(inst.dst, b_.CreateOr(arg(0), arg(1))); return;
