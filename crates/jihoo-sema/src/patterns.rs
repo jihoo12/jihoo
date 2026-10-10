@@ -286,7 +286,8 @@ impl FnCx<'_> {
                 // `Pair` matches any instance `Pair(...)`; `geo.Point` and `Point` match `geo.Point`.
                 let base = s.split('(').next().unwrap_or(s);
                 let short = |x: &str| x.rsplit('.').next().unwrap_or(x).to_string();
-                if short(base) != short(n) {
+                let written = crate::hygiene::qualified(n).map_or(n.as_str(), |(_, name)| name);
+                if short(base) != short(written) {
                     return err(format!("this pattern matches `{n}`, but the value is {t}"));
                 }
                 let decl = self.env.struct_fields(p.pos, s)?;

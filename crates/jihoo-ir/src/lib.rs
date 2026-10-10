@@ -21,7 +21,7 @@ pub use verify::verify;
 /// module instead of compiling it with other rules. Bump it whenever the
 /// format or the meaning of anything in it changes (see "Versions" in
 /// `docs/jir.md`); the `version` tests check that both sides and the spec agree.
-pub const JIR_VERSION: u32 = 2;
+pub const JIR_VERSION: u32 = 3;
 
 /// Language profile, selected with `#![native]` or `#![freestanding]` at the
 /// top of a source file.
@@ -354,6 +354,9 @@ pub enum Inst {
     /// Compile time only (macros): `prefix` plus a number never handed out before
     /// in this compilation, for names that cannot clash.
     Unique { dst: Reg, prefix: Reg },
+    /// Compile time only (macros): the source text of code, a `str`, with
+    /// names as written (see `plain_names`).
+    Stringify { dst: Reg, code: Reg },
     /// Native and freestanding only: inline assembly. `template` uses LLVM operand syntax
     /// (`$0` is the output if there is one, then the inputs) and `constraints` is an
     /// LLVM constraint string with one input entry per register in `args`. `dst`
@@ -460,6 +463,7 @@ impl Inst {
             | ToStr { dst, src }
             | Addr { dst, src }
             | Unique { dst, prefix: src }
+            | Stringify { dst, code: src }
             | Load { dst, ptr: src }
             | FieldPtr { dst, ptr: src, .. }
             | Splat { dst, value: src } => vec![dst, src],
@@ -494,4 +498,47 @@ impl Inst {
             CallIndirect { dst, callee, args } => [dst, callee].into_iter().chain(args).collect(),
         }
     }
+}
+
+/// Code (a macro's `expr`, `stmts` or `items` value) with names as they were
+/// written: without the hygiene marks of names a quote template wrote
+/// (`tmp#7`, or `tmp#` before an expansion numbers it) and the module
+/// qualifiers the compiler gives them (`#3:helper`). For `stringify` and
+/// error messages.
+pub fn plain_names(code: &str) -> String {
+    let b = code.as_bytes();
+    let name_char = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut out = String::with_capacity(code.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'"' {
+            // Strings are kept as they are.
+            let start = i;
+            i += 1;
+            while i < b.len() && b[i] != b'"' {
+                i += if b[i] == b'\\' { 2 } else { 1 };
+            }
+            i = (i + 1).min(b.len());
+            out.push_str(&code[start..i]);
+            continue;
+        }
+        if b[i] == b'#' {
+            let digits = b[i + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+            let after = i + 1 + digits;
+            // `#3:` before a name.
+            if digits > 0 && b.get(after) == Some(&b':') && (i == 0 || !name_char(b[i - 1])) {
+                i = after + 1;
+                continue;
+            }
+            // `#7` or `#` after a name.
+            if i > 0 && name_char(b[i - 1]) {
+                i = after;
+                continue;
+            }
+        }
+        let len = code[i..].chars().next().map_or(1, char::len_utf8);
+        out.push_str(&code[i..i + len]);
+        i += len;
+    }
+    out
 }

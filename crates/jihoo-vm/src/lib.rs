@@ -744,6 +744,14 @@ impl<'m> Vm<'m> {
                 let r = self.alloc_str(&text);
                 self.set(*dst, Value::Str(r));
             }
+            Inst::Stringify { dst, code } => {
+                let Value::Str(c) = self.get(*code) else {
+                    return Err(self.error("`stringify` needs code"));
+                };
+                let text = jihoo_ir::plain_names(self.heap.str(c));
+                let r = self.alloc_str(&text);
+                self.set(*dst, Value::Str(r));
+            }
             Inst::Unique { dst, prefix } => {
                 let Value::Str(p) = self.get(*prefix) else {
                     return Err(self.error("`unique` needs a str"));

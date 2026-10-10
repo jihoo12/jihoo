@@ -19,6 +19,7 @@ mod enums;
 mod equality;
 mod env;
 mod generic;
+mod hygiene;
 mod macros;
 mod patterns;
 mod place;
@@ -253,7 +254,7 @@ fn expand_item_macros(profile: Profile, mods: &[Module]) -> Result<Vec<Module>, 
                 for call in &module.program.macro_calls {
                     let sig = Rc::new(Sig { params: vec![], ret: Type::Unit });
                     let mut cx = FnCx::new(&env, sig, env.root(m).clone());
-                    let items = cx.expand_code(call.pos, &call.name, &call.args).and_then(|(kind, code)| {
+                    let items = cx.expand_code(call.pos, &call.name, &call.args).and_then(|(kind, code, expansion)| {
                         if kind != Type::Items {
                             let msg = format!("`{}!` produces {kind}; only `items` macros can be used at the top level", call.name);
                             return Err(Error::new(call.pos, msg));
@@ -261,6 +262,7 @@ fn expand_item_macros(profile: Profile, mods: &[Module]) -> Result<Vec<Module>, 
                         let mut p = jihoo_syntax::parse_items(&code).map_err(|e| {
                             Error::new(call.pos, format!("`{}!` produced code that does not parse: {} in `{code}`", call.name, e.msg))
                         })?;
+                        expansion.resolve(&env, hygiene::Code::Items(&mut p), &|_| false);
                         set_program_pos(&mut p, call.pos);
                         Ok(p)
                     });
@@ -611,7 +613,7 @@ impl<'a> FnCx<'a> {
         let key = self.env.key_or_err(pos, &self.bindings, name)?;
         match self.env.constant(&key) {
             Some(c) => {
-                self.env.check_visible(pos, self.bindings.module, &key)?;
+                self.env.check_visible(pos, self.env.viewer(self.bindings.module, name), &key)?;
                 let c = c?;
                 let r = self.hoist(|cx| cx.splice(&c.0, &c.1));
                 self.const_regs.insert(name.to_string(), r);
@@ -638,7 +640,7 @@ impl<'a> FnCx<'a> {
         let Some(sig) = self.env.signature(key) else {
             return Err(self.unknown_name(pos, name));
         };
-        self.env.check_visible(pos, self.bindings.module, key)?;
+        self.env.check_visible(pos, self.env.viewer(self.bindings.module, name), key)?;
         let sig = sig?;
         if self.env.extern_decl(key).is_some_and(|d| d.variadic) {
             return Err(Error::new(pos, format!("`{name}` takes variable arguments, so it cannot be used as a value")));
@@ -667,7 +669,7 @@ impl<'a> FnCx<'a> {
                 let key = self.env.key_or_err(pos, &self.bindings, name)?;
                 match self.env.constant(&key) {
                     Some(c) => {
-                        self.env.check_visible(pos, self.bindings.module, &key)?;
+                        self.env.check_visible(pos, self.env.viewer(self.bindings.module, name), &key)?;
                         Some(c?.as_ref().clone())
                     }
                     None => None,
@@ -1305,7 +1307,7 @@ impl<'a> FnCx<'a> {
                     }
                 }
                 let key = self.env.key_or_err(pos, &self.bindings, name)?;
-                self.env.check_visible(pos, self.bindings.module, &key)?;
+                self.env.check_visible(pos, self.env.viewer(self.bindings.module, name), &key)?;
                 if let Some(decl) = self.env.generic(&key) {
                     return self.call_generic(pos, &key, decl, args);
                 }

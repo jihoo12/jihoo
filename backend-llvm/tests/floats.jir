@@ -1,7 +1,7 @@
 ; Float semantics: float to int saturates and NaN becomes 0 (LLVM's fptosi
 ; would be poison), `rem` is fmod, and f32 arithmetic rounds to f32.
 ; expect: exit 15
-jir 2
+jir 3
 profile freestanding
 
 fn @to_i64(f64) -> i64 {

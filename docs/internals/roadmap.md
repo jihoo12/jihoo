@@ -27,10 +27,12 @@
 14. Targets: x86_64 and aarch64 Linux with `--target`, recorded in JIR;
     per-target modules (`sys.x86_64.jh`); the standard library on both, with
     coroutines on libc's contexts.
+15. Macro hygiene: a template's locals are its own, and its other names
+    resolve where the macro is defined.
 
 ## Next
 
-- **Language:** automatic macro hygiene; field visibility.
+- **Language:** field visibility.
 - **Native code:** passing structs to C by value (per-target C ABI lowering);
   exporting jihoo functions under C names; a `print` for native code.
 - **Floats:** exact math builtins for every profile (`sqrt`, `floor`, ...,

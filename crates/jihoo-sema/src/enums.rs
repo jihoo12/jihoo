@@ -52,7 +52,7 @@ impl FnCx<'_> {
         if !decl.is_enum() {
             return Ok(None);
         }
-        self.env.check_visible(e.pos, self.bindings.module, &key)?;
+        self.env.check_visible(e.pos, self.env.viewer(self.bindings.module, &name), &key)?;
         Ok(Some(if decl.params.is_empty() { EnumRef::Known(Type::Enum(key)) } else { EnumRef::Generic(key) }))
     }
 

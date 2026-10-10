@@ -1143,6 +1143,59 @@ fn item_macros_define_functions_and_types() {
 }
 
 #[test]
+fn macros_are_hygienic() {
+    // A local the template declares neither captures the caller's `tmp` nor
+    // is seen by the caller after the macro.
+    let add_tmp = "macro add_tmp(x: expr) -> stmts {\n  return quote {\n    let tmp = 100\n    print($x + tmp)\n  }\n}\n";
+    assert_eq!(run(&format!("{add_tmp}fn main() {{\n  let tmp = 1\n  add_tmp!(tmp)\n  print(tmp)\n}}")), "101\n1\n");
+    let e = err(&format!("{add_tmp}fn main() {{\n  add_tmp!(1)\n  print(tmp)\n}}"));
+    assert!(e.contains("unknown variable `tmp`"), "{e}");
+    // The template cannot use the caller's locals by name either, only items.
+    let e = err("macro peek() -> expr { return quote(secret) }\nfn main() {\n  let secret = 1\n  print(peek!())\n}");
+    assert!(e.contains("unknown variable `secret` (in code produced by `peek!`)"), "{e}");
+    // Each expansion has its own locals, also when expansions nest: `t` of
+    // `outer!` reaches `twice!` through its argument.
+    let src = "macro twice(x: expr) -> expr { return quote(fn() -> i64 { let t = $x\n return t + t }()) }\n\
+               macro outer() -> stmts { return quote {\n  let t = 5\n  print(twice!(t) + twice!(t + 1) + t)\n} }\n\
+               fn main() {\n  let t = 1000\n  outer!()\n  outer!()\n  print(t)\n}";
+    assert_eq!(run(src), "27\n27\n1000\n");
+    // Names the template writes for items: the macro's module first, then the
+    // caller's; builtins stay builtins; pattern bindings and parameters are locals.
+    let src = "struct P { x: i64, y: i64 }\nfn helper(n: i64) -> i64 { return n * 10 }\n\
+               macro m(v: expr) -> stmts { return quote {\n  let p = P { x: helper($v), y: callback() }\n  match p {\n    P { x, y: yy } => print(x + yy + len([1, 2]))\n  }\n  let f = fn(k: i64) -> i64 { return k + p.x }\n  print(f(1))\n} }\n\
+               fn callback() -> i64 { return 5 }\n\
+               fn main() {\n  let x = 7\n  m!(x)\n  print(x)\n}";
+    assert_eq!(run(src), "77\n71\n7\n");
+    // `stringify` gives the text as written, without hygiene marks.
+    let src = "macro show(x: expr) -> expr {\n  let code = quote(helper($x) + total)\n  return quote($(stringify(code)))\n}\n\
+               fn main() { print(show!(a + 1)) }";
+    assert_eq!(run(src), "helper((a + 1)) + total\n");
+}
+
+#[test]
+fn macros_use_the_items_of_their_module() {
+    let files = [
+        ("main.jh", "import lib.util\nfn helper(x: i64) -> i64 { return 0 }\n\
+                     fn main() {\n  print(util.scaled!(4))\n  util.show!(util.make!(2))\n}"),
+        // Private functions, types and imports of `util`, used by its public macros.
+        ("lib/util.jh", "import fmt\nfn helper(x: i64) -> i64 { return x * 10 }\nstruct Pt { v: i64 }\n\
+                         pub macro scaled(x: expr) -> expr { return quote(helper($x)) }\n\
+                         pub macro make(v: expr) -> expr { return quote(Pt { v: $v }.v) }\n\
+                         pub macro show(v: expr) -> stmts { return quote {\n  print(fmt.twice($v))\n} }"),
+        ("lib/fmt.jh", "pub fn twice(x: i64) -> i64 { return x + x }"),
+    ];
+    let m = check_files(&files).unwrap();
+    let mut out = Vec::new();
+    jihoo_vm::run(&m, &mut out).unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "40\n4\n");
+    // The caller still cannot use them itself.
+    let mut files = files;
+    files[0].1 = "import lib.util\nfn main() { print(util.helper(1)) }";
+    let e = check_files(&files).unwrap_err();
+    assert!(e.contains("`lib.util.helper` is private to module `lib.util`"), "{e}");
+}
+
+#[test]
 fn item_macros_across_modules() {
     let m = check_files(&[
         ("main.jh", "import gen\ngen.getter!(\"seven\", 7)\nfn main() { print(seven()) }"),

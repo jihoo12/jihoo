@@ -1,6 +1,6 @@
 ; An element index out of bounds traps.
 ; expect: trap
-jir 2
+jir 3
 profile freestanding
 
 fn @get([3 x i64], i64) -> i64 {

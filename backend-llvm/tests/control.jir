@@ -1,7 +1,7 @@
 ; Control flow and calls: a loop that writes its registers again (JIR is not
 ; SSA), recursion, and a call through a function value.
 ; expect: exit 110
-jir 2
+jir 3
 profile freestanding
 
 ; 1 + 2 + ... + n

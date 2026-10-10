@@ -1,6 +1,6 @@
 ; Hosted modules run on the VM.
 ; expect: error hosted modules run on the VM
-jir 2
+jir 3
 profile hosted
 
 fn @main() -> i64 {

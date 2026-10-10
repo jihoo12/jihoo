@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 2)
+# JIR — jihoo IR text format (version 3)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it. Both sides must agree on this
@@ -29,12 +29,13 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 0 | every format before versions were kept, up to and including native division checks |
 | 1 | the first version that is bumped on change; the header must come first |
 | 2 | the `target` header |
+| 3 | `stringify`, and hygiene marks in the code `quote` builds |
 
 ## Example
 
 ```
 ; jihoo IR
-jir 2
+jir 3
 profile freestanding
 target x86_64
 
@@ -81,7 +82,7 @@ bb3:
 ## Module
 
 ```
-jir 2                                ; format version, must come first
+jir 3                                ; format version, must come first
 profile hosted|native|freestanding   ; language profile
 target x86_64|aarch64                ; the machine, 64-bit Linux
 struct ...                           ; zero or more structs
@@ -332,6 +333,7 @@ runtime error and native code traps.
 | `print %a`                      | number, `bool` or `str` |      | hosted only: print the value and a newline (floats as the shortest text that reads back exactly: `0.1`, `1.0`, `1e100`, `inf`, `NaN`) |
 | `%d = to_str %a`                | number or `bool`      | `str`  | hosted (and macros): the value as text, as `print` writes it |
 | `%d = unique %p`                | `str`                 | `str`  | compile time only: `p` plus a number unique in this compilation |
+| `%d = stringify %c`             | `expr`, `stmts` or `items` | `str` | compile time only: the source text of code, with the hygiene marks of its names removed |
 | `%d = asm "tmpl", "cons"(%a, ...)` | int, `bool` or `*T` | int, `*T` or `unit` | native and freestanding only: inline assembly |
 | `%d = quote ["p0", "p1", ...](kind %h, ...)` | see below | `expr`, `stmts` or `items` | compile time only: code from template pieces and holes |
 
@@ -339,6 +341,11 @@ Each `quote` hole has a kind: `expr` (code in parentheses, or an int, bool or
 `str` literal), `ident` (a `str` or `expr` that is an identifier, inserted as
 is), `stmts` (`stmts` or `expr` code on lines of its own) or `items` (`items`
 code on lines of its own).
+
+The template pieces carry hygiene marks: a name the template wrote is followed
+by `#` (`let tmp# = $x`). The compiler numbers them per expansion (`tmp#7`) and
+resolves them once the code is parsed ([Compiler](internals/compiler.md#macros));
+`stringify` gives the text without them.
 
 `asm` passes `tmpl` and `cons` to LLVM unchanged: the template uses LLVM operand
 references (`${0}` is the output if there is one, then the inputs, in order;

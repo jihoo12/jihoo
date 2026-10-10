@@ -1,4 +1,4 @@
 ; The version header comes before everything else.
 ; expect: error expected the `jir N` header first
 profile freestanding
-jir 2
+jir 3

@@ -1,6 +1,6 @@
 ; Each header comes once.
 ; expect: error a second `target` header
-jir 2
+jir 3
 profile freestanding
 target x86_64
 target aarch64

@@ -7,6 +7,7 @@ mod parser;
 
 use std::fmt;
 
+pub use lexer::{mark_names, number_marks};
 pub use parser::{parse, parse_expr, parse_file, parse_items, parse_stmts};
 
 /// Source position: 1-based line and column, in file number `file` (an index

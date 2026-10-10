@@ -4,7 +4,7 @@
 ; The operations are in functions of their own, so they run on values LLVM
 ; cannot fold.
 ; expect: exit 255
-jir 2
+jir 3
 profile freestanding
 
 fn @add8(i8, i8) -> i8 {

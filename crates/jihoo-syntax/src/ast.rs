@@ -659,3 +659,238 @@ pub fn set_program_pos(p: &mut Program, pos: Pos) {
         m.args.iter_mut().for_each(|a| set_pos(&mut a.expr, pos));
     }
 }
+
+/// What a name does where [`names_in_expr`] and the like find it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameRole {
+    /// Declares a local: `let`, a parameter, a pattern binding.
+    Binds,
+    /// Refers to something: a variable, function, macro or type. A path such
+    /// as `alias.item` is one name.
+    Uses,
+    /// Not a name: the source text of a macro argument, code that the macro
+    /// will get as text.
+    Code,
+}
+
+/// Calls `f` on every name in `e` that declares or refers to something
+/// (field and variant names do not), with what it does. The compiler uses it
+/// for macro hygiene.
+pub fn names_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut String, NameRole)) {
+    match &mut e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_) => {}
+        ExprKind::Var(n) => f(n, NameRole::Uses),
+        ExprKind::Unary(_, x)
+        | ExprKind::Field(x, _)
+        | ExprKind::Deref(x)
+        | ExprKind::AddrOf(x)
+        | ExprKind::NewRef(x)
+        | ExprKind::NewCell(x)
+        | ExprKind::Comptime(x)
+        | ExprKind::Hole(x) => names_in_expr(x, f),
+        ExprKind::Binary(_, l, r) | ExprKind::Index(l, r) | ExprKind::ArrayRepeat(l, r) => {
+            names_in_expr(l, f);
+            names_in_expr(r, f);
+        }
+        ExprKind::Call(n, args) => {
+            f(n, NameRole::Uses);
+            args.iter_mut().for_each(|a| names_in_expr(a, f));
+        }
+        ExprKind::ArrayLit(args) => args.iter_mut().for_each(|a| names_in_expr(a, f)),
+        ExprKind::CallExpr(callee, args) => {
+            names_in_expr(callee, f);
+            args.iter_mut().for_each(|a| names_in_expr(a, f));
+        }
+        ExprKind::Type(t) | ExprKind::SizeOf(t) | ExprKind::AlignOf(t) => names_in_type(t, f),
+        ExprKind::Match(value, arms) => {
+            names_in_expr(value, f);
+            for arm in arms {
+                names_in_pattern(&mut arm.pattern, f);
+                if let Some(g) = &mut arm.guard {
+                    names_in_expr(g, f);
+                }
+                names_in_expr(&mut arm.value, f);
+            }
+        }
+        ExprKind::NewChan(t, cap) => {
+            names_in_type(t, f);
+            if let Some(c) = cap {
+                names_in_expr(c, f);
+            }
+        }
+        ExprKind::Lambda(l) => {
+            for (_, n, t) in &mut l.params {
+                f(n, NameRole::Binds);
+                if let Some(t) = t {
+                    names_in_type(t, f);
+                }
+            }
+            if let Some(t) = &mut l.ret {
+                names_in_type(t, f);
+            }
+            names_in_block(&mut l.body, f);
+        }
+        ExprKind::Quote(_, _, holes) => holes.iter_mut().for_each(|(_, h)| names_in_expr(h, f)),
+        ExprKind::MacroCall(n, args) => {
+            f(n, NameRole::Uses);
+            for a in args {
+                f(&mut a.text, NameRole::Code);
+                names_in_expr(&mut a.expr, f);
+            }
+        }
+        ExprKind::StructLit(t, fields) => {
+            names_in_type(t, f);
+            fields.iter_mut().for_each(|fi| names_in_expr(&mut fi.value, f));
+        }
+        ExprKind::Cast(x, t) => {
+            names_in_expr(x, f);
+            names_in_type(t, f);
+        }
+        ExprKind::Asm(a) => {
+            if let Some((_, t)) = &mut a.output {
+                names_in_type(t, f);
+            }
+            a.inputs.iter_mut().for_each(|(_, x)| names_in_expr(x, f));
+        }
+    }
+}
+
+fn names_in_type(t: &mut TypeExpr, f: &mut dyn FnMut(&mut String, NameRole)) {
+    match &mut t.kind {
+        TypeExprKind::Named(n) => f(n, NameRole::Uses),
+        TypeExprKind::Generic(n, args) => {
+            f(n, NameRole::Uses);
+            args.iter_mut().for_each(|a| names_in_expr(a, f));
+        }
+        TypeExprKind::Ptr(inner) | TypeExprKind::Ref(inner) | TypeExprKind::Chan(inner) | TypeExprKind::Cell(inner) => {
+            names_in_type(inner, f)
+        }
+        TypeExprKind::Array(elem, n) => {
+            names_in_type(elem, f);
+            names_in_expr(n, f);
+        }
+        TypeExprKind::Fn(params, ret) => {
+            params.iter_mut().for_each(|p| names_in_type(p, f));
+            if let Some(r) = ret {
+                names_in_type(r, f);
+            }
+        }
+    }
+}
+
+fn names_in_pattern(p: &mut Pattern, f: &mut dyn FnMut(&mut String, NameRole)) {
+    match &mut p.kind {
+        PatternKind::Wild | PatternKind::Int(_) | PatternKind::Bool(_) => {}
+        PatternKind::Name(n) => f(n, NameRole::Binds),
+        PatternKind::Variant(_, args) | PatternKind::Or(args) => args.iter_mut().for_each(|a| names_in_pattern(a, f)),
+        PatternKind::Struct(n, fields, _) => {
+            f(n, NameRole::Uses);
+            fields.iter_mut().for_each(|(_, _, fp)| names_in_pattern(fp, f));
+        }
+    }
+}
+
+pub fn names_in_block(b: &mut Block, f: &mut dyn FnMut(&mut String, NameRole)) {
+    b.stmts.iter_mut().for_each(|s| names_in_stmt(s, f));
+}
+
+pub fn names_in_stmt(s: &mut Stmt, f: &mut dyn FnMut(&mut String, NameRole)) {
+    match s {
+        Stmt::Let { name, ty, value, .. } => {
+            f(name, NameRole::Binds);
+            if let Some(t) = ty {
+                names_in_type(t, f);
+            }
+            names_in_expr(value, f);
+        }
+        Stmt::Assign { target, value } | Stmt::OpAssign { target, value, .. } => {
+            names_in_expr(target, f);
+            names_in_expr(value, f);
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(v) = value {
+                names_in_expr(v, f);
+            }
+        }
+        Stmt::If { cond, then, els } => {
+            names_in_expr(cond, f);
+            names_in_block(then, f);
+            if let Some(e) = els {
+                names_in_block(e, f);
+            }
+        }
+        Stmt::While { cond, body } => {
+            names_in_expr(cond, f);
+            names_in_block(body, f);
+        }
+        Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Go { call, .. } => names_in_expr(call, f),
+        Stmt::Select { arms, .. } => {
+            for arm in arms {
+                match &mut arm.op {
+                    SelectOp::Recv { bind, chan } => {
+                        if let Some(b) = bind {
+                            f(b, NameRole::Binds);
+                        }
+                        names_in_expr(chan, f);
+                    }
+                    SelectOp::Send { chan, value } => {
+                        names_in_expr(chan, f);
+                        names_in_expr(value, f);
+                    }
+                    SelectOp::Default => {}
+                }
+                names_in_block(&mut arm.body, f);
+            }
+        }
+        Stmt::Match { value, arms, .. } => {
+            names_in_expr(value, f);
+            for arm in arms {
+                names_in_pattern(&mut arm.pattern, f);
+                if let Some(g) = &mut arm.guard {
+                    names_in_expr(g, f);
+                }
+                names_in_block(&mut arm.body, f);
+            }
+        }
+        Stmt::Expr(e) => names_in_expr(e, f),
+    }
+}
+
+/// Like [`names_in_expr`], for every item of a program. Item names are not
+/// visited: items are not hygienic.
+pub fn names_in_program(p: &mut Program, f: &mut dyn FnMut(&mut String, NameRole)) {
+    for s in &mut p.structs {
+        for prm in &mut s.params {
+            f(&mut prm.name, NameRole::Binds);
+            names_in_type(&mut prm.ty, f);
+        }
+        s.fields.iter_mut().for_each(|fd| names_in_type(&mut fd.ty, f));
+        for v in s.variants.iter_mut().flatten() {
+            v.fields.iter_mut().for_each(|t| names_in_type(t, f));
+        }
+    }
+    for c in &mut p.consts {
+        if let Some(t) = &mut c.ty {
+            names_in_type(t, f);
+        }
+        names_in_expr(&mut c.value, f);
+    }
+    for func in &mut p.funcs {
+        for prm in &mut func.params {
+            f(&mut prm.name, NameRole::Binds);
+            names_in_type(&mut prm.ty, f);
+        }
+        if let Some(t) = &mut func.ret {
+            names_in_type(t, f);
+        }
+        names_in_block(&mut func.body, f);
+    }
+    for m in &mut p.macro_calls {
+        f(&mut m.name, NameRole::Uses);
+        for a in &mut m.args {
+            f(&mut a.text, NameRole::Code);
+            names_in_expr(&mut a.expr, f);
+        }
+    }
+}

@@ -99,6 +99,9 @@ struct Lexer<'a> {
     line: u32,
     col: u32,
     file: u16,
+    /// Accept the names of macro output: `name#7`, with a hygiene mark, and
+    /// `#3:name` (see `Parser::mark` and `mark_names`).
+    marks: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -294,6 +297,22 @@ impl<'a> Lexer<'a> {
             b'|' if self.eat_eq() => Tok::OpAssign(BinOp::BitOr),
             b'|' => Tok::Pipe,
             b'"' => Tok::Str(self.string(pos)?),
+            // `#3:helper` in macro output: a name as written in module 3, where
+            // the macro that wrote it is defined (see `mark_names`).
+            b'#' if self.marks && self.peek().is_ascii_digit() => {
+                let start = self.i - 1;
+                while self.peek().is_ascii_digit() {
+                    self.bump();
+                }
+                if self.peek() != b':' || !(self.peek2().is_ascii_alphabetic() || self.peek2() == b'_') {
+                    return Err(Error::new(pos, "unexpected character `#`"));
+                }
+                self.bump();
+                while self.peek().is_ascii_alphanumeric() || self.peek() == b'_' {
+                    self.bump();
+                }
+                Tok::Ident(std::str::from_utf8(&self.src[start..self.i]).unwrap().to_string())
+            }
             b'#' if self.peek() == b'!' && self.peek2() == b'[' => {
                 self.bump();
                 self.bump();
@@ -371,6 +390,12 @@ impl<'a> Lexer<'a> {
                 while self.peek().is_ascii_alphanumeric() || self.peek() == b'_' {
                     self.bump();
                 }
+                if self.marks && self.peek() == b'#' && self.peek2().is_ascii_digit() {
+                    self.bump();
+                    while self.peek().is_ascii_digit() {
+                        self.bump();
+                    }
+                }
                 let word = std::str::from_utf8(&self.src[start..self.i]).unwrap();
                 match word {
                     "fn" => Tok::Fn,
@@ -415,7 +440,13 @@ impl<'a> Lexer<'a> {
 }
 
 pub fn lex(src: &str, file: u16) -> Result<Vec<Token>, Error> {
-    let mut lx = Lexer { src: src.as_bytes(), i: 0, line: 1, col: 1, file };
+    lex_with(src, file, false)
+}
+
+/// Like [`lex`]; `marks` also accepts the names of macro output, which carry
+/// hygiene marks (`tmp#7`).
+pub fn lex_with(src: &str, file: u16, marks: bool) -> Result<Vec<Token>, Error> {
+    let mut lx = Lexer { src: src.as_bytes(), i: 0, line: 1, col: 1, file, marks };
     let mut out = Vec::new();
     loop {
         let t = lx.next()?;
@@ -425,4 +456,92 @@ pub fn lex(src: &str, file: u16) -> Result<Vec<Token>, Error> {
             return Ok(out);
         }
     }
+}
+
+/// Gives the hygiene marks in `code` the number `expansion`: every name a
+/// quote template wrote is followed by a bare `#` (`tmp#`), which becomes
+/// `tmp#7`, so that the names of one macro expansion are told apart from the
+/// caller's and from other expansions'. Marks already numbered, in code an
+/// earlier expansion produced, are left alone, and so are strings and comments.
+pub fn number_marks(code: &str, expansion: u32) -> String {
+    let b = code.as_bytes();
+    let mut out = String::with_capacity(code.len() + 16);
+    let mut last = 0;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'#' if i > 0
+                && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_')
+                && !b.get(i + 1).is_some_and(u8::is_ascii_digit) =>
+            {
+                out.push_str(&code[last..=i]);
+                out.push_str(&expansion.to_string());
+                last = i + 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    out.push_str(&code[last.min(code.len())..]);
+    out
+}
+
+/// `code` with every marked name (`tmp#7`, see [`number_marks`]) replaced by
+/// what `rename` gives for it, or left as it is for `None`. Strings and
+/// comments are left alone. A path such as `util#7.helper` is renamed by its
+/// first part.
+pub fn mark_names(code: &str, rename: &mut dyn FnMut(&str) -> Option<String>) -> String {
+    let b = code.as_bytes();
+    let name_char = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut out = String::with_capacity(code.len());
+    let mut last = 0;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            c if (c.is_ascii_alphabetic() || c == b'_') && (i == 0 || !(name_char(b[i - 1]) || b[i - 1] == b':')) => {
+                let start = i;
+                while i < b.len() && name_char(b[i]) {
+                    i += 1;
+                }
+                if b.get(i) == Some(&b'#') && b.get(i + 1).is_some_and(u8::is_ascii_digit) {
+                    i += 1;
+                    while i < b.len() && b[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    if let Some(new) = rename(&code[start..i]) {
+                        out.push_str(&code[last..start]);
+                        out.push_str(&new);
+                        last = i;
+                    }
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    out.push_str(&code[last.min(code.len())..]);
+    out
 }

@@ -507,6 +507,7 @@ impl Cx<'_> {
                         }
                     }
                     Inst::Unique { .. } => Err("`unique` only exists at compile time".into()),
+                    Inst::Stringify { .. } => Err("`stringify` only exists at compile time".into()),
                     Inst::Print { src } => {
                         if profile != Profile::Hosted {
                             Err(format!("`print` needs std and is not available in {} mode", profile.as_str()))

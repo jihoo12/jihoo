@@ -16,6 +16,7 @@ use jihoo_syntax::loader::Module;
 use jihoo_syntax::{Error, Pos};
 
 use crate::comptime::ConstValue;
+use crate::hygiene::qualified;
 use crate::generic::{is_type_param, Binding, Bindings};
 use crate::{is_builtin, FnCx};
 
@@ -206,6 +207,10 @@ impl<'p> Env<'p> {
     /// item, `alias.item` an item of a module it imports. `None` for an unknown
     /// alias.
     pub fn key(&self, module: usize, name: &str) -> Option<String> {
+        // `#3:name`, from a macro defined in module 3: as written there.
+        if let Some((m, rest)) = qualified(name) {
+            return self.key(m, rest);
+        }
         match name.split_once('.') {
             Some((alias, item)) => {
                 let target = *self.modules[module].imports.get(alias)?;
@@ -217,7 +222,26 @@ impl<'p> Env<'p> {
 
     /// True if `module` imports a module under the name `alias`.
     pub fn is_alias(&self, module: usize, alias: &str) -> bool {
-        self.modules[module].imports.contains_key(alias)
+        match qualified(alias) {
+            Some((m, rest)) => self.is_alias(m, rest),
+            None => self.modules[module].imports.contains_key(alias),
+        }
+    }
+
+    /// The module whose view of visibility `name`, written in `module`, gets:
+    /// that module's own, or for `#3:name` (from a macro defined in module 3,
+    /// see `hygiene.rs`) module 3's, so a macro can use its module's private items.
+    pub fn viewer(&self, module: usize, name: &str) -> usize {
+        qualified(name).map_or(module, |(m, _)| m)
+    }
+
+    /// True if `module` has an item or an import called `name`.
+    pub(crate) fn defines(&self, module: usize, name: &str) -> bool {
+        let key = self.item_key(module, name);
+        self.fn_decls.contains_key(&key)
+            || self.struct_decls.contains_key(&key)
+            || self.const_decls.contains_key(&key)
+            || self.is_alias(module, name)
     }
 
     /// The scope at the top level of `module`.
@@ -311,7 +335,7 @@ impl<'p> Env<'p> {
             }
             TypeExprKind::Generic(name, args) => {
                 let key = self.key_or_err(t.pos, b, name)?;
-                self.check_visible(t.pos, b.module, &key)?;
+                self.check_visible(t.pos, self.viewer(b.module, name), &key)?;
                 let Some((dm, decl)) = self.struct_decls.get(&key).copied() else {
                     return Err(Error::new(t.pos, format!("unknown type `{name}`")));
                 };
@@ -366,7 +390,7 @@ impl<'p> Env<'p> {
                         return Err(Error::new(t.pos, format!("{kind} `{name}` is generic; write `{name}(...)`")));
                     }
                     let key = self.key(b.module, name).unwrap();
-                    self.check_visible(t.pos, b.module, &key)?;
+                    self.check_visible(t.pos, self.viewer(b.module, name), &key)?;
                     Ok(named(decl, key))
                 } else if name.contains('.') && self.key(b.module, name).is_none() {
                     Err(self.key_or_err(t.pos, b, name).unwrap_err())

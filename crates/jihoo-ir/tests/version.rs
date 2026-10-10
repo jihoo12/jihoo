@@ -7,7 +7,7 @@ use std::path::PathBuf;
 /// The fingerprint of `docs/jir.md` when `JIR_VERSION` was last decided on.
 /// When the spec changes, `spec_changes_decide_the_version` fails until this is
 /// updated: first bump the version if the change needs one.
-const SPEC_FINGERPRINT: u64 = 0xc6d12f42301d78fd;
+const SPEC_FINGERPRINT: u64 = 0xab1b14fac8c8db88;
 
 fn repo_file(path: &str) -> String {
     let full = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(path);

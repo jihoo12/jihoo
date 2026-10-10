@@ -51,6 +51,24 @@ holes; the result is parsed again (`jihoo_syntax::parse_expr`, `parse_stmts`,
 `parse_items`) and analyzed in the caller's scope. Item macros are expanded
 before analysis, in rounds (`expand_item_macros` in `crates/jihoo-sema/src/lib.rs`).
 
+Macros are hygienic ([Macros](../language/macros.md#scope-and-hygiene)), with
+code that stays text until it is parsed:
+
+1. When a macro is parsed, the names its templates write get a *mark*: the
+   template text keeps `tmp#` for `tmp` (`Parser::mark`). Only names in places
+   that declare or refer to something are marked, not fields, variants, item
+   names or built-in types, and never what a hole inserts.
+2. Each expansion numbers its marks, `tmp#` to `tmp#7`
+   (`jihoo_syntax::number_marks`), with a number unique in the compilation. The
+   lexer accepts such names only in macro output, so a program cannot write one.
+3. Once the output is parsed, `crates/jihoo-sema/src/hygiene.rs` decides what
+   each marked name of the expansion is. A local it declares keeps its marked
+   name, which no other code can spell, so the scopes keep it apart from the
+   caller's. Any other name becomes `#M:name`, read as if written in module M,
+   the macro's own (`Env::key`, and `Env::viewer` for privacy), or the
+   caller's module if the macro's does not have it. Code passed on to another
+   macro as an argument is text, so its names are renamed the same way first.
+
 ## Closures
 
 `crates/jihoo-sema/src/closures.rs` lifts the body of every anonymous function

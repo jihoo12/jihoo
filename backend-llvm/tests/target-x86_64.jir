@@ -1,7 +1,7 @@
 ; A module for x86_64 compiles on any machine, for x86_64: its syscall
 ; (exit, 60 on x86_64) is lowered for that machine.
 ; expect: object x86_64
-jir 2
+jir 3
 profile freestanding
 target x86_64
 

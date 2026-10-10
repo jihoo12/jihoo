@@ -9,7 +9,7 @@
 //! them there.
 
 use crate::ast::*;
-use crate::lexer::{lex, Tok, Token};
+use crate::lexer::{lex, lex_with, Tok, Token};
 use crate::{Error, Pos};
 
 pub fn parse(src: &str) -> Result<Program, Error> {
@@ -23,7 +23,7 @@ pub fn parse_file(src: &str, file: u16) -> Result<Program, Error> {
 
 /// Parses statements, such as the code a statement macro produced.
 pub fn parse_stmts(src: &str) -> Result<Vec<Stmt>, Error> {
-    let mut p = Parser::new(src, 0)?;
+    let mut p = Parser::output(src)?;
     let mut stmts = Vec::new();
     loop {
         while p.eat(&Tok::Semi) {}
@@ -39,7 +39,7 @@ pub fn parse_stmts(src: &str) -> Result<Vec<Stmt>, Error> {
 
 /// Parses items (no imports or attributes), such as an item macro's output.
 pub fn parse_items(src: &str) -> Result<Program, Error> {
-    let mut p = Parser::new(src, 0)?;
+    let mut p = Parser::output(src)?;
     let prog = p.items(false)?;
     if !prog.imports.is_empty() {
         return Err(Error::new(prog.imports[0].pos, "code made by a macro cannot `import`"));
@@ -49,7 +49,7 @@ pub fn parse_items(src: &str) -> Result<Program, Error> {
 
 /// Parses a single expression, such as the code a macro produced.
 pub fn parse_expr(src: &str) -> Result<Expr, Error> {
-    let mut p = Parser::new(src, 0)?;
+    let mut p = Parser::output(src)?;
     let e = p.expr()?;
     if *p.peek() != Tok::Eof {
         return Err(p.unexpected("end of expression"));
@@ -66,6 +66,9 @@ struct Parser {
     /// Set while parsing a quote template: the holes found so far, with their
     /// byte ranges in the source and where they sit.
     holes: Option<Vec<(usize, usize, Expr, HoleKind)>>,
+    /// Set while parsing a quote template: where to add text to it, by byte
+    /// offset, to give the names it writes hygiene marks (see `mark`).
+    marks: Option<Vec<(usize, String)>>,
     /// How deeply the syntax tree being built is nested here (see `MAX_NESTING`).
     depth: u32,
 }
@@ -81,7 +84,37 @@ const MAX_NESTING: u32 = 1000;
 impl Parser {
     fn new(src: &str, file: u16) -> Result<Self, Error> {
         let toks = lex(src, file)?;
-        Ok(Parser { src: src.to_string(), toks, i: 0, no_struct_lit: false, holes: None, depth: 0 })
+        Ok(Parser::with_tokens(src, toks))
+    }
+
+    /// A parser for code a macro produced, whose names may carry hygiene marks.
+    fn output(src: &str) -> Result<Self, Error> {
+        Ok(Parser::with_tokens(src, lex_with(src, 0, true)?))
+    }
+
+    fn with_tokens(src: &str, toks: Vec<Token>) -> Self {
+        Parser { src: src.to_string(), toks, i: 0, no_struct_lit: false, holes: None, marks: None, depth: 0 }
+    }
+
+    /// In a quote template, marks the name just read (if it was a name, not a
+    /// hole): `tmp` becomes `tmp#` in the template, and each expansion numbers
+    /// it (`tmp#7`, see `number_marks`). Names a template writes in these places
+    /// are marked: variables, bindings, parameters, called functions and
+    /// macros, and types. Field names, variant names, item names and the
+    /// built-in types are not, and neither are names that holes insert. The
+    /// compiler keeps marked locals apart from the caller's and resolves other
+    /// marked names where the macro is defined (`hygiene.rs` in the compiler).
+    fn mark(&mut self) {
+        self.mark_with("#".into());
+    }
+
+    fn mark_with(&mut self, text: String) {
+        let prev = &self.toks[self.i - 1];
+        // `$name`: a hole, whose name is the macro's, not the template's.
+        let in_hole = self.i >= 2 && self.toks[self.i - 2].tok == Tok::Dollar;
+        if let (Some(marks), Tok::Ident(_), false) = (&mut self.marks, &prev.tok, in_hole) {
+            marks.push((prev.end, text));
+        }
     }
 
     /// Goes one level deeper into the tree; `shallower` comes back up.
@@ -175,10 +208,11 @@ impl Parser {
         if self.holes.is_none() {
             return Err(Error::new(pos, "`$` can only be used inside `quote(...)`"));
         }
-        // The hole itself is ordinary code; it may not contain holes.
-        let saved = self.holes.take();
+        // The hole itself is ordinary code; it may not contain holes, and its
+        // names are the macro's own, not the template's.
+        let saved = (self.holes.take(), self.marks.take());
         let inner = self.hole_body();
-        self.holes = saved;
+        (self.holes, self.marks) = saved;
         let inner = inner?;
         let end = self.prev_end();
         self.holes.as_mut().unwrap().push((start, end, inner.clone(), kind));
@@ -253,6 +287,7 @@ impl Parser {
                 Tok::Ident(_) if self.item_macro_follows() => {
                     let pos = self.pos();
                     let mut name = self.ident("a macro name")?.1;
+                    self.mark();
                     if self.eat(&Tok::Dot) {
                         name = format!("{name}.{}", self.ident("a macro name")?.1);
                     }
@@ -335,6 +370,7 @@ impl Parser {
                 // Every struct parameter is compile-time; `comptime` is optional.
                 self.eat(&Tok::Comptime);
                 let (ppos, pname) = self.ident("parameter name")?;
+                self.mark();
                 self.expect(&Tok::Colon, "`:` and a parameter type")?;
                 let ty = self.type_expr()?;
                 params.push(Param { pos: ppos, comptime: true, name: pname, ty });
@@ -394,6 +430,7 @@ impl Parser {
                 return Err(Error::new(self.pos(), "extern functions cannot have `comptime` parameters"));
             }
             let (ppos, pname) = self.ident("parameter name")?;
+            self.mark();
             self.expect(&Tok::Colon, "`:` and a parameter type")?;
             let ty = self.type_expr()?;
             params.push(Param { pos: ppos, comptime, name: pname, ty });
@@ -460,6 +497,9 @@ impl Parser {
             return Ok(TypeExpr { pos, kind: TypeExprKind::Array(Box::new(elem), Box::new(len)) });
         }
         let (pos, mut name) = self.ident("a type")?;
+        if !is_builtin_type(&name) {
+            self.mark();
+        }
         // `module.Type`
         if self.same_line(&Tok::Dot) && matches!(self.toks[self.i + 1].tok, Tok::Ident(_)) {
             self.bump();
@@ -544,6 +584,7 @@ impl Parser {
             Tok::Let => {
                 let pos = self.bump().pos;
                 let (_, name) = self.ident("variable name")?;
+                self.mark();
                 let ty = if self.eat(&Tok::Colon) { Some(self.type_expr()?) } else { None };
                 self.expect(&Tok::Assign, "`=`")?;
                 let value = self.expr()?;
@@ -654,6 +695,7 @@ impl Parser {
         } else {
             let bind = if self.eat(&Tok::Let) {
                 let (_, name) = self.ident("a variable name")?;
+                self.mark();
                 self.expect(&Tok::Assign, "`=`")?;
                 Some(name)
             } else {
@@ -715,6 +757,12 @@ impl Parser {
             }
             Tok::Ident(name) => {
                 self.bump();
+                // A lowercase name alone binds; the others name variants or structs.
+                let binds = !name.starts_with(|c: char| c.is_ascii_uppercase());
+                let struct_name = self.same_line(&Tok::LBrace) && !self.same_line(&Tok::LParen);
+                if binds && !self.same_line(&Tok::LParen) || struct_name {
+                    self.mark();
+                }
                 if self.same_line(&Tok::LParen) {
                     self.bump();
                     let mut args = Vec::new();
@@ -754,6 +802,8 @@ impl Parser {
             let pattern = if p.eat(&Tok::Colon) {
                 p.pattern()?
             } else {
+                // `x` is `x: x`; in a template, the binding is marked, the field not.
+                p.mark_with(format!(": {field}#"));
                 Pattern { pos, kind: PatternKind::Name(field.clone()) }
             };
             fields.push((pos, field, pattern));
@@ -930,6 +980,7 @@ impl Parser {
             }
             Tok::Ident(first) => {
                 self.bump();
+                self.mark();
                 let mut name = first;
                 if self.qualified_follows() {
                     self.bump();
@@ -1017,6 +1068,7 @@ impl Parser {
             let named = matches!(self.peek(), Tok::Ident(_)) && self.toks[self.i + 1].tok == Tok::Colon;
             let name = if named {
                 let (_, n) = self.ident("a parameter name")?;
+                self.mark();
                 self.bump(); // `:`
                 Some(n)
             } else {
@@ -1107,6 +1159,7 @@ impl Parser {
         self.bump(); // `(` or `{`
         let start = self.cur().start;
         self.holes = Some(Vec::new());
+        self.marks = Some(Vec::new());
         let parsed = self.with_struct_lit(true, |p| match kind {
             CodeKind::Expr => p.expr().map(|_| ()),
             CodeKind::Items => p.items(true).map(|_| ()),
@@ -1121,20 +1174,33 @@ impl Parser {
             },
         });
         let holes = self.holes.take().unwrap();
+        let marks = self.marks.take().unwrap();
         parsed?;
         // An empty template has no last token of its own.
         let end = if self.cur().start > start { self.prev_end().max(start) } else { start };
         self.expect(&close, if kind == CodeKind::Expr { "`)`" } else { "`}`" })?;
 
+        // The template's text between the holes, with the marks added.
+        let piece = |from: usize, to: usize| {
+            let mut s = String::new();
+            let mut at = from;
+            for (offset, text) in marks.iter().filter(|(o, _)| (from..=to).contains(o)) {
+                s.push_str(&self.src[at..*offset]);
+                s.push_str(text);
+                at = *offset;
+            }
+            s.push_str(&self.src[at..to]);
+            s
+        };
         let mut pieces = Vec::new();
         let mut exprs = Vec::new();
         let mut at = start;
         for (s, e, expr, hole) in holes {
-            pieces.push(self.src[at..s].to_string());
+            pieces.push(piece(at, s));
             exprs.push((hole, expr));
             at = e;
         }
-        pieces.push(self.src[at..end].to_string());
+        pieces.push(piece(at, end));
         Ok(ExprKind::Quote(kind, pieces, exprs))
     }
 
@@ -1312,6 +1378,15 @@ fn punct(t: &Tok) -> &'static str {
         },
         Tok::Ident(_) | Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::InnerAttr(_) | Tok::Eof => "?",
     }
+}
+
+/// The types that are built in, whose names a template does not mark.
+fn is_builtin_type(name: &str) -> bool {
+    matches!(
+        name,
+        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "bool" | "str" | "unit"
+            | "type" | "expr" | "stmts" | "items"
+    )
 }
 
 #[cfg(test)]
@@ -1577,6 +1652,48 @@ mod tests {
         assert_eq!(parse_expr("(1) * (2)").unwrap().pos, Pos::new(1, 5));
     }
 
+    /// The text of a template, with the holes as `$`.
+    fn template(src: &str) -> String {
+        let e = parse_expr(src).unwrap();
+        let ExprKind::Quote(_, pieces, _) = e.kind else { panic!("{e:?}") };
+        pieces.join("$")
+    }
+
+    #[test]
+    fn templates_mark_the_names_they_write() {
+        // Variables, bindings, parameters, called functions and macros, and
+        // types; not fields, variants, built-in types or what holes insert.
+        assert_eq!(
+            template("quote { let t: i64 = helper($a) + n.len + util.f(1) + m!(t)\n let p = P { x: t, y: $(b) }\n print(p.x) }"),
+            "let t#: i64 = helper#($) + n#.len + util#.f(1) + m#!(t#)\n let p# = P# { x: t#, y: $ }\n print#(p#.x)"
+        );
+        assert_eq!(
+            template("quote { match v {\n Some(x) => {}\n P { x, y: yy } => {}\n None => {}\n k => {}\n } }"),
+            "match v# {\n Some(x#) => {}\n P# { x: x#, y: yy# } => {}\n None => {}\n k# => {}\n }"
+        );
+        assert_eq!(
+            template("quote(fn(k: [Point; 2], s: str) -> u8 { return $x })"),
+            "fn(k#: [Point#; 2], s#: str) -> u8 { return $ }"
+        );
+        // A name hole is the macro's; so is everything inside `$( )`.
+        assert_eq!(template("quote { let $name = $(f(a)) }"), "let $ = $");
+        assert_eq!(template("quote items { fn api(x: T) -> T { return x } }"), "fn api(x#: T#) -> T# { return x# }");
+    }
+
+    #[test]
+    fn macro_output_has_numbered_and_qualified_names() {
+        assert_eq!(crate::number_marks("let t# = \"a#\" // b#\n f#(t#2)", 7), "let t#7 = \"a#\" // b#\n f#7(t#2)");
+        let e = parse_expr("#3:helper(t#7) + util#7.f(1)").unwrap();
+        let ExprKind::Binary(_, l, r) = e.kind else { panic!() };
+        assert!(matches!(&l.kind, ExprKind::Call(n, args) if n == "#3:helper" && matches!(&args[0].kind, ExprKind::Var(v) if v == "t#7")));
+        assert!(matches!(&r.kind, ExprKind::Call(n, _) if n == "util#7.f"));
+        // Only macro output may use them.
+        assert!(parse("fn f() { let t#7 = 1 }").is_err());
+        assert!(parse("fn f() { #3:helper() }").is_err());
+        let renamed = crate::mark_names("t#7 + \"t#7\" + x.y + u#7.v", &mut |n| Some(format!("<{n}>")));
+        assert_eq!(renamed, "<t#7> + \"t#7\" + x.y + <u#7>.v");
+    }
+
     #[test]
     fn statement_and_item_quotes() {
         let p = parse(
@@ -1592,7 +1709,7 @@ mod tests {
         let ExprKind::Quote(CodeKind::Stmts, pieces, holes) = &value.kind else { panic!("{value:?}") };
         let kinds: Vec<HoleKind> = holes.iter().map(|h| h.0).collect();
         assert_eq!(kinds, [HoleKind::Expr, HoleKind::Stmts, HoleKind::Expr]);
-        assert_eq!(pieces[0], "let t = "); // from the first token
+        assert_eq!(pieces[0], "let t# = "); // from the first token, with `t` marked
         let Stmt::Let { value, .. } = &stmts[1] else { panic!() };
         assert!(matches!(&value.kind, ExprKind::Quote(CodeKind::Stmts, p, h) if p == &[""] && h.is_empty()));
         let Stmt::Return { value: Some(v), .. } = &stmts[2] else { panic!() };

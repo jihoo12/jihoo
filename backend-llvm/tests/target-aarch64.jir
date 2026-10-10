@@ -1,7 +1,7 @@
 ; A module for aarch64 compiles on any machine, for aarch64: its syscall
 ; (exit, 93 on aarch64) is lowered for that machine.
 ; expect: object aarch64
-jir 2
+jir 3
 profile freestanding
 target aarch64
 
