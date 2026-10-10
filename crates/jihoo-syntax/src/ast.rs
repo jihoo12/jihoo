@@ -173,6 +173,14 @@ pub enum Stmt {
         cond: Expr,
         body: Block,
     },
+    /// `break`: leaves the innermost `while`.
+    Break {
+        pos: Pos,
+    },
+    /// `continue`: goes on with the innermost `while`'s next test.
+    Continue {
+        pos: Pos,
+    },
     /// `go f(x)`: runs the call in a new task.
     Go {
         pos: Pos,
@@ -551,6 +559,7 @@ pub fn set_stmt_pos(s: &mut Stmt, pos: Pos) {
             set_pos(cond, pos);
             set_block_pos(body, pos);
         }
+        Stmt::Break { pos: p } | Stmt::Continue { pos: p } => *p = pos,
         Stmt::Go { pos: p, call } => {
             *p = pos;
             set_pos(call, pos);

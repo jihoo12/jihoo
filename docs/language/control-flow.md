@@ -2,7 +2,7 @@
 
 Inside a function body, statements run in order. jihoo has one way to declare a
 variable, two branching forms (`if` and [`match`](patterns.md)), one loop
-(`while`), and `return`.
+(`while`, with `break` and `continue`), and `return`.
 
 ```jihoo
 fn collatz(n: i64) -> i64 {
@@ -92,8 +92,32 @@ while i < len(xs) {
 }
 ```
 
-There is no `break` or `continue` yet. To leave a loop early, make the
-condition false, or put the loop in a function of its own and `return` from it.
+## `break` and `continue`
+
+`break` leaves the innermost `while` at once, and `continue` skips the rest of
+its body and goes on with the next test of the condition:
+
+```jihoo
+let i = 0
+let sum = 0
+while true {
+    i = i + 1
+    if i % 2 == 0 { continue }     // skip even numbers
+    if i > 9 { break }             // done
+    sum = sum + i
+}
+print(sum)                         // 1 + 3 + 5 + 7 + 9 = 25
+```
+
+- Only the innermost loop is affected; there are no loop labels. To leave
+  several loops at once, put them in a function and `return`.
+- They work anywhere inside the loop's body: in `if` blocks, in
+  [`match`](patterns.md) and `select` arms, and in the code of a
+  [statement macro](macros.md#statement-and-item-macros).
+- A [closure](closures.md) body is a function of its own, so a `break` in a
+  closure cannot leave a loop around the closure; it is an error, as is a
+  `break` or `continue` outside any loop.
+- Code right after a `break` or `continue` in the same block never runs.
 
 ## `return`
 

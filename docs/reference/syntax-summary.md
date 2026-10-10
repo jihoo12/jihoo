@@ -42,6 +42,7 @@ stmt  = "let" NAME (":" type)? "=" expr
       | place "=" expr
       | "if" expr block ("else" (block | if-stmt))?
       | "while" expr block
+      | "break" | "continue"                              ; inside a `while`
       | "return" expr?
       | "match" expr "{" (pattern ("if" expr)? "=>" (block | stmt)) sep* "}"
       | "select" "{" select-arm sep* "}"
@@ -98,8 +99,8 @@ single  = "_" | NAME | INT | "-" INT | "true" | "false"
 ## Keywords
 
 ```text
-as      asm     cell    chan    comptime  const   else    enum
-extern  false   fn      go      if        import  let     macro
-match   pub     quote   ref     return    select  struct  true
-while
+as      asm     break   cell      chan    comptime  const   continue
+else    enum    extern  false     fn      go        if      import
+let     macro   match   pub       quote   ref       return  select
+struct  true    while
 ```

@@ -531,6 +531,8 @@ impl Parser {
                 let arms = self.braced_list(|p| p.match_arm())?;
                 Ok(Stmt::Match { pos, value, arms })
             }
+            Tok::Break => Ok(Stmt::Break { pos: self.bump().pos }),
+            Tok::Continue => Ok(Stmt::Continue { pos: self.bump().pos }),
             Tok::While => {
                 self.bump();
                 let cond = self.cond()?;
@@ -1168,6 +1170,8 @@ fn punct(t: &Tok) -> &'static str {
         Tok::If => "if",
         Tok::Else => "else",
         Tok::While => "while",
+        Tok::Break => "break",
+        Tok::Continue => "continue",
         Tok::True => "true",
         Tok::False => "false",
         Tok::Struct => "struct",

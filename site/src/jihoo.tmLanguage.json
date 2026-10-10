@@ -65,7 +65,7 @@
     },
     "keywords": {
       "patterns": [
-        { "name": "keyword.control.jihoo", "match": "\\b(if|else|while|match|select|return|go)\\b" },
+        { "name": "keyword.control.jihoo", "match": "\\b(if|else|while|break|continue|match|select|return|go)\\b" },
         { "name": "storage.type.jihoo", "match": "\\b(let|const|fn|macro|struct|enum)\\b" },
         { "name": "storage.modifier.jihoo", "match": "\\b(pub|extern|comptime|ref|chan|cell)\\b" },
         { "name": "keyword.other.jihoo", "match": "\\b(import|as|quote|asm|items)\\b" }

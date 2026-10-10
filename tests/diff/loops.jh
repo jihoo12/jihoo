@@ -1,0 +1,72 @@
+// `break` and `continue` must leave and resume the same loop on the VM and
+// natively, also when nested, inside `match` arms and inside `if`s.
+
+enum Step { Skip, Stop, Add(i64) }
+
+fn odd_sum(limit: i64) -> i64 {
+    let i = 0
+    let s = 0
+    while true {
+        i = i + 1
+        if i % 2 == 0 { continue }
+        if i > limit { break }
+        s = s + i
+    }
+    return s
+}
+
+// Leaves only the inner loop.
+fn triangle(n: i64) -> i64 {
+    let count = 0
+    let i = 0
+    while i < n {
+        let j = 0
+        while true {
+            if j == i { break }
+            j = j + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+fn run(steps: [Step; 6]) -> i64 {
+    let total = 0
+    let i = 0
+    while i < 6 {
+        let s = steps[i]
+        i = i + 1
+        match s {
+            Skip => continue
+            Stop => break
+            Add(n) => total = total + n
+        }
+        total = total * 2
+    }
+    return total
+}
+
+// The first index where `xs` has `x`, or -1.
+fn find(xs: [i64; 5], x: i64) -> i64 {
+    let i = 0
+    let found = -1
+    while i < 5 {
+        if xs[i] == x {
+            found = i
+            break
+        }
+        i = i + 1
+    }
+    return found
+}
+
+fn entry() -> i64 {
+    let score = 0
+    if odd_sum(9) == 25 && odd_sum(0) == 0 { score = score + 1 }
+    if triangle(5) == 10 { score = score + 2 }
+    let steps = [Step.Add(1), Step.Skip, Step.Add(2), Step.Stop, Step.Add(100), Step.Skip]
+    if run(steps) == 8 { score = score + 4 }      // (1 * 2 + 2) * 2
+    if find([4, 8, 15, 16, 23], 15) == 2 && find([4, 8, 15, 16, 23], 42) == -1 { score = score + 8 }
+    return score + 240 // 255 when everything holds
+}

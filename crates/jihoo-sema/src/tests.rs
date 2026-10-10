@@ -71,6 +71,23 @@ fn returns_are_checked() {
 }
 
 #[test]
+fn break_and_continue() {
+    let m = check("fn main() {\n  let i = 0\n  while true {\n    i = i + 1\n    if i < 3 { continue }\n    break\n  }\n}").unwrap();
+    // `continue` jumps to the condition block, `break` past the loop.
+    let main = m.func("main").unwrap().to_string();
+    assert!(main.contains("jmp bb1"), "{main}");
+    assert_eq!(err("fn main() { break }"), "1:13: `break` outside of a `while` loop");
+    assert!(err("fn main() { if true { continue } }").contains("`continue` outside of a `while` loop"));
+    // A closure body is a function of its own: the loop around it does not count.
+    assert!(err("fn main() { while true {\n  let f = fn() { break }\n  break\n} }").contains("`break` outside"));
+    // Code after `break` is unreachable; what follows the loop is not.
+    assert!(err("fn f() -> i64 { while true { break } }\nfn main() {}").contains("missing `return`"));
+    check("fn f() -> i64 { while true { break\n return 2 }\n return 1 }\nfn main() {}").unwrap();
+    // `break` and `continue` are keywords.
+    assert!(err("fn main() { let break = 1 }").contains("variable name"));
+}
+
+#[test]
 fn profile_rules() {
     assert!(err("#![freestanding]\nfn _start() { print(1) }").contains("not available in freestanding"));
     assert!(err("fn main() { syscall(60, 0) }").contains("only available in native and freestanding"));

@@ -66,10 +66,10 @@ letter must be a variant.
 These words are reserved:
 
 ```text
-as      asm     cell    chan    comptime  const   else    enum
-extern  false   fn      go      if        import  let     macro
-match   pub     quote   ref     return    select  struct  true
-while
+as      asm     break   cell      chan    comptime  const   continue
+else    enum    extern  false     fn      go        if      import
+let     macro   match   pub       quote   ref       return  select
+struct  true    while
 ```
 
 A few more words have a meaning only in one place and are ordinary names

@@ -336,6 +336,17 @@ struct FnCx<'a> {
     /// For each closure this instance received as a comptime argument, the
     /// registers holding its captured values.
     closure_regs: HashMap<String, Vec<Reg>>,
+    /// The `while` loops around the current statement, innermost last: where
+    /// `continue` and `break` jump to.
+    loops: Vec<Loop>,
+}
+
+#[derive(Clone, Copy)]
+struct Loop {
+    /// The block that tests the condition.
+    next: BlockId,
+    /// The block after the loop.
+    end: BlockId,
 }
 
 /// A number literal, possibly negated: its type comes from context.
@@ -374,6 +385,7 @@ impl<'a> FnCx<'a> {
             scopes: vec![HashMap::new()],
             captured: HashSet::new(),
             closure_regs: HashMap::new(),
+            loops: Vec::new(),
         }
     }
 
@@ -783,10 +795,26 @@ impl<'a> FnCx<'a> {
                 self.terminate(Terminator::Branch { cond: c, then: body_bb, els: end_bb });
 
                 self.switch_to(body_bb);
-                self.block(body)?;
+                self.loops.push(Loop { next: cond_bb, end: end_bb });
+                let r = self.block(body);
+                self.loops.pop();
+                r?;
                 self.terminate(Terminator::Jump(cond_bb));
 
                 self.switch_to(end_bb);
+            }
+            Stmt::Break { pos } | Stmt::Continue { pos } => {
+                let is_break = matches!(s, Stmt::Break { .. });
+                let Some(l) = self.loops.last().copied() else {
+                    let word = if is_break { "break" } else { "continue" };
+                    // A closure body is a function of its own, so the loops
+                    // around the closure do not count.
+                    return Err(Error::new(*pos, format!("`{word}` outside of a `while` loop")));
+                };
+                self.terminate(Terminator::Jump(if is_break { l.end } else { l.next }));
+                // Anything after this goes into an unreachable block.
+                let dead = self.new_block();
+                self.switch_to(dead);
             }
             // A statement macro adds its statements to this block.
             Stmt::Expr(Expr { pos, kind: ExprKind::MacroCall(name, args) })
