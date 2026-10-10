@@ -1,6 +1,6 @@
 ; Every register is declared on the `regs` line.
 ; expect: error register %1 out of range
-jir 1
+jir 2
 profile freestanding
 
 fn @_start() -> i64 {

@@ -21,7 +21,7 @@ pub use verify::verify;
 /// module instead of compiling it with other rules. Bump it whenever the
 /// format or the meaning of anything in it changes (see "Versions" in
 /// `docs/jir.md`); the `version` tests check that both sides and the spec agree.
-pub const JIR_VERSION: u32 = 1;
+pub const JIR_VERSION: u32 = 2;
 
 /// Language profile, selected with `#![native]` or `#![freestanding]` at the
 /// top of a source file.
@@ -61,6 +61,42 @@ impl Profile {
     }
 }
 
+/// The machine a program is built for. Every target is 64-bit Linux, so they
+/// share the LP64 layout of `layout.rs`; what differs is the instruction set,
+/// and with it syscall numbers and inline asm. Code picks per target by file:
+/// `import sys` loads `sys.<name>.jh` before `sys.jh`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Target {
+    X86_64,
+    Aarch64,
+}
+
+impl Target {
+    pub const ALL: [Target; 2] = [Target::X86_64, Target::Aarch64];
+
+    /// The machine this compiler runs on, the default target. A host that is
+    /// no target still runs hosted programs on the VM, as `x86_64`.
+    pub fn host() -> Target {
+        if cfg!(target_arch = "aarch64") {
+            Target::Aarch64
+        } else {
+            Target::X86_64
+        }
+    }
+
+    /// The name used in JIR, on the command line and in file names.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Target::X86_64 => "x86_64",
+            Target::Aarch64 => "aarch64",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Target> {
+        Target::ALL.into_iter().find(|t| t.as_str() == name)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Reg(pub u32);
 
@@ -70,6 +106,9 @@ pub struct BlockId(pub u32);
 #[derive(Debug, Clone)]
 pub struct Module {
     pub profile: Profile,
+    /// The machine to compile for. Analysis does not depend on it (only which
+    /// files `import` loads does), so it is set after analysis.
+    pub target: Target,
     pub structs: Vec<StructDef>,
     pub enums: Vec<EnumDef>,
     /// C functions the program calls (native only), by symbol name.

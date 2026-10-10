@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use jihoo_ir::{Module, Profile};
+use jihoo_ir::{Module, Profile, Target};
 
 const USAGE: &str = "\
 usage:
@@ -14,6 +14,8 @@ usage:
 
 options:
   -I <dir>    also look for imported modules in <dir> (may be repeated)
+  --target <t>  compile for x86_64 or aarch64 Linux (emit-ir, build;
+              default: this machine)
 
 link inputs (native programs only, passed on to the C compiler):
   -l <lib>    link with lib<lib> (also -l<lib>)
@@ -27,7 +29,8 @@ environment:
   JIHOO_CC    C compiler that links native programs (default: cc in PATH)
 
 `import a.b` loads `a/b.jh` from the importing file's directory, the -I
-directories, JIHOO_PATH, and finally the standard library (`lib/`).";
+directories, JIHOO_PATH, and finally the standard library (`lib/`); in each,
+`a/b.<target>.jh` (such as `a/b.x86_64.jh`) comes first.";
 
 /// Stack for the compiler, which walks the syntax tree recursively. The parser
 /// bounds how deep the tree nests; this is enough for that bound even in a
@@ -55,6 +58,7 @@ struct Opts {
     input: PathBuf,
     output: Option<PathBuf>,
     include: Vec<PathBuf>,
+    target: Target,
     /// Arguments for the C compiler that links a native program: `-l`, `-L`
     /// and extra input files.
     link: Vec<String>,
@@ -68,11 +72,17 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
     let mut output = None;
     let mut include = Vec::new();
     let mut link = Vec::new();
+    let mut target = Target::host();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "-o" => output = Some(PathBuf::from(it.next().ok_or("`-o` needs a path")?)),
             "-I" => include.push(PathBuf::from(it.next().ok_or("`-I` needs a directory")?)),
+            "--target" => {
+                let name = it.next().ok_or("`--target` needs a target: x86_64 or aarch64")?;
+                target = Target::parse(name)
+                    .ok_or_else(|| format!("unknown target `{name}`; the targets are x86_64 and aarch64"))?;
+            }
             "-l" | "-L" => link.push(format!("{a}{}", it.next().ok_or_else(|| format!("`{a}` needs an argument"))?)),
             s if (s.starts_with("-l") || s.starts_with("-L")) && s.len() > 2 => link.push(s.to_string()),
             s if s.starts_with('-') => return Err(format!("unknown option `{s}`\n\n{USAGE}")),
@@ -84,7 +94,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
         }
     }
     let input = input.ok_or_else(|| format!("missing input file\n\n{USAGE}"))?;
-    Ok(Opts { input, output, include, link })
+    Ok(Opts { input, output, include, target, link })
 }
 
 /// `parse_opts` for commands that do not link.
@@ -104,6 +114,9 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
     match cmd.as_str() {
         "run" => {
             let opts = parse_opts_no_link(rest)?;
+            if opts.target != Target::host() {
+                return Err(format!("the VM runs on this machine, which is not {}", opts.target.as_str()));
+            }
             let m = compile(&opts)?;
             if m.profile != Profile::Hosted {
                 return Err(format!(
@@ -163,11 +176,12 @@ fn render(files: &[PathBuf], e: &jihoo_syntax::Error) -> String {
 
 fn compile(opts: &Opts) -> Result<Module, String> {
     let path = &opts.input;
-    let loaded = jihoo_syntax::loader::load(path, &search_path(&opts.include))
+    let loaded = jihoo_syntax::loader::load(path, &search_path(&opts.include), opts.target.as_str())
         .map_err(|(e, files)| render(&files, &e))?;
-    let m = jihoo_sema::analyze_modules(&loaded.modules).map_err(|errs| {
+    let mut m = jihoo_sema::analyze_modules(&loaded.modules).map_err(|errs| {
         errs.iter().map(|e| render(&loaded.files, e)).collect::<Vec<_>>().join("\nerror: ")
     })?;
+    m.target = opts.target;
     jihoo_ir::verify(&m).map_err(|e| format!("{}: invalid IR: {e}", path.display()))?;
     Ok(m)
 }

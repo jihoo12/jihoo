@@ -112,7 +112,14 @@ impl Env<'_> {
             i += 1;
         }
 
-        let module = jihoo_ir::Module { profile: self.profile, structs: vec![], enums: vec![], externs: vec![], funcs };
+        let module = jihoo_ir::Module {
+            profile: self.profile,
+            target: jihoo_ir::Target::host(),
+            structs: vec![],
+            enums: vec![],
+            externs: vec![],
+            funcs,
+        };
         let mut vm = Vm::new(&module).with_fuel(FUEL).with_uniques(self.uniques.get());
         let mut values = Vec::new();
         for a in args {

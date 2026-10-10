@@ -36,9 +36,10 @@ fn main(argc: i32, argv: **u8) -> i64 {
 
 ```jihoo
 #![freestanding]
+import sys                   // lib/sys.x86_64.jh or lib/sys.aarch64.jh
 
 fn _start() -> i64 {
-    syscall(1, 1, "hi\n", 3) // write(1, "hi\n", 3) on x86_64 Linux
+    syscall(sys.WRITE, 1, "hi\n", 3)
     return 0                 // exit(0)
 }
 ```
@@ -113,11 +114,12 @@ evaluation (`const`, `comptime`) and macros, both run on the VM.
 
 - **hosted:** `str`, `print`, `ref` for recursive data, `cell` for shared
   state, closures, tasks with channels and `select`.
-- **native and freestanding:** pointers, `syscall` and inline asm (x86_64 and
-  aarch64 Linux); closures passed to `comptime` parameters; the `alloc`, `io`
-  and `coro` libraries (x86_64).
+- **native and freestanding:** pointers, `syscall` and inline asm, for x86_64
+  and aarch64 Linux (`--target` builds for either, and modules can have one
+  file per target); closures passed to `comptime` parameters; the `alloc`,
+  `io` and `sys` libraries.
 - **native:** C functions through `extern fn` and the `libc` module, C files and
-  libraries linked in.
+  libraries linked in; the `coro` library.
 
 See the [examples](examples) and the [roadmap](docs/internals/roadmap.md).
 

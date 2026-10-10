@@ -1,6 +1,6 @@
 #![freestanding]
 // The `alloc` and `io` libraries (lib/alloc.jh, lib/io.jh): an arena allocator,
-// a growable Vec(T), and output, with no libc and no GC (x86_64 Linux).
+// a growable Vec(T), and output, with no libc and no GC.
 //   jihoo build examples/arena.jh -o out/arena && ./out/arena; echo $?
 
 import alloc

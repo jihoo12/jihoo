@@ -1,0 +1,13 @@
+#![freestanding]
+// Linux system call numbers on aarch64 (the generic table most newer
+// architectures share). `import sys` loads this file when building for
+// aarch64 and lib/sys.x86_64.jh when building for x86_64; both declare the
+// same names.
+//
+//   import sys
+//   syscall(sys.WRITE, 1, "hi\n", 3)
+
+pub const WRITE = 64
+pub const MMAP = 222
+pub const MUNMAP = 215
+pub const EXIT = 93

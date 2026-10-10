@@ -139,9 +139,9 @@ fn inline_asm_example_runs_natively() {
 }
 
 /// The arena example imports `lib/alloc.jh` and `lib/io.jh`, which use pointers
-/// and `mmap`, so it only runs natively; check its output.
+/// and `mmap`, so it only runs natively; check its output. They make syscalls
+/// through `lib/sys.<target>.jh`.
 #[test]
-#[cfg(target_arch = "x86_64")]
 fn arena_example_runs_natively() {
     if std::env::var_os("JIHOO_LLC").is_none() {
         eprintln!("JIHOO_LLC is not set: skipping");
@@ -156,10 +156,8 @@ fn arena_example_runs_natively() {
     assert_eq!(out.status.code(), Some(1));
 }
 
-/// `lib/coro.jh` switches stacks with x86_64 asm, and `lib/io.jh` uses x86_64
-/// syscall numbers.
+/// `lib/coro.jh` switches stacks with the C library's `swapcontext`.
 #[test]
-#[cfg(target_arch = "x86_64")]
 fn coroutine_example_runs_natively() {
     if std::env::var_os("JIHOO_LLC").is_none() {
         eprintln!("JIHOO_LLC is not set: skipping");
@@ -172,6 +170,37 @@ fn coroutine_example_runs_natively() {
     std::fs::remove_file(&bin).unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "0\n2\n8\n34\n");
     assert_eq!(out.status.code(), Some(4));
+}
+
+/// `--target` builds for the other machine: the binary is for that machine,
+/// and its syscalls come from that machine's `lib/sys` file.
+#[test]
+fn builds_for_the_other_target() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let (other, machine, write) = if cfg!(target_arch = "aarch64") {
+        ("x86_64", 62, "const 1\n")
+    } else {
+        ("aarch64", 183, "const 64\n")
+    };
+    let src = repo_root().join("examples/arena.jh");
+    let ir = Command::new(JIHOO).args(["emit-ir", "--target", other]).arg(&src).output().unwrap();
+    let ir = String::from_utf8_lossy(&ir.stdout);
+    assert!(ir.contains(&format!("\ntarget {other}\n")), "{ir}");
+    // `io.write`, whose syscall number is the other machine's.
+    let write_fn = &ir[ir.find("fn @io.write(").unwrap()..];
+    assert!(write_fn[..write_fn.find("\n}").unwrap()].contains(write), "{write_fn}");
+
+    let bin = std::env::temp_dir().join(format!("jihoo-cross-{}", std::process::id()));
+    assert_eq!(exit_code(Command::new(JIHOO).args(["build", "--target", other]).arg(&src).arg("-o").arg(&bin)), 0);
+    let elf = std::fs::read(&bin).unwrap();
+    std::fs::remove_file(&bin).unwrap();
+    assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), machine, "ELF e_machine");
+
+    let out = Command::new(JIHOO).args(["run", "--target", other]).arg(repo_root().join("examples/hello.jh")).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("the VM runs on this machine"));
 }
 
 /// Errors in an imported module name that module's file.

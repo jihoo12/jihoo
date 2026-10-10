@@ -24,6 +24,9 @@
     calling C through `extern fn`.
 13. Floats: `f32` and `f64`, identical on the VM and natively, and across into
     C.
+14. Targets: x86_64 and aarch64 Linux with `--target`, recorded in JIR;
+    per-target modules (`sys.x86_64.jh`); the standard library on both, with
+    coroutines on libc's contexts.
 
 ## Next
 

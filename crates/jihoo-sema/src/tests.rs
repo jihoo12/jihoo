@@ -998,7 +998,7 @@ fn generic_struct_errors() {
 fn check_files(files: &[(&str, &str)]) -> Result<ir::Module, String> {
     use std::path::{Path, PathBuf};
     let read = |p: &Path| files.iter().find(|(n, _)| Path::new(n) == p).map(|(_, s)| s.to_string());
-    let loaded = jihoo_syntax::loader::load_with(Path::new("main.jh"), &[PathBuf::from("lib")], &read)
+    let loaded = jihoo_syntax::loader::load_with(Path::new("main.jh"), &[PathBuf::from("lib")], "x86_64", &read)
         .map_err(|(e, files)| format!("{}:{e}", files[e.pos.file as usize].display()))?;
     let m = analyze_modules(&loaded.modules)
         .map_err(|es| format!("{}:{}", loaded.files[es[0].pos.file as usize].display(), es[0]))?;

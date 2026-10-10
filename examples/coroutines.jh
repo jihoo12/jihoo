@@ -1,10 +1,10 @@
-#![freestanding]
-// Coroutines without an OS or a GC (lib/coro.jh): each runs a function on a
-// stack of its own, and `yield` / `resume` pass control and a value back and
-// forth. The context switch is a few lines of inline asm in the library.
+#![native]
+// Coroutines without a GC (lib/coro.jh): each runs a function on a stack of its
+// own, and `yield` / `resume` pass control and a value back and forth. The C
+// library switches between them.
 //   jihoo build examples/coroutines.jh -o out/coro && ./out/coro
 import coro
-import io
+import libc
 
 // A generator: the Fibonacci numbers below `c.value`, one per resume.
 fn fibonacci(c: *coro.Coro) {
@@ -30,7 +30,7 @@ fn evens(c: *coro.Coro) {
     }
 }
 
-fn _start() -> i64 {
+fn main() -> i64 {
     let fib = coro.new(fibonacci, 64 * 1024)
     fib.value = 100                    // the limit, read when it starts
     let even = coro.new(evens, 64 * 1024)
@@ -38,7 +38,7 @@ fn _start() -> i64 {
 
     let count = 0
     while coro.resume(&even) {
-        io.print_int(even.value)       // 0 2 8 34
+        libc.printf("%ld\n", even.value)   // 0 2 8 34
         count = count + 1
     }
     coro.free(&even)

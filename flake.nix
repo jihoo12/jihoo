@@ -131,7 +131,10 @@
       # `nix flake check`: the installed toolchain, used from outside the source
       # tree, runs a hosted example and builds and runs native ones.
       checks = forAllSystems (pkgs:
-        let jihoo = self.packages.${pkgs.stdenv.hostPlatform.system}.jihoo; in
+        let
+          jihoo = self.packages.${pkgs.stdenv.hostPlatform.system}.jihoo;
+          otherTarget = if pkgs.stdenv.hostPlatform.isx86_64 then "aarch64" else "x86_64";
+        in
         {
           toolchain = pkgs.runCommand "jihoo-toolchain-check" { nativeBuildInputs = [ jihoo ]; } (''
             # Outputs go to files: with pipefail, `| grep -q` would fail the
@@ -145,7 +148,6 @@
             ./native one > native.out && status=0 || status=$?
             test "$status" = 49
             grep -qx "  argv\[1\] = one" native.out
-          '' + lib.optionalString pkgs.stdenv.hostPlatform.isx86_64 ''
             jihoo build freestanding.jh -o freestanding
             ./freestanding > /dev/null && status=0 || status=$?
             test "$status" = 55
@@ -156,7 +158,8 @@
             ./coroutines > coroutines.out && status=0 || status=$?
             test "$status" = 4
             grep -qx 34 coroutines.out
-          '' + ''
+            # And for the other machine, which needs nothing more when freestanding.
+            jihoo build --target ${otherTarget} arena.jh -o arena-${otherTarget}
             touch $out
           '');
         });

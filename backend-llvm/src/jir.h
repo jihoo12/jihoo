@@ -12,7 +12,7 @@ namespace jir {
 
 // The one JIR version this backend reads, from the `jir N` header. It must
 // equal JIR_VERSION in crates/jihoo-ir/src/lib.rs (a Rust test checks this).
-constexpr int64_t kVersion = 1;
+constexpr int64_t kVersion = 2;
 
 enum class Profile { Hosted, Native, Freestanding };
 
@@ -169,6 +169,9 @@ struct Function {
 
 struct Module {
   Profile profile = Profile::Hosted;
+  // `x86_64` or `aarch64` from the `target` header; empty without one, which
+  // means the machine jihoo-llc runs on.
+  std::string target;
   std::vector<StructDef> structs;
   std::vector<EnumDef> enums;
   std::vector<ExternFn> externs;

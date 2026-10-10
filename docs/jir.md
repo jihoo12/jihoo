@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 1)
+# JIR — jihoo IR text format (version 2)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it. Both sides must agree on this
@@ -28,13 +28,15 @@ editing it fails a test until you decide whether the edit needs a new version.
 |---------|--------|
 | 0 | every format before versions were kept, up to and including native division checks |
 | 1 | the first version that is bumped on change; the header must come first |
+| 2 | the `target` header |
 
 ## Example
 
 ```
 ; jihoo IR
-jir 1
+jir 2
 profile freestanding
+target x86_64
 
 struct $Node { value: i64, next: *$Node } size 16 align 8
 
@@ -79,8 +81,9 @@ bb3:
 ## Module
 
 ```
-jir 1                                ; format version, must come first
+jir 2                                ; format version, must come first
 profile hosted|native|freestanding   ; language profile
+target x86_64|aarch64                ; the machine, 64-bit Linux
 struct ...                           ; zero or more structs
 enum ...                             ; zero or more enums
 extern ...                           ; zero or more C functions (native only)
@@ -92,6 +95,14 @@ fn ...                               ; zero or more functions
 | `hosted`       | VM             | yes | `print`, `to_str` | no      | no          |
 | `native`       | LLVM + libc    | no  | `syscall`, `asm` | yes      | `extern`    |
 | `freestanding` | LLVM, no libc  | no  | `syscall`, `asm` | yes      | no          |
+
+The target is the machine the module was made for: its `syscall` numbers and
+`asm` are that machine's, since the frontend picked per-target modules for it
+(`import sys` loads `sys.x86_64.jh` or `sys.aarch64.jh`). `jihoo-llc` compiles
+for that machine (`x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`).
+The frontend always writes the line; a hand-written module may leave it out,
+and is then compiled for the machine `jihoo-llc` runs on. The VM ignores it.
+Both targets are LP64, which is what `size_of` and struct layouts assume.
 
 The entry point is `@main` for hosted and native modules and `@_start` for
 freestanding ones. It returns `unit` or `i64` and takes no parameters, except

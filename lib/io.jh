@@ -1,15 +1,18 @@
 #![freestanding]
-// Output for freestanding programs (x86_64 Linux), straight to file descriptors.
+// Output for freestanding programs (x86_64 and aarch64 Linux), straight to
+// file descriptors.
 //
 //   import io
 //   io.puts("hello\n")
 //   io.print_int(42)
 
+import sys
+
 pub const STDOUT = 1
 pub const STDERR = 2
 
 pub fn write(fd: i64, buf: *u8, len: i64) -> i64 {
-    return syscall(1, fd, buf, len)
+    return syscall(sys.WRITE, fd, buf, len)
 }
 
 pub fn strlen(s: *u8) -> i64 {
@@ -52,5 +55,5 @@ pub fn print_int(n: i64) {
 }
 
 pub fn exit(code: i64) {
-    syscall(60, code)
+    syscall(sys.EXIT, code)
 }

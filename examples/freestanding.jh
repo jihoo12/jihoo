@@ -2,10 +2,14 @@
 // Freestanding program: no GC, no std, compiled with LLVM to a tiny static binary.
 //   jihoo build examples/freestanding.jh -o out/hello && ./out/hello; echo $?
 //
-// Returning from `_start` exits the process with that value.
+// Returning from `_start` exits the process with that value. `sys` holds the
+// syscall numbers of the machine it is built for (lib/sys.x86_64.jh or
+// lib/sys.aarch64.jh).
+
+import sys
 
 fn write(fd: i64, buf: *u8, len: i64) -> i64 {
-    return syscall(1, fd, buf, len) // SYS_write on x86_64 Linux
+    return syscall(sys.WRITE, fd, buf, len)
 }
 
 fn fib(n: i64) -> i64 {

@@ -62,8 +62,8 @@ the tests this way after any change to the VM that allocates or adds roots.
 `.github/workflows/test.yml` runs `nix flake check` on x86_64 and aarch64 Linux.
 That builds the backend (running its `ctest`) and the frontend (running `cargo test`, with the differential tests
 against the real backend and C compiler) and then builds and runs examples with
-the packaged toolchain: the hosted and native ones everywhere, and the
-freestanding ones, which use x86_64 syscalls, on x86_64. Clippy runs with
+the packaged toolchain: all of them on both machines, except the inline
+assembly example, which is x86_64 assembly. Clippy runs with
 `-D warnings`.
 
 `.github/workflows/pages.yml` builds this website, which checks that every page

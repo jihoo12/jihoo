@@ -459,6 +459,11 @@ Module parse(const std::string &text) {
         else if (p.text == "freestanding") m.profile = Profile::Freestanding;
         else fail(no, "unknown profile `" + p.text + "`");
         saw_profile = true;
+      } else if (first.kind == TokKind::Word && first.text == "target") {
+        const Tok &t = l.next("a target");
+        if (t.text != "x86_64" && t.text != "aarch64")
+          fail(no, "unknown target `" + t.text + "`; the targets are x86_64 and aarch64");
+        m.target = t.text;
       } else if (first.kind == TokKind::Word && first.text == "struct") {
         const Tok &name = l.next("a struct name");
         if (name.kind != TokKind::StructName) fail(no, "expected a struct like $Name");

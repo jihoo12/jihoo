@@ -1,0 +1,12 @@
+#![freestanding]
+// Linux system call numbers on x86_64. `import sys` loads this file when
+// building for x86_64 and lib/sys.aarch64.jh when building for aarch64; both
+// declare the same names.
+//
+//   import sys
+//   syscall(sys.WRITE, 1, "hi\n", 3)
+
+pub const WRITE = 1
+pub const MMAP = 9
+pub const MUNMAP = 11
+pub const EXIT = 60

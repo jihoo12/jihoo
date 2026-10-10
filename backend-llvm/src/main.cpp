@@ -26,14 +26,12 @@ const char *kUsage =
     "options:\n"
     "  --emit-llvm        write textual LLVM IR instead of an object file\n"
     "  -O0 | -O1 | -O2 | -O3   optimization level (default -O2)\n"
-    "  --target <triple>  target triple (default: host)\n"
     "  --version          print the JIR version this backend reads\n";
 
 struct Options {
   std::string input, output;
   bool emit_llvm = false;
   int opt_level = 2;
-  std::string triple;
   bool version = false;
 };
 
@@ -43,8 +41,6 @@ std::optional<Options> parse_args(int argc, char **argv) {
     std::string a = argv[i];
     if (a == "-o" && i + 1 < argc) {
       o.output = argv[++i];
-    } else if (a == "--target" && i + 1 < argc) {
-      o.triple = argv[++i];
     } else if (a == "--emit-llvm") {
       o.emit_llvm = true;
     } else if (a.size() == 3 && a.rfind("-O", 0) == 0 && a[2] >= '0' && a[2] <= '3') {
@@ -104,7 +100,8 @@ int run(const Options &o) {
   llvm::InitializeAllAsmParsers();  // needed for the inline asm in `syscall`
   llvm::InitializeAllAsmPrinters();
 
-  llvm::Triple triple(o.triple.empty() ? llvm::sys::getDefaultTargetTriple() : o.triple);
+  // The frontend chose the target (its syscall numbers and asm are for it).
+  llvm::Triple triple(jm.target.empty() ? llvm::sys::getDefaultTargetTriple() : jm.target + "-unknown-linux-gnu");
   std::string err;
   const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, err);
   if (!target) {

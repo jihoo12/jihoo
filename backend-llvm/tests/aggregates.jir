@@ -1,7 +1,7 @@
 ; Structs, enums and arrays by value: building, reading and replacing parts,
 ; nested paths, and passing a struct to a function (which gets a copy).
 ; expect: exit 143
-jir 1
+jir 2
 profile freestanding
 
 struct $P { x: i64, y: i32 } size 16 align 8

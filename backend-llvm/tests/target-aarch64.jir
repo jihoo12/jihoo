@@ -1,0 +1,15 @@
+; A module for aarch64 compiles on any machine, for aarch64: its syscall
+; (exit, 93 on aarch64) is lowered for that machine.
+; expect: object aarch64
+jir 2
+profile freestanding
+target aarch64
+
+fn @_start() -> i64 {
+  regs i64 i64 i64
+bb0:
+  %0 = const 93
+  %1 = const 0
+  %2 = syscall(%0, %1)
+  ret %1
+}

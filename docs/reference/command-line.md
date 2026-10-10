@@ -33,7 +33,9 @@ The steps are:
    the link inputs; a **freestanding** program with `ld.lld -static
    --gc-sections -e _start`, with nothing else.
 
-The intermediate files are removed afterwards. Hosted programs are refused,
+With `--target`, a program can be built for the other machine: a freestanding
+one needs nothing more (`ld.lld` links for both), a native one a C compiler for
+that machine in `JIHOO_CC`. The intermediate files are removed afterwards. Hosted programs are refused,
 since they run with `jihoo run`.
 
 Link inputs (native programs only) are passed on to the C compiler:
@@ -56,6 +58,7 @@ generics, expanded macros, folded constants.
 |--------|---------|
 | `-o <path>` | the output file (`build`, `emit-ir`) |
 | `-I <dir>` | also look for imported modules in `<dir>`; may be repeated |
+| `--target <t>` | the machine to compile for, `x86_64` or `aarch64` (Linux); the default is this machine. It picks the [per-target modules](../language/modules.md#per-target-modules) and is recorded in the JIR (`build`, `emit-ir`; `run` only runs on this machine) |
 
 ## Environment
 
@@ -91,5 +94,4 @@ jihoo-llc prog.jir -o prog.ll --emit-llvm
 | `-o <path>` | the output file (required) |
 | `--emit-llvm` | write textual LLVM IR instead of an object file |
 | `-O0` … `-O3` | optimization level (default `-O2`) |
-| `--target <triple>` | target triple (default: the host) |
 | `--version` | print the [JIR version](../jir.md#versions) it reads; it refuses modules of any other |

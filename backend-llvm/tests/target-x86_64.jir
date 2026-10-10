@@ -1,0 +1,15 @@
+; A module for x86_64 compiles on any machine, for x86_64: its syscall
+; (exit, 60 on x86_64) is lowered for that machine.
+; expect: object x86_64
+jir 2
+profile freestanding
+target x86_64
+
+fn @_start() -> i64 {
+  regs i64 i64 i64
+bb0:
+  %0 = const 60
+  %1 = const 0
+  %2 = syscall(%0, %1)
+  ret %1
+}

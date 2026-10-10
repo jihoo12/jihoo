@@ -2,6 +2,8 @@
 // Pointers, structs, arrays and sized integers, with no libc and no GC.
 //   jihoo build examples/pointers.jh -o out/pointers && ./out/pointers
 
+import sys
+
 struct Buf {
     data: *u8
     len: i64
@@ -21,7 +23,7 @@ fn strlen(s: *u8) -> i64 {
 }
 
 fn write(s: *u8, len: i64) {
-    syscall(1, 1, s, len) // SYS_write on x86_64 Linux
+    syscall(sys.WRITE, 1, s, len)
 }
 
 fn push_byte(buf: *Buf, c: u8) {

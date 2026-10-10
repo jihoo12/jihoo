@@ -32,6 +32,9 @@ by a VM or compiled by LLVM.
 1. **Load** (`crates/jihoo-syntax/src/loader.rs`). The root file and every file
    it imports, transitively, are parsed into one AST per module. Each file is
    loaded once; positions carry a file number, so errors name the right file.
+   The target (x86_64 or aarch64 Linux) matters only here: `import a` prefers
+   `a.<target>.jh` to `a.jh`, so the rest of the compiler only ever sees the
+   target's files. The target is then recorded in the JIR for the backend.
 2. **Analyze** (`crates/jihoo-sema`). Item macros are expanded, then every
    function is type checked and lowered to typed JIR in one pass, generic ones
    once per instance. Constants, `comptime` expressions and macros run on the VM

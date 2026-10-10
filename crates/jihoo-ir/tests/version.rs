@@ -7,7 +7,7 @@ use std::path::PathBuf;
 /// The fingerprint of `docs/jir.md` when `JIR_VERSION` was last decided on.
 /// When the spec changes, `spec_changes_decide_the_version` fails until this is
 /// updated: first bump the version if the change needs one.
-const SPEC_FINGERPRINT: u64 = 0x437b76f8165e1957;
+const SPEC_FINGERPRINT: u64 = 0xc6d12f42301d78fd;
 
 fn repo_file(path: &str) -> String {
     let full = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(path);
@@ -33,6 +33,7 @@ fn backend_and_spec_have_the_same_version() {
 fn printed_modules_carry_the_version() {
     let m = jihoo_ir::Module {
         profile: jihoo_ir::Profile::Freestanding,
+        target: jihoo_ir::Target::host(),
         structs: vec![],
         enums: vec![],
         externs: vec![],

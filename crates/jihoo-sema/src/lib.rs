@@ -218,7 +218,7 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
     let externs = externs.into_iter().map(|(_, e)| e).collect();
 
     if errors.is_empty() {
-        Ok(ir::Module { profile, structs, enums, externs, funcs })
+        Ok(ir::Module { profile, target: ir::Target::host(), structs, enums, externs, funcs })
     } else {
         // One failing item can surface as the same error through several others.
         let mut seen = std::collections::HashSet::new();

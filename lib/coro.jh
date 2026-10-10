@@ -1,7 +1,7 @@
-#![freestanding]
-// Stackful coroutines for freestanding programs (x86_64 Linux). A coroutine
-// runs a function on a stack of its own; `yield` hands a value back to whoever
-// resumed it and waits, `resume` continues it until its next `yield`.
+#![native]
+// Stackful coroutines for native programs (x86_64 and aarch64 Linux). A
+// coroutine runs a function on a stack of its own; `yield` hands a value back
+// to whoever resumed it and waits, `resume` continues it until its next `yield`.
 //
 //   import coro
 //   fn squares(c: *coro.Coro) {
@@ -18,7 +18,31 @@
 //   coro.free(&c)
 //
 // A started coroutine must stay where it is: its body holds a pointer to it.
-// Switching contexts is a few lines of inline asm (`switch` and `start` below).
+// The C library switches contexts (`makecontext` and `swapcontext`), so this
+// works on every target the C library supports, with no assembly here.
+
+import libc
+
+// The C library's contexts. A context is a C `ucontext_t`, which this module
+// handles as bytes, apart from the fields at its start (`ContextHead`).
+// `makecontext` passes the `int`s after `argc` to `func`; here always two.
+extern fn getcontext(ucp: *u8) -> i32
+extern fn makecontext(ucp: *u8, func: fn(i32, i32), argc: i32, ...)
+extern fn swapcontext(save: *u8, to: *u8) -> i32
+
+// Room for a `ucontext_t`, which glibc makes 968 bytes on x86_64 and 4560 on
+// aarch64.
+const CONTEXT_SIZE = 8192
+
+// The start of a `ucontext_t`, the same on x86_64 and aarch64: what has to be
+// set before `makecontext`.
+struct ContextHead {
+    flags: u64
+    link: *u8           // the context that goes on when the function returns
+    stack: *u8          // the stack to run on (`uc_stack`)
+    stack_flags: i32
+    stack_size: u64
+}
 
 pub struct Coro {
     // The value of the last `yield`; also how the resumer can pass a value in.
@@ -28,25 +52,31 @@ pub struct Coro {
     body: fn(*Coro)
     stack: *u8
     size: i64
-    // Saved stack pointers: the coroutine's while it waits, the resumer's
-    // while the coroutine runs.
-    sp: *u8
+    // Saved contexts: the coroutine's while it waits, the resumer's while the
+    // coroutine runs. One allocation holds both.
+    context: *u8
     caller: *u8
     started: bool
     done: bool
 }
 
 // A coroutine that will run `body` on a stack of `size` bytes. It starts on the
-// first `resume`. If no stack can be had, it is done from the start.
+// first `resume`. If no memory can be had, it is done from the start.
 pub fn new(body: fn(*Coro), size: i64) -> Coro {
-    let p = syscall(9, 0, size, 0x3, 0x22, 0 - 1, 0)    // mmap: read/write, private, anonymous
     let none = 0 as *u8
-    let c = Coro { value: 0, data: none, body: body, stack: none, size: 0, sp: none, caller: none, started: false, done: true }
-    if p >= 0 {
-        c.stack = p as *u8
-        c.size = size
-        c.done = false
+    let c = Coro { value: 0, data: none, body: body, stack: none, size: 0, context: none, caller: none, started: false, done: true }
+    let stack = libc.malloc(size as u64)
+    let contexts = libc.malloc((2 * CONTEXT_SIZE) as u64)
+    if stack == none || contexts == none {
+        libc.free(stack)
+        libc.free(contexts)
+        return c
     }
+    c.stack = stack
+    c.size = size
+    c.context = contexts
+    c.caller = contexts + CONTEXT_SIZE
+    c.done = false
     return c
 }
 
@@ -56,84 +86,42 @@ pub fn resume(c: *Coro) -> bool {
     if c.done {
         return false
     }
-    if c.started {
-        switch(&c.caller, c.sp)
-    } else {
+    if !c.started {
         c.started = true
-        let top = (c.stack as i64 + c.size) & !15         // 16-byte aligned, as calls need
-        start(&c.caller, top as *u8, c, run)
+        getcontext(c.context)
+        let head = c.context as *ContextHead
+        head.link = c.caller
+        head.stack = c.stack
+        head.stack_size = c.size as u64
+        // `makecontext` passes `int`s, so the pointer goes in two halves.
+        let p = c as u64
+        makecontext(c.context, run, 2, p as i32, (p >> 32) as i32)
     }
+    swapcontext(c.caller, c.context)
     return !c.done
 }
 
 // Called by the body: hands `v` to the resumer, and returns when resumed.
 pub fn yield(c: *Coro, v: i64) {
     c.value = v
-    switch(&c.sp, c.caller)
+    swapcontext(c.context, c.caller)
 }
 
-// Frees the stack. The coroutine must not be resumed afterwards.
+// Frees the stack and the contexts. The coroutine must not be resumed afterwards.
 pub fn free(c: *Coro) {
     if c.size > 0 {
-        syscall(11, c.stack, c.size)                       // munmap
+        libc.free(c.stack)
+        libc.free(c.context)
     }
     c.size = 0
     c.done = true
 }
 
-// The bottom of every coroutine's stack: runs the body, then leaves for good.
-fn run(c: *Coro) {
+// The bottom of every coroutine's stack: runs the body. When it returns, the
+// context's `link`, the last resumer, goes on.
+fn run(low: i32, high: i32) {
+    let c = ((high as u32 as u64) << 32 | low as u32 as u64) as *Coro
     let body = c.body
     body(c)
     c.done = true
-    switch(&c.sp, c.caller)
-}
-
-// Saves the running context and continues the one whose saved stack pointer is
-// `to`; returns when something switches back to the saved one.
-//
-// The context is saved on its own stack, below the red zone (128 bytes that leaf
-// functions may use without moving `rsp`): the address to continue at (label
-// `1`), then the registers calls preserve, and the input registers, which the
-// other side would otherwise leave changed. Its stack pointer goes to `*save`.
-// The other side is restored in the opposite order, and `ret` continues at its
-// label. `start` saves the same way.
-fn switch(save: **u8, to: *u8) {
-    asm("sub rsp, 128",
-        "lea rax, [rip + 1f]",
-        "push rax",
-        "push rbp", "push rbx", "push r12", "push r13", "push r14", "push r15",
-        "push rdi", "push rsi", "push rdx", "push rcx",
-        "mov [{0}], rsp",
-        "mov rsp, {1}",
-        "pop rcx", "pop rdx", "pop rsi", "pop rdi",
-        "pop r15", "pop r14", "pop r13", "pop r12", "pop rbx", "pop rbp",
-        "ret",
-        "1:",
-        "add rsp, 128",
-        in("rdi") save, in("rsi") to,
-        clobber("rax", "r8", "r9", "r10", "r11",
-                "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
-                "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory"))
-}
-
-// Saves the running context like `switch`, then calls `entry(c)` on the fresh
-// stack whose top is `top`. `entry` never returns: it switches back instead.
-fn start(save: **u8, top: *u8, c: *Coro, entry: fn(*Coro)) {
-    asm("sub rsp, 128",
-        "lea rax, [rip + 1f]",
-        "push rax",
-        "push rbp", "push rbx", "push r12", "push r13", "push r14", "push r15",
-        "push rdi", "push rsi", "push rdx", "push rcx",
-        "mov [{0}], rsp",
-        "mov rsp, {1}",
-        "mov rdi, {2}",
-        "call {3}",
-        "ud2",
-        "1:",
-        "add rsp, 128",
-        in("rdi") save, in("rsi") top, in("rdx") c, in("rcx") entry,
-        clobber("rax", "r8", "r9", "r10", "r11",
-                "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
-                "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory"))
 }

@@ -50,6 +50,35 @@ Each file is loaded once, however many modules import it. Imports may be
 cyclic, since items are analyzed lazily; a file that imports itself is an
 error. Errors name the file they are in.
 
+## Per-target modules
+
+A program is built for one target, `x86_64` or `aarch64` Linux: the machine
+`jihoo` runs on, or the one given with `--target`
+([Command line](../reference/command-line.md#options)). In each directory,
+`import a.b` first looks for `a/b.<target>.jh`, then for `a/b.jh`. So code that
+differs between machines, such as syscall numbers or inline assembly, goes into
+one file per target, and only the target's file is ever read:
+
+```text
+lib/sys.x86_64.jh     pub const WRITE = 1
+lib/sys.aarch64.jh    pub const WRITE = 64
+```
+
+```jihoo
+#![freestanding]
+import sys              // lib/sys.x86_64.jh or lib/sys.aarch64.jh
+
+fn _start() -> i64 {
+    syscall(sys.WRITE, 1, "hi\n", 3)
+    return 0
+}
+```
+
+The module is `sys` either way, and its items are `sys.WRITE`. The files for
+the targets should declare the same public items, since the code that imports
+them is the same; a `sys.jh` beside them is the one for every other target, or
+can say that a target is not supported.
+
 ## Modules and profiles
 
 The root file — the one given to `jihoo` — chooses the [profile](profiles.md)

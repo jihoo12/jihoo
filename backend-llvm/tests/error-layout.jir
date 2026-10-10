@@ -1,6 +1,6 @@
 ; The frontend's struct layout must be the target's.
 ; expect: error layout mismatch for $P
-jir 1
+jir 2
 profile freestanding
 
 struct $P { a: u8, b: i64 } size 9 align 1

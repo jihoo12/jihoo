@@ -21,6 +21,8 @@ impl Display for Module {
         writeln!(f, "; jihoo IR")?;
         writeln!(f, "jir {JIR_VERSION}")?;
         writeln!(f, "profile {}", self.profile.as_str())?;
+        writeln!(f, "target {}", self.target.as_str())?;
+        writeln!(f, "target {}", self.target.as_str())?;
         for s in &self.structs {
             writeln!(f)?;
             let fields: Vec<String> = s.fields.iter().map(|(n, t)| format!("{n}: {}", t.jir())).collect();

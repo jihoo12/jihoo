@@ -29,10 +29,16 @@ fn _start() -> i64 {
 six arguments, integers or pointers, and returns the kernel's result as an
 `i64` (a negative error number on failure). It works on x86_64 and aarch64,
 but the numbers are the target's: `write` is 1 on x86_64 and 64 on aarch64.
+The `sys` module has them for the target being built for
+([per-target modules](modules.md#per-target-modules)):
 
 ```jihoo
-syscall(1, 1, "hi\n", 3)     // write(1, "hi\n", 3) on x86_64
+import sys
+syscall(sys.WRITE, 1, "hi\n", 3)     // write(1, "hi\n", 3)
 ```
+
+The same goes for `asm`, whose template is the target's assembly: put it in a
+module with one file per target.
 
 ## `asm`
 

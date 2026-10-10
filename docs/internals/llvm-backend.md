@@ -52,7 +52,8 @@ The details are in [JIR](../jir.md#native-abi).
 
 ## Targets
 
-`syscall` and `asm` are lowered for x86_64 (Intel syntax) and aarch64; other
-targets are rejected. `--target` picks a triple other than the host's, and
-`--emit-llvm` writes the LLVM IR as text, which is the quickest way to see what
-the backend made of a program ([Command line](../reference/command-line.md#jihoo-llc)).
+A module names its target (`target x86_64` or `target aarch64`), and the
+backend compiles for that machine's Linux triple, whatever machine it runs on;
+a module without the line is compiled for the host. `syscall` and `asm` are
+lowered for x86_64 (Intel syntax) and aarch64. `--emit-llvm` writes the LLVM IR
+as text, which is the quickest way to see what the backend made of a program ([Command line](../reference/command-line.md#jihoo-llc)).

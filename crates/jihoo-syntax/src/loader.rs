@@ -1,7 +1,9 @@
 //! Loads a program and every module it imports.
 //!
-//! `import a.b` names the file `a/b.jh`. It is looked up next to the importing
-//! file first, then in each search directory in order. Each file is loaded once,
+//! `import a.b` names the file `a/b.jh`, or `a/b.<target>.jh` for the target
+//! being compiled for (such as `a/b.aarch64.jh`), which comes first. It is
+//! looked up next to the importing file first, then in each search directory in
+//! order. Each file is loaded once,
 //! however many times it is imported, and imports may form cycles.
 
 use std::collections::HashMap;
@@ -27,9 +29,10 @@ pub struct Loaded {
     pub files: Vec<PathBuf>,
 }
 
-/// Loads `root` and its imports from the file system.
-pub fn load(root: &Path, search: &[PathBuf]) -> Result<Loaded, (Error, Vec<PathBuf>)> {
-    load_with(root, search, &|p| std::fs::read_to_string(p).ok())
+/// Loads `root` and its imports from the file system, for `target`: the name
+/// per-target files carry, such as `x86_64`.
+pub fn load(root: &Path, search: &[PathBuf], target: &str) -> Result<Loaded, (Error, Vec<PathBuf>)> {
+    load_with(root, search, target, &|p| std::fs::read_to_string(p).ok())
 }
 
 /// Like [`load`], reading files with `read` (which returns `None` for a missing
@@ -37,9 +40,10 @@ pub fn load(root: &Path, search: &[PathBuf]) -> Result<Loaded, (Error, Vec<PathB
 pub fn load_with(
     root: &Path,
     search: &[PathBuf],
+    target: &str,
     read: &dyn Fn(&Path) -> Option<String>,
 ) -> Result<Loaded, (Error, Vec<PathBuf>)> {
-    let mut l = Loader { search, read, files: Vec::new(), modules: Vec::new(), by_path: HashMap::new() };
+    let mut l = Loader { search, target, read, files: Vec::new(), modules: Vec::new(), by_path: HashMap::new() };
     match l.module(root.to_path_buf(), String::new()) {
         Ok(_) => Ok(Loaded { modules: l.modules, files: l.files }),
         Err(e) => Err((e, l.files)),
@@ -48,6 +52,7 @@ pub fn load_with(
 
 struct Loader<'a> {
     search: &'a [PathBuf],
+    target: &'a str,
     read: &'a dyn Fn(&Path) -> Option<String>,
     files: Vec<PathBuf>,
     modules: Vec<Module>,
@@ -71,13 +76,21 @@ impl Loader<'_> {
 
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         for imp in imports {
-            let rel: PathBuf = imp.path.iter().collect::<PathBuf>().with_extension("jh");
+            let base: PathBuf = imp.path.iter().collect();
+            let rel = base.with_extension("jh");
+            let for_target = base.with_extension(format!("{}.jh", self.target));
+            // In each directory, the file for this target comes before the one for all.
             let found = std::iter::once(&dir)
                 .chain(self.search)
-                .map(|d| d.join(&rel))
+                .flat_map(|d| [d.join(&for_target), d.join(&rel)])
                 .find(|p| (self.read)(p).is_some());
             let Some(found) = found else {
-                let msg = format!("cannot find module `{}` (looked for `{}`)", imp.path.join("."), rel.display());
+                let msg = format!(
+                    "cannot find module `{}` (looked for `{}` and `{}`)",
+                    imp.path.join("."),
+                    for_target.display(),
+                    rel.display()
+                );
                 return Err(Error::new(imp.pos, msg));
             };
             if found == path {
@@ -126,7 +139,7 @@ mod tests {
             ("std/lib/alloc.jh", "import util\nfn a() {}"),
             ("std/util.jh", "fn other() {}"),
         ];
-        let l = load_with(Path::new("app/main.jh"), &[PathBuf::from("std")], &fs(&files)).map_err(|e| e.0).unwrap();
+        let l = load_with(Path::new("app/main.jh"), &[PathBuf::from("std")], "x86_64", &fs(&files)).map_err(|e| e.0).unwrap();
         // main -> app/util.jh (next to it) and std/lib/alloc.jh (search path).
         // util -> std/lib/alloc.jh again: the same module, loaded once.
         // alloc -> util: not next to it, so std/util.jh, a different file whose
@@ -141,15 +154,40 @@ mod tests {
     }
 
     #[test]
+    fn per_target_files_come_first() {
+        let files = [
+            ("main.jh", "import sys\nimport io\nfn main() {}"),
+            ("sys.jh", "fn all() {}"),
+            ("sys.x86_64.jh", "fn x86() {}"),
+            ("lib/io.aarch64.jh", "fn arm() {}"),
+            ("lib/io.jh", "fn all() {}"),
+        ];
+        let file_of = |target: &str, alias: &str| {
+            let l = load_with(Path::new("main.jh"), &[PathBuf::from("lib")], target, &fs(&files)).map_err(|e| e.0).unwrap();
+            let m = &l.modules[l.modules[0].imports[alias]];
+            (m.name.clone(), l.files[m.file as usize].display().to_string())
+        };
+        // The module keeps its name; only the file depends on the target.
+        assert_eq!(file_of("x86_64", "sys"), ("sys".into(), "sys.x86_64.jh".into()));
+        assert_eq!(file_of("aarch64", "sys"), ("sys".into(), "sys.jh".into()));
+        assert_eq!(file_of("x86_64", "io").1, "lib/io.jh");
+        assert_eq!(file_of("aarch64", "io").1, "lib/io.aarch64.jh");
+
+        let files = [("main.jh", "import sys\nfn main() {}")];
+        let (e, _) = load_with(Path::new("main.jh"), &[], "aarch64", &fs(&files)).err().unwrap();
+        assert!(e.msg.contains("looked for `sys.aarch64.jh` and `sys.jh`"), "{}", e.msg);
+    }
+
+    #[test]
     fn missing_modules_and_parse_errors_carry_the_file() {
         let files = [("main.jh", "import nope\nfn main() {}")];
-        let (e, _) = load_with(Path::new("main.jh"), &[], &fs(&files)).err().unwrap();
+        let (e, _) = load_with(Path::new("main.jh"), &[], "x86_64", &fs(&files)).err().unwrap();
         assert!(e.msg.contains("cannot find module `nope`"), "{}", e.msg);
         let files = [("alloc.jh", "import alloc\nfn main() {}")];
-        let (e, _) = load_with(Path::new("alloc.jh"), &[], &fs(&files)).err().unwrap();
+        let (e, _) = load_with(Path::new("alloc.jh"), &[], "x86_64", &fs(&files)).err().unwrap();
         assert!(e.msg.contains("finds this file itself"), "{}", e.msg);
         let files = [("main.jh", "import bad\nfn main() {}"), ("bad.jh", "fn x( {}")];
-        let (e, paths) = load_with(Path::new("main.jh"), &[], &fs(&files)).err().unwrap();
+        let (e, paths) = load_with(Path::new("main.jh"), &[], "x86_64", &fs(&files)).err().unwrap();
         assert_eq!(paths[e.pos.file as usize], Path::new("bad.jh"));
     }
 }

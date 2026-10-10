@@ -24,7 +24,7 @@ fn main() {
 #![freestanding]
 
 fn _start() -> i64 {
-    syscall(60, 7)   // exit(7) on x86_64 Linux; no libc at all
+    syscall(60, 7)   // exit(7) on x86_64 Linux (93 on aarch64); no libc at all
     return 0
 }
 ```
@@ -65,10 +65,12 @@ differ in what is around the program:
 This mirrors Rust's `std` versus `no_std` / `no_main`; jihoo's hosted profile
 sits above both, like a managed language.
 
-Native and freestanding builds target x86_64 and aarch64 Linux. `syscall` takes
-the raw syscall number of the target, so a program that calls it directly (and
-the `alloc`, `io` and `coro` libraries, written for x86_64) is not portable
-between the two; native programs can use libc instead.
+Native and freestanding builds target x86_64 and aarch64 Linux: the machine
+`jihoo` runs on, or the one given with `--target`. `syscall` takes the raw
+syscall number of the target and `asm` its assembly, so code that uses them
+directly is not portable; put it in a module with one file per target
+([per-target modules](modules.md#per-target-modules)), as the standard library's
+`sys` does, or use libc in a native program.
 
 ## Entry points
 

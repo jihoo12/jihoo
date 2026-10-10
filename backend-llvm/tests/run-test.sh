@@ -3,6 +3,8 @@
 # `; expect:` line says what should happen:
 #   ; expect: exit N        compiles, links and exits with status N
 #   ; expect: trap          compiles, links and dies of a signal (a failed check)
+#   ; expect: object T      compiles to an object file for target T (x86_64 or
+#                           aarch64), whatever machine this is
 #   ; expect: error TEXT    jihoo-llc refuses it with a message containing TEXT
 # Modules that run are freestanding: they need ld.lld, and nothing else.
 #
@@ -36,6 +38,22 @@ case $expect in
 esac
 
 "$llc" "$test" -o "$obj" || exit 1
+case $expect in
+  object\ *)
+    # The ELF header's e_machine, little-endian at byte 18.
+    case ${expect#object } in
+      x86_64) want=62 ;;
+      aarch64) want=183 ;;
+      *) echo "$test: unknown target in '$expect'"; exit 1 ;;
+    esac
+    machine=$(od -An -tu1 -j18 -N2 "$obj" | awk '{ print $1 + 256 * $2 }')
+    if [ "$machine" != "$want" ]; then
+      echo "$test: expected an object for ${expect#object } (e_machine $want), got e_machine $machine"
+      exit 1
+    fi
+    exit 0
+    ;;
+esac
 if [ -z "$ld" ]; then
   echo "$test: ld.lld not found: skipped"
   exit 77

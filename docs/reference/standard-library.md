@@ -7,13 +7,15 @@ Hosted programs need none of it: `print`, `str` and the GC are built in.
 | module | profiles | what |
 |--------|----------|------|
 | [`libc`](#libc) | native | declarations of C library functions |
-| [`alloc`](#alloc) | native, freestanding (x86_64 Linux) | an arena allocator over `mmap`, and `Vec(T)` |
-| [`io`](#io) | native, freestanding (x86_64 Linux) | output straight to file descriptors |
-| [`coro`](#coro) | native, freestanding (x86_64 Linux) | stackful coroutines |
+| [`sys`](#sys) | native, freestanding | Linux syscall numbers of the target |
+| [`alloc`](#alloc) | native, freestanding | an arena allocator over `mmap`, and `Vec(T)` |
+| [`io`](#io) | native, freestanding | output straight to file descriptors |
+| [`coro`](#coro) | native | stackful coroutines |
 
-`alloc`, `io` and `coro` are marked `#![freestanding]`: they use neither GC nor
-libc, only `syscall` and `asm`, so native programs can import them too. They
-use x86_64 syscall numbers and registers.
+`sys`, `alloc` and `io` are marked `#![freestanding]`: they use neither GC nor
+libc, only `syscall`, so native programs can import them too. `coro` is marked
+`#![native]`: it uses the C library to switch stacks. All of them work on both
+targets, x86_64 and aarch64 Linux.
 
 ## libc
 
@@ -44,6 +46,29 @@ described in [Calling C](../language/calling-c.md#types-across-the-boundary).
 
 Anything missing can be declared with `extern fn` in the program itself;
 declarations of the same function in several modules must agree.
+
+## sys
+
+The Linux system call numbers of the target, in one file per target:
+`lib/sys.x86_64.jh` and `lib/sys.aarch64.jh`
+([per-target modules](../language/modules.md#per-target-modules)).
+
+```jihoo
+#![freestanding]
+import sys
+
+fn _start() -> i64 {
+    syscall(sys.WRITE, 1, "hi\n", 3)
+    return 0
+}
+```
+
+| item | x86_64 | aarch64 |
+|------|--------|---------|
+| `WRITE` | 1 | 64 |
+| `MMAP` | 9 | 222 |
+| `MUNMAP` | 11 | 215 |
+| `EXIT` | 60 | 93 |
 
 ## alloc
 
@@ -111,15 +136,15 @@ fn _start() -> i64 {
 
 ## coro
 
-Stackful coroutines, written in jihoo with a few lines of inline asm
-(`examples/coroutines.jh`). A coroutine runs a function on a stack of its own;
+Stackful coroutines for native programs (`examples/coroutines.jh`), with the C
+library's `makecontext` and `swapcontext` doing the switching. A coroutine runs a function on a stack of its own;
 `yield` hands a value back to whoever resumed it and waits, and `resume`
 continues it until its next `yield`.
 
 ```jihoo
-#![freestanding]
+#![native]
 import coro
-import io
+import libc
 
 fn squares(c: *coro.Coro) {
     let i = 1
@@ -129,10 +154,10 @@ fn squares(c: *coro.Coro) {
     }
 }
 
-fn _start() -> i64 {
-    let c = coro.new(squares, 64 * 1024)   // a 64 KiB stack from mmap
+fn main() -> i64 {
+    let c = coro.new(squares, 64 * 1024)   // a 64 KiB stack from malloc
     while coro.resume(&c) {
-        io.print_int(c.value)              // 1, 4, 9
+        libc.printf("%ld\n", c.value)     // 1, 4, 9
     }
     coro.free(&c)
     return 0
@@ -145,14 +170,16 @@ fn _start() -> i64 {
 | `fn new(body: fn(*Coro), size: i64) -> Coro` | a coroutine that will run `body` on a stack of `size` bytes; it starts on the first `resume`, and is done from the start if no stack could be had |
 | `fn resume(c: *Coro) -> bool` | runs `c` until it yields (true: `c.value` is the value) or its body returns (false); resuming a finished coroutine does nothing |
 | `fn yield(c: *Coro, v: i64)` | called by the body: hands `v` to the resumer, and returns when resumed |
-| `fn free(c: *Coro)` | frees the stack; the coroutine must not be resumed afterwards |
+| `fn free(c: *Coro)` | frees the stack and the saved contexts; the coroutine must not be resumed afterwards |
 
 - A coroutine can resume others, so they compose into pipelines.
 - Coroutines are cooperative and run on one thread. A started `Coro` must not
   move, since its body holds a pointer to it.
-- The context switch saves, on the running stack and below the red zone, the
-  address to continue at, the registers that calls preserve, and its input
-  registers, then loads the other stack pointer, restores that side's registers
-  and `ret`s to its address. A new coroutine starts by calling its function on
-  the fresh stack. The labels are numeric local labels, so this stays correct
-  when LLVM inlines it in several places.
+- Each coroutine has a C `ucontext_t` for itself and one for its resumer.
+  `resume` and `yield` swap between them with `swapcontext`; the first
+  `resume` sets up the coroutine's with `makecontext`, whose `uc_link` makes
+  the resumer go on when the body returns. jihoo treats a `ucontext_t` as
+  bytes (8 KiB, more than glibc's 968 on x86_64 and 4560 on aarch64), apart
+  from the fields at its start, which are at the same offsets on both.
+- `makecontext` and `swapcontext` are in glibc but not in every C library
+  (musl has neither).
