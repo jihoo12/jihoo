@@ -124,7 +124,10 @@ fn arena_example_runs_natively() {
     assert_eq!(out.status.code(), Some(1));
 }
 
+/// `lib/coro.jh` switches stacks with x86_64 asm, and `lib/io.jh` uses x86_64
+/// syscall numbers.
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn coroutine_example_runs_natively() {
     if std::env::var_os("JIHOO_LLC").is_none() {
         eprintln!("JIHOO_LLC is not set: skipping");
