@@ -453,6 +453,7 @@ Module parse(const std::string &text) {
                        std::to_string(kVersion) + "; use the jihoo-llc that came with your jihoo");
         saw_version = true;
       } else if (first.kind == TokKind::Word && first.text == "profile") {
+        if (saw_profile) fail(no, "a second `profile` header");
         const Tok &p = l.next("a profile");
         if (p.text == "hosted") m.profile = Profile::Hosted;
         else if (p.text == "native") m.profile = Profile::Native;
@@ -460,6 +461,7 @@ Module parse(const std::string &text) {
         else fail(no, "unknown profile `" + p.text + "`");
         saw_profile = true;
       } else if (first.kind == TokKind::Word && first.text == "target") {
+        if (!m.target.empty()) fail(no, "a second `target` header");
         const Tok &t = l.next("a target");
         if (t.text != "x86_64" && t.text != "aarch64")
           fail(no, "unknown target `" + t.text + "`; the targets are x86_64 and aarch64");

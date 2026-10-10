@@ -42,6 +42,11 @@ fn printed_modules_carry_the_version() {
     let text = m.to_string();
     let header = text.lines().find(|l| !l.starts_with(';')).unwrap();
     assert_eq!(header, format!("jir {}", jihoo_ir::JIR_VERSION));
+    // Each header once: the backend refuses a module that repeats one.
+    for word in ["jir", "profile", "target"] {
+        let n = text.lines().filter(|l| l.split(' ').next() == Some(word)).count();
+        assert_eq!(n, 1, "`{word}` headers in:\n{text}");
+    }
 }
 
 #[test]
