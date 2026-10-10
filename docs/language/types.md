@@ -66,6 +66,10 @@ same on the VM and natively: there is no fast-math and no fused multiply-add.
   `0.0 == -0.0`.
 - `print` writes the shortest text that reads back as the same value: `0.1`,
   `1.0`, `1e100`, `inf`, `NaN`.
+- `sqrt`, `floor`, `ceil`, `trunc`, `round`, `abs` and `copysign` are
+  builtins, exact and the same everywhere, and `to_bits`/`from_bits` read and
+  make a float's bits ([Builtins](../reference/builtins.md#floats)). A NaN
+  has no visible sign or payload: machines disagree about which NaN they make.
 - Floats cannot be [`match`ed](patterns.md) or used with bitwise operators.
 
 ## Booleans

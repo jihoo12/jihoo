@@ -328,7 +328,42 @@ pub fn unary(op: UnOp, t: &Type) -> Option<Type> {
         (UnOp::Not, Type::Bool) => Some(Type::Bool),
         // On integers, `!` flips every bit.
         (UnOp::Not, Type::Int(_)) => Some(t.clone()),
+        (UnOp::Sqrt | UnOp::Floor | UnOp::Ceil | UnOp::Trunc | UnOp::Round | UnOp::Abs, Type::Float(_)) => {
+            Some(t.clone())
+        }
         _ => None,
+    }
+}
+
+/// The type `bitcast` turns `t` into: a float into the unsigned integer of
+/// its width, and such an integer back.
+pub fn bitcast(t: &Type) -> Option<Type> {
+    Some(match t {
+        Type::Float(FloatTy::F32) => Type::Int(IntTy::U32),
+        Type::Float(FloatTy::F64) => Type::Int(IntTy::U64),
+        Type::Int(IntTy::U32) => Type::Float(FloatTy::F32),
+        Type::Int(IntTy::U64) => Type::Float(FloatTy::F64),
+        _ => return None,
+    })
+}
+
+/// The bits of a float of type `t` (held as an `f64`) as the integer
+/// `bitcast` gives, in canonical form: every NaN is the quiet NaN with a clear
+/// sign.
+pub fn float_bits(t: FloatTy, x: f64) -> i64 {
+    match t {
+        FloatTy::F32 if x.is_nan() => 0x7fc0_0000,
+        FloatTy::F32 => i64::from((x as f32).to_bits()),
+        FloatTy::F64 if x.is_nan() => 0x7ff8_0000_0000_0000,
+        FloatTy::F64 => x.to_bits() as i64,
+    }
+}
+
+/// The float of type `t` with bits `n`, as an `f64`.
+pub fn float_from_bits(t: FloatTy, n: i64) -> f64 {
+    match t {
+        FloatTy::F32 => f64::from(f32::from_bits(n as u32)),
+        FloatTy::F64 => f64::from_bits(n as u64),
     }
 }
 
@@ -338,7 +373,7 @@ pub fn binary(op: BinOp, l: &Type, r: &Type) -> Option<Type> {
     Some(match (op, l, r) {
         (Add | Sub | Mul | Div | Rem | And | Or | Xor | Shl | Shr, Int(a), Int(b)) if a == b => l.clone(),
         // IEEE 754: `/` by zero is an infinity or NaN, `%` is C's `fmod`.
-        (Add | Sub | Mul | Div | Rem, Float(a), Float(b)) if a == b => l.clone(),
+        (Add | Sub | Mul | Div | Rem | Copysign, Float(a), Float(b)) if a == b => l.clone(),
         // `&`, `|` and `^` on bools evaluate both sides, unlike `&&` and `||`.
         (And | Or | Xor, Bool, Bool) => Bool,
         (Add, Str, Str) => Str,

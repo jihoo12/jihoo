@@ -112,7 +112,9 @@ impl Expansion {
         if base.is_empty() || mark.parse::<u32>().ok()? != self.id || declared.contains(head) || is_local(head) {
             return None;
         }
-        Some(if env.defines(self.def, base) {
+        // A float builtin is the macro module's function of that name if it
+        // has one, so the caller's never hides it.
+        Some(if env.defines(self.def, base) || crate::floats::is_float_builtin(base) {
             format!("#{}:{base}{rest}", self.def)
         } else if crate::is_builtin(base) {
             format!("{base}{rest}")

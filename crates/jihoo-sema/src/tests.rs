@@ -1384,3 +1384,33 @@ fn floats() {
     check(&native("extern fn sqrt(x: f64) -> f64\nfn f() -> f64 { return sqrt(2) }")).unwrap();
     assert!(err(&fs("fn f() { syscall(1, 1.5) }")).contains("must be integers or pointers"));
 }
+
+#[test]
+fn float_builtins() {
+    // The type follows the argument; a literal is f64 unless f32 is expected.
+    let src = "fn main() {\n  let h: f32 = 2.5\n  print(sqrt(16) + floor(-1.5) + ceil(1.2) + trunc(-2.7) + round(2.5) + abs(-0.25))\n\
+               print(round(h) + copysign(h, -1.0))\n  let s: f32 = sqrt(2)\n  print(s)\n\
+               print(to_bits(1.0))\n  print(to_bits(h))\n  print(from_bits(to_bits(0.1)))\n  let one: f32 = from_bits(0x3f800000)\n  print(one)\n\
+               print(to_bits(0.0 / 0.0) == to_bits(-(0.0 / 0.0)))\n  print(copysign(2.0, 0.0 / 0.0))\n}";
+    assert_eq!(run(src), "5.25\n0.5\n1.4142135\n4607182418800017408\n1075838976\n0.1\n1.0\ntrue\n2.0\n");
+    let m = check("fn f(x: f32) -> u32 { return to_bits(sqrt(x)) }\nfn main() {}").unwrap();
+    let f = m.func("f").unwrap().to_string();
+    assert!(f.contains("= sqrt %0") && f.contains("= bitcast %"), "{f}");
+    // They take floats, and `from_bits` takes u32 or u64.
+    assert!(err("fn main() { let n = 4\n print(sqrt(n)) }").contains("`sqrt` takes a float (f32 or f64), not i64"));
+    assert!(err("fn main() { print(copysign(1.0)) }").contains("`copysign` takes 2 arguments"));
+    assert!(err("fn main() { let a: f32 = 1\n print(copysign(a, 2.0 as f64)) }").contains("must be f32, found f64"));
+    assert!(err("fn main() { print(from_bits(1 as i64)) }").contains("`from_bits` takes the bits of an f32 (u32)"));
+    assert!(err("fn main() { let f = sqrt }").contains("`sqrt` is a builtin, not a function"));
+    // A function of the same name hides the builtin in its module, also for
+    // the code macros of other modules produce there.
+    assert_eq!(run("fn abs(x: i64) -> i64 { if x < 0 { return -x }\n return x }\nfn main() { print(abs(-3)) }"), "3\n");
+    let files = [
+        ("main.jh", "import m\nfn round(x: f64) -> f64 { return 100.0 }\nfn main() { print(m.r!(2.5) + round(0.0)) }"),
+        ("m.jh", "pub macro r(x: expr) -> expr { return quote(round($x)) }"),
+    ];
+    let m = check_files(&files).unwrap();
+    let mut out = Vec::new();
+    jihoo_vm::run(&m, &mut out).unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "103.0\n");
+}

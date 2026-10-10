@@ -1,0 +1,96 @@
+; The float operations IEEE 754 defines exactly, and bits: `floor`, `ceil`,
+; `trunc` and `round` go to the backend's own weak functions here (there is no
+; libm), `round` takes ties away from zero, a NaN has no sign for `copysign`,
+; and every NaN reads as the one quiet NaN. Each failed check exits with its
+; own number.
+; expect: exit 0
+jir 4
+profile freestanding
+
+; Whether `a` and `b` have the same bits.
+fn @same(f64, f64) -> bool {
+  regs f64 f64 u64 u64 bool
+bb0:
+  %2 = bitcast %0
+  %3 = bitcast %1
+  %4 = eq %2, %3
+  ret %4
+}
+
+fn @_start() -> i64 {
+  regs f64 f64 f64 bool i64 f32 u32 u32
+bb0:
+  ; floor(-2.5) = -3
+  %0 = fconst -2.5
+  %1 = floor %0
+  %2 = fconst -3.0
+  %3 = call @same(%1, %2)
+  %4 = const 1
+  br %3, bb1, bb9
+bb1:
+  ; floor(-0.0) = -0.0, ceil(-0.5) = -0.0
+  %0 = fconst -0.0
+  %1 = floor %0
+  %3 = call @same(%1, %0)
+  %4 = const 2
+  br %3, bb2, bb9
+bb2:
+  %2 = fconst -0.5
+  %1 = ceil %2
+  %3 = call @same(%1, %0)
+  %4 = const 3
+  br %3, bb3, bb9
+bb3:
+  ; round(2.5) = 3, round(-0.4) = -0.0, trunc(-7.9) = -7
+  %0 = fconst 2.5
+  %1 = round %0
+  %2 = fconst 3.0
+  %3 = call @same(%1, %2)
+  %4 = const 4
+  br %3, bb4, bb9
+bb4:
+  %0 = fconst -0.4
+  %1 = round %0
+  %2 = fconst -0.0
+  %3 = call @same(%1, %2)
+  %4 = const 5
+  br %3, bb5, bb9
+bb5:
+  %0 = fconst -7.9
+  %1 = trunc %0
+  %2 = fconst -7.0
+  %3 = call @same(%1, %2)
+  %4 = const 6
+  br %3, bb6, bb9
+bb6:
+  ; sqrt(2) squared is 2.0000000000000004, exactly
+  %0 = fconst 2.0
+  %1 = sqrt %0
+  %1 = mul %1, %1
+  %2 = fconst 2.0000000000000004
+  %3 = call @same(%1, %2)
+  %4 = const 7
+  br %3, bb7, bb9
+bb7:
+  ; copysign(2, NaN) = 2
+  %0 = fconst nan
+  %2 = fconst 2.0
+  %1 = copysign %2, %0
+  %3 = call @same(%1, %2)
+  %4 = const 8
+  br %3, bb8, bb9
+bb8:
+  ; An f32 signaling NaN (0x7f800001) reads as 0x7fc00000.
+  %6 = const 2139095041
+  %5 = bitcast %6
+  %6 = bitcast %5
+  %7 = const 2143289344
+  %3 = eq %6, %7
+  %4 = const 9
+  br %3, bb10, bb9
+bb9:
+  ret %4
+bb10:
+  %4 = const 0
+  ret %4
+}

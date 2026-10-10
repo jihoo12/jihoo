@@ -30,13 +30,14 @@
 15. Macro hygiene: a template's locals are its own, and its other names
     resolve where the macro is defined.
 16. Field visibility: `pub` fields, also through macros.
+17. Float builtins, the same in every profile: `sqrt`, `floor`, `ceil`,
+    `trunc`, `round`, `abs`, `copysign`, and a float's bits (`to_bits`,
+    `from_bits`).
 
 ## Next
 
 - **Native code:** passing structs to C by value (per-target C ABI lowering);
   exporting jihoo functions under C names; a `print` for native code.
-- **Floats:** exact math builtins for every profile (`sqrt`, `floor`, ...,
-  which IEEE defines exactly); reading a float's bits.
 - **Tooling:** a Rust-side JIR parser, so that `jihoo run file.jir` works.
 
 ## Library layers

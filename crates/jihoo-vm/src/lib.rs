@@ -532,7 +532,30 @@ impl<'m> Vm<'m> {
                     (UnOp::Neg, Type::Float(_)) => Value::float(-self.float(*src)?),
                     (UnOp::Not, Type::Int(t)) => Value::Int(t.wrap(!self.int(*src)?)),
                     (UnOp::Not, _) => Value::Bool(!self.bool(*src)?),
-                    (UnOp::Neg, t) => return Err(self.error(&format!("cannot negate {t}"))),
+                    // The f64 square root of an f32, rounded to f32, is the
+                    // correctly rounded f32 square root (53 >= 2 * 24 + 2 bits);
+                    // the integral values of an f32 are f32s.
+                    (op, &Type::Float(t)) => {
+                        let x = self.float(*src)?;
+                        Value::float(t.round(match op {
+                            UnOp::Sqrt => x.sqrt(),
+                            UnOp::Floor => x.floor(),
+                            UnOp::Ceil => x.ceil(),
+                            UnOp::Trunc => x.trunc(),
+                            UnOp::Round => x.round(),
+                            UnOp::Abs => x.abs(),
+                            UnOp::Neg | UnOp::Not => unreachable!(),
+                        }))
+                    }
+                    (op, t) => return Err(self.error(&format!("`{}` cannot take {t}", op.mnemonic()))),
+                };
+                self.set(*dst, v);
+            }
+            Inst::Bitcast { dst, src } => {
+                let v = match (f.reg_type(*src), f.reg_type(*dst)) {
+                    (&Type::Float(t), _) => Value::Int(jihoo_ir::types::float_bits(t, self.float(*src)?)),
+                    (_, &Type::Float(t)) => Value::float(jihoo_ir::types::float_from_bits(t, self.int(*src)?)),
+                    (from, to) => return Err(self.error(&format!("cannot bitcast {from} to {to}"))),
                 };
                 self.set(*dst, v);
             }
@@ -841,6 +864,9 @@ impl<'m> Vm<'m> {
                 BinOp::Mul => num(x * y),
                 BinOp::Div => num(x / y),
                 BinOp::Rem => num(x % y),
+                // A NaN has no sign in JIR: machines disagree about it.
+                BinOp::Copysign if y.is_nan() => num(x.abs()),
+                BinOp::Copysign => num(x.copysign(y)),
                 BinOp::Eq => Bool(x == y),
                 BinOp::Ne => Bool(x != y),
                 BinOp::Lt => Bool(x < y),

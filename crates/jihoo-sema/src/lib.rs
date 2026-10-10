@@ -18,6 +18,7 @@ mod comptime;
 mod enums;
 mod equality;
 mod env;
+mod floats;
 mod generic;
 mod hygiene;
 mod macros;
@@ -638,6 +639,10 @@ impl<'a> FnCx<'a> {
             ));
         }
         let Some(sig) = self.env.signature(key) else {
+            if floats::is_float_builtin(hygiene::unqualified(name)) {
+                let msg = format!("`{name}` is a builtin, not a function, so it cannot be used as a value");
+                return Err(Error::new(pos, msg));
+            }
             return Err(self.unknown_name(pos, name));
         };
         self.env.check_visible(pos, self.env.viewer(self.bindings.module, name), key)?;
@@ -1306,6 +1311,11 @@ impl<'a> FnCx<'a> {
                         first.extend(self.call_args(pos, &format!("`{name}`"), &params, args)?);
                         return Ok(self.emit_to(ret, |dst| Inst::Call { dst, func, args: first }));
                     }
+                }
+                // A float builtin, unless the module has a function of that name.
+                let (module, base) = hygiene::qualified(name).unwrap_or((self.bindings.module, name));
+                if floats::is_float_builtin(base) && !self.env.has_function(module, base) {
+                    return self.float_builtin(pos, base, args, expected);
                 }
                 let key = self.env.key_or_err(pos, &self.bindings, name)?;
                 self.env.check_visible(pos, self.env.viewer(self.bindings.module, name), &key)?;

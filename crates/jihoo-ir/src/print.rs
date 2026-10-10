@@ -99,6 +99,7 @@ impl Display for Inst {
                 write!(f, "{dst} = {} {lhs}, {rhs}", op.mnemonic())
             }
             Inst::Cast { dst, src } => write!(f, "{dst} = cast {src}"),
+            Inst::Bitcast { dst, src } => write!(f, "{dst} = bitcast {src}"),
             Inst::Call { dst, func, args } => write!(f, "{dst} = call @{func}({})", list(args)),
             Inst::FuncRef { dst, func } => write!(f, "{dst} = funcref @{func}"),
             Inst::Closure { dst, func, captures } => write!(f, "{dst} = closure @{func}({})", list(captures)),

@@ -17,6 +17,35 @@ function value. A local variable of a non-function type does not hide them, so
 layout: not `str`, `ref`, `cell`, `chan`, or types containing them
 ([Structs](../language/structs.md#layout)).
 
+## Floats
+
+These take an `f32` or an `f64` and work in every profile and at compile time,
+with the same results everywhere: IEEE 754 defines each of them exactly.
+
+| builtin | result | description |
+|---------|--------|-------------|
+| `sqrt(x)` | the type of `x` | the square root, correctly rounded; NaN below zero |
+| `floor(x)` | the type of `x` | the largest integral value not above `x` |
+| `ceil(x)` | the type of `x` | the smallest integral value not below `x` |
+| `trunc(x)` | the type of `x` | `x` with the fraction dropped |
+| `round(x)` | the type of `x` | the nearest integral value, halfway cases away from zero (`round(2.5)` is `3.0`) |
+| `abs(x)` | the type of `x` | the magnitude of `x` |
+| `copysign(x, y)` | the type of `x` | the magnitude of `x` with the sign of `y`, of the same type |
+| `to_bits(x)` | `u32` for `f32`, `u64` for `f64` | the bits of `x` |
+| `from_bits(n)` | `f32` for `u32`, `f64` for `u64` | the float with bits `n` |
+
+A literal argument is an `f64` unless an `f32` is expected (`let s: f32 =
+sqrt(2)`). Integral results keep the sign of `x`, so `floor(-0.0)` and
+`round(-0.4)` are `-0.0`.
+
+A NaN has no sign or payload in jihoo, since machines disagree about which
+NaN an operation makes: `to_bits` gives every NaN as the one quiet NaN with a
+clear sign (`0x7ff8000000000000`, or `0x7fc00000` for an `f32`), and
+`copysign(x, y)` with a NaN `y` is `abs(x)`.
+
+Unlike the other builtins, these names can be taken: a module that defines a
+function called `sqrt` (or declares `extern fn sqrt`) calls its own `sqrt`.
+
 ## Hosted
 
 | builtin | result | description |

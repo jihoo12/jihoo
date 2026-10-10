@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 3)
+# JIR — jihoo IR text format (version 4)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it. Both sides must agree on this
@@ -30,12 +30,13 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 1 | the first version that is bumped on change; the header must come first |
 | 2 | the `target` header |
 | 3 | `stringify`, and hygiene marks in the code `quote` builds |
+| 4 | float operations (`sqrt`, `floor`, `ceil`, `trunc`, `round`, `abs`, `copysign`) and `bitcast` |
 
 ## Example
 
 ```
 ; jihoo IR
-jir 3
+jir 4
 profile freestanding
 target x86_64
 
@@ -82,7 +83,7 @@ bb3:
 ## Module
 
 ```
-jir 3                                ; format version, must come first
+jir 4                                ; format version, must come first
 profile hosted|native|freestanding   ; language profile
 target x86_64|aarch64                ; the machine, 64-bit Linux
 struct ...                           ; zero or more structs
@@ -231,6 +232,11 @@ The result type is what the destination register must be declared as.
 | `%d = add\|sub\|mul %a, %b`     | `T, T` (int)          | `T`    | wrapping arithmetic |
 | `%d = div\|rem %a, %b`          | `T, T` (int)          | `T`    | signed or unsigned by type; truncating; dividing by zero is a runtime error on the VM and traps natively; signed `MIN / -1` is `MIN`, and `MIN % -1` is 0 |
 | `%d = add\|sub\|mul\|div\|rem %a, %b` | `T, T` (float) | `T` | IEEE 754, rounded to nearest; `rem` is C's `fmod` (exact, sign of `%a`) |
+| `%d = sqrt %a`                  | float                 | same   | the square root, correctly rounded (NaN below zero) |
+| `%d = floor\|ceil\|trunc\|round %a` | float             | same   | the integral value toward −∞, toward +∞, toward zero, or nearest with ties away from zero (C's `round`); a zero result keeps the sign of `%a` |
+| `%d = abs %a`                   | float                 | same   | the magnitude: the sign cleared (also of 0 and NaN) |
+| `%d = copysign %a, %b`          | `T, T` (float)        | `T`    | the magnitude of `%a` with the sign of `%b`; a NaN has no sign, so with a NaN `%b` it is the magnitude of `%a` |
+| `%d = bitcast %a`               | `f32`, `f64`, `u32` or `u64` | `u32`, `u64`, `f32` or `f64` | the same bits as the other type: a float as the unsigned integer of its width, or back; every NaN reads as the quiet NaN with a clear sign (`0x7fc00000`, `0x7ff8000000000000`) |
 | `%d = and\|or\|xor %a, %b`      | `T, T` (int or `bool`) | `T`   | bitwise (for `bool`: logical, both sides evaluated) |
 | `%d = shl\|shr %a, %b`          | `T, T` (int)          | `T`    | shift by `%b` modulo the bit width; `shr` is arithmetic for signed types, logical for unsigned |
 | `%d = add %a, %b`               | `str, str`            | `str`  | concatenation |
@@ -384,8 +390,10 @@ arguments. The frontend names the functions it lifts out of anonymous functions
 the address of its copy and the callee copies it into its own storage, and an
 aggregate result is written through a hidden first parameter. Aggregates are
 moved with `memcpy`; a freestanding module defines weak `memcpy`, `memmove`,
-`memset`, and `fmod` and `fmodf` (which float `rem` becomes) because it has no
-libc, and a native one uses libc's and libm's.
+`memset`, `fmod` and `fmodf` (which float `rem` becomes), and `floor`, `ceil`,
+`trunc`, `round` and their `f` forms (which LLVM calls where the machine has
+no instruction for them), because it has no libc; a native one uses libc's and
+libm's.
 
 This is not the C ABI for aggregates, which is why extern functions only take
 scalars. Scalars and pointers are passed the C way, so a jihoo function whose

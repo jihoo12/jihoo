@@ -21,7 +21,7 @@ pub use verify::verify;
 /// module instead of compiling it with other rules. Bump it whenever the
 /// format or the meaning of anything in it changes (see "Versions" in
 /// `docs/jir.md`); the `version` tests check that both sides and the spec agree.
-pub const JIR_VERSION: u32 = 3;
+pub const JIR_VERSION: u32 = 4;
 
 /// Language profile, selected with `#![native]` or `#![freestanding]` at the
 /// top of a source file.
@@ -216,6 +216,10 @@ pub enum BinOp {
     Shl,
     /// Arithmetic for signed types, logical for unsigned ones.
     Shr,
+    /// Floats only: the magnitude of the left side with the sign of the right.
+    /// A NaN has no sign (machines disagree about it): with a NaN on the
+    /// right, the result is the magnitude.
+    Copysign,
 }
 
 impl BinOp {
@@ -237,21 +241,60 @@ impl BinOp {
             BinOp::Xor => "xor",
             BinOp::Shl => "shl",
             BinOp::Shr => "shr",
+            BinOp::Copysign => "copysign",
         }
     }
+
+    pub const ALL: [BinOp; 17] = [
+        BinOp::Add,
+        BinOp::Sub,
+        BinOp::Mul,
+        BinOp::Div,
+        BinOp::Rem,
+        BinOp::Eq,
+        BinOp::Ne,
+        BinOp::Lt,
+        BinOp::Le,
+        BinOp::Gt,
+        BinOp::Ge,
+        BinOp::And,
+        BinOp::Or,
+        BinOp::Xor,
+        BinOp::Shl,
+        BinOp::Shr,
+        BinOp::Copysign,
+    ];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
     Neg,
     Not,
+    // The operations on floats that IEEE 754 defines exactly, so that every
+    // backend gets the same result: the correctly rounded square root, the
+    // integral values toward -inf, toward +inf, toward zero, and to the
+    // nearest with ties away from zero, and the magnitude.
+    Sqrt,
+    Floor,
+    Ceil,
+    Trunc,
+    Round,
+    Abs,
 }
 
 impl UnOp {
+    pub const ALL: [UnOp; 8] = [UnOp::Neg, UnOp::Not, UnOp::Sqrt, UnOp::Floor, UnOp::Ceil, UnOp::Trunc, UnOp::Round, UnOp::Abs];
+
     pub fn mnemonic(self) -> &'static str {
         match self {
             UnOp::Neg => "neg",
             UnOp::Not => "not",
+            UnOp::Sqrt => "sqrt",
+            UnOp::Floor => "floor",
+            UnOp::Ceil => "ceil",
+            UnOp::Trunc => "trunc",
+            UnOp::Round => "round",
+            UnOp::Abs => "abs",
         }
     }
 }
@@ -274,6 +317,11 @@ pub enum Inst {
     Binary { dst: Reg, op: BinOp, lhs: Reg, rhs: Reg },
     /// Converts between integer and float types, bool to integer, and pointers.
     Cast { dst: Reg, src: Reg },
+    /// The same bits as another type: a float as the integer of its width, or
+    /// back. Every NaN reads as the one quiet NaN with a clear sign
+    /// (`0x7ff8000000000000`, `0x7fc00000`), since NaN bits differ between
+    /// machines.
+    Bitcast { dst: Reg, src: Reg },
     Call { dst: Reg, func: String, args: Vec<Reg> },
     /// Function `func` as a value, of type `fn(params) -> ret`.
     FuncRef { dst: Reg, func: String },
@@ -453,6 +501,7 @@ impl Inst {
             Copy { dst, src }
             | Unary { dst, src, .. }
             | Cast { dst, src }
+            | Bitcast { dst, src }
             | Field { dst, src, .. }
             | Tag { dst, src }
             | Payload { dst, src, .. }

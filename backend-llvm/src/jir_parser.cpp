@@ -266,6 +266,15 @@ const std::unordered_map<std::string, Op> kBinOps = {
     {"rem", Op::Rem}, {"eq", Op::Eq},   {"ne", Op::Ne},   {"lt", Op::Lt},
     {"le", Op::Le},   {"gt", Op::Gt},   {"ge", Op::Ge},   {"and", Op::And},
     {"or", Op::Or},   {"xor", Op::Xor}, {"shl", Op::Shl}, {"shr", Op::Shr},
+    {"copysign", Op::Copysign},
+};
+
+// `%d = <op> %a`
+const std::unordered_map<std::string, Op> kUnOps = {
+    {"copy", Op::Copy},   {"neg", Op::Neg},     {"not", Op::Not},     {"sqrt", Op::Sqrt},
+    {"floor", Op::Floor}, {"ceil", Op::Ceil},   {"trunc", Op::Trunc}, {"round", Op::Round},
+    {"abs", Op::Abs},     {"cast", Op::Cast},   {"bitcast", Op::Bitcast},
+    {"load", Op::Load},   {"addr", Op::Addr},   {"splat", Op::Splat}, {"tag", Op::Tag},
 };
 
 // `%d = <op> ...`
@@ -296,8 +305,8 @@ Inst parse_assign(Line &l) {
     if (s.kind != TokKind::Str) fail(l.no, "expected a string literal");
     inst.op = Op::Str;
     inst.text = s.text;
-  } else if (w == "copy" || w == "neg" || w == "not") {
-    inst.op = w == "copy" ? Op::Copy : w == "neg" ? Op::Neg : Op::Not;
+  } else if (auto un = kUnOps.find(w); un != kUnOps.end()) {
+    inst.op = un->second;
     inst.args = {l.reg()};
   } else if (auto it = kBinOps.find(w); it != kBinOps.end()) {
     inst.op = it->second;
@@ -326,9 +335,6 @@ Inst parse_assign(Line &l) {
   } else if (w == "syscall") {
     inst.op = Op::Syscall;
     inst.args = l.reg_list();
-  } else if (w == "cast" || w == "load" || w == "addr") {
-    inst.op = w == "cast" ? Op::Cast : w == "load" ? Op::Load : Op::Addr;
-    inst.args = {l.reg()};
   } else if (w == "struct") {
     const Tok &s = l.next("a struct");
     if (s.kind != TokKind::StructName) fail(l.no, "expected a struct like $Name");
@@ -353,9 +359,6 @@ Inst parse_assign(Line &l) {
   } else if (w == "array") {
     inst.op = Op::Array;
     inst.args = l.reg_list();
-  } else if (w == "splat") {
-    inst.op = Op::Splat;
-    inst.args = {l.reg()};
   } else if (w == "elem" || w == "elemptr") {
     inst.op = w == "elem" ? Op::Elem : Op::ElemPtr;
     uint32_t a = l.reg();
@@ -396,9 +399,6 @@ Inst parse_assign(Line &l) {
     inst.op = Op::Variant;
     inst.imm = l.index();
     inst.args = l.reg_list();
-  } else if (w == "tag") {
-    inst.op = Op::Tag;
-    inst.args = {l.reg()};
   } else if (w == "payload") {
     inst.op = Op::Payload;
     inst.args = {l.reg()};

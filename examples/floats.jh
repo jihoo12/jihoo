@@ -2,7 +2,8 @@
 //   jihoo run examples/floats.jh
 //
 // An integer literal may stand where a float is expected (`x * 2`), but
-// values never change type on their own: convert with `as`.
+// values never change type on their own: convert with `as`. `sqrt`, `floor`,
+// `round` and the other float builtins give the same results everywhere.
 
 // The Mandelbrot set, one character per point.
 fn row(y: f64) -> str {
@@ -31,17 +32,6 @@ fn if_then(c: bool, yes: str, no: str) -> str {
     return no
 }
 
-// Newton's method; `sqrt` of a C library is a native program's `libc.sqrt`.
-fn sqrt(x: f64) -> f64 {
-    let g = x
-    let i = 0
-    while i < 60 {
-        g = (g + x / g) / 2
-        i = i + 1
-    }
-    return g
-}
-
 fn main() {
     let y = -1.0
     while y <= 1.0 {
@@ -49,12 +39,15 @@ fn main() {
         y = y + 0.1
     }
 
-    print(sqrt(2.0))                  // 1.414213562373095, one ulp below libm's
+    print(sqrt(2.0))                  // 1.4142135623730951, correctly rounded
     print(0.1 + 0.2)                  // 0.30000000000000004
     let third: f32 = 1.0 / 3          // f32: about 7 significant digits
     print(third)                      // 0.33333334
     print(7.5 % 2.0)                  // 1.5, like C's fmod
     print(1.0 / 0.0)                  // inf
+    print(floor(-2.5))                // -3.0; also ceil, trunc, abs, copysign
+    print(round(2.5))                 // 3.0: halfway rounds away from zero
+    print(to_bits(1.0))               // 4607182418800017408, 0x3ff0000000000000
     print(-7.9 as i64)                // -7: the fraction is dropped
     print(1e300 as i32)               // 2147483647: saturates
     print("pi is about " + to_str(355.0 / 113))

@@ -136,5 +136,6 @@ pub(crate) fn int_binary(op: BinOp, t: IntTy, x: i64, y: i64) -> Option<Value> {
         // the right kind gives the right result for every width.
         BinOp::Shr if signed => Int(x >> (y as u32 & (t.bits() - 1))),
         BinOp::Shr => Int((ux >> (y as u32 & (t.bits() - 1))) as i64),
+        BinOp::Copysign => unreachable!("`copysign` takes floats"),
     })
 }

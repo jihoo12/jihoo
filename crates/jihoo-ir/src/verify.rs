@@ -247,6 +247,10 @@ impl Cx<'_> {
                             Err(format!("cannot cast {} to {}", ty(src)?.jir(), ty(dst)?.jir()))
                         }
                     }
+                    Inst::Bitcast { dst, src } => match types::bitcast(ty(src)?) {
+                        Some(t) => expect(dst, &t),
+                        None => Err(format!("cannot bitcast {}", ty(src)?.jir())),
+                    },
                     Inst::Call { dst, func, args } => {
                         let (params, ret, variadic) = self
                             .callee(func)

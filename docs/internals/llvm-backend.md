@@ -29,8 +29,10 @@ then links the result.
   declarations, called with the C calling convention.
 - **Freestanding.** `_start` is the only external symbol. Returning from it
   makes the `exit` syscall (60 on x86_64, 93 on aarch64) with the result. The
-  module defines weak `memcpy`, `memmove`, `memset`, `fmod` and `fmodf`, which
-  LLVM may call, since there is no libc to provide them.
+  module defines weak `memcpy`, `memmove`, `memset`, `fmod`, `fmodf`,
+  `floor`, `ceil`, `trunc`, `round` and their `f` forms, which LLVM may call
+  (on x86_64 without SSE4.1, the rounding intrinsics become calls), since
+  there is no libc to provide them.
 
 ## Calling convention
 
@@ -49,6 +51,10 @@ The details are in [JIR](../jir.md#native-abi).
   leaves both undefined, so the backend checks the divisor before dividing.
 - Floats use no fast-math flags and no fused multiply-add, so results match the
   VM bit for bit.
+- Which NaN an operation makes differs between machines (x86_64 sets the sign
+  of `0.0 / 0.0`, aarch64 and LLVM's constant folding do not), so no NaN's
+  sign or payload is visible: `bitcast` reads every NaN as the one quiet NaN,
+  and `copysign` with a NaN sign gives the magnitude.
 
 ## Targets
 

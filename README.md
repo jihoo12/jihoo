@@ -108,7 +108,8 @@ nix build
 ## Status
 
 v0. In every profile: static types with local inference; `bool`, `i8`…`u64`
-and `f32`/`f64`; structs, bounds-checked arrays and enums with `match`;
+and `f32`/`f64`, with exact float builtins (`sqrt`, `floor`, `round`, ...);
+structs, bounds-checked arrays and enums with `match`;
 function values; generic functions and structs; modules with private items
 and fields; compile-time
 evaluation (`const`, `comptime`) and macros, both run on the VM.

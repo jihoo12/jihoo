@@ -613,6 +613,41 @@ class FnGen {
         else
           store(inst.dst, cast(arg_reg(0), type(inst.dst)));
         return;
+      // IEEE 754 defines these exactly, so LLVM's intrinsics (instructions, or
+      // libm's functions) give what the VM gives.
+      case Op::Sqrt: case Op::Floor: case Op::Ceil: case Op::Trunc: case Op::Round: case Op::Abs: {
+        if (!is_float(arg_reg(0))) fail(f_.name, "float operation on a non-float");
+        static const Intrinsic::ID ids[] = {Intrinsic::sqrt, Intrinsic::floor, Intrinsic::ceil,
+                                            Intrinsic::trunc, Intrinsic::round, Intrinsic::fabs};
+        store(inst.dst, b_.CreateUnaryIntrinsic(ids[int(inst.op) - int(Op::Sqrt)], arg(0)));
+        return;
+      }
+      case Op::Copysign: {
+        if (!is_float(arg_reg(0))) fail(f_.name, "`copysign` needs floats");
+        // A NaN has no sign in JIR (machines disagree about it): the result is
+        // then the magnitude.
+        Value *x = arg(0), *y = arg(1);
+        Value *nan = b_.CreateFCmpUNO(y, y);
+        Value *r = b_.CreateBinaryIntrinsic(Intrinsic::copysign, x, y);
+        store(inst.dst, b_.CreateSelect(nan, b_.CreateUnaryIntrinsic(Intrinsic::fabs, x), r));
+        return;
+      }
+      case Op::Bitcast: {
+        Type *to = slot(inst.dst)->getAllocatedType();
+        Value *v = arg(0);
+        if (v->getType()->getPrimitiveSizeInBits() != to->getPrimitiveSizeInBits() ||
+            v->getType()->isFloatingPointTy() == to->isFloatingPointTy())
+          fail(f_.name, "`bitcast` needs a float and an integer of the same width");
+        Value *bits = b_.CreateBitCast(v, to);
+        if (v->getType()->isFloatingPointTy()) {
+          // Every NaN reads as the quiet NaN with a clear sign, as on the VM:
+          // which NaN an operation makes differs between machines.
+          uint64_t nan = to->getIntegerBitWidth() == 32 ? 0x7fc00000u : 0x7ff8000000000000u;
+          bits = b_.CreateSelect(b_.CreateFCmpUNO(v, v), ConstantInt::get(to, nan), bits);
+        }
+        store(inst.dst, bits);
+        return;
+      }
       case Op::Call: {
         auto it = fns_.find(inst.text);
         if (it == fns_.end()) fail(f_.name, "call to unknown function @" + inst.text);
@@ -927,6 +962,54 @@ void define_fmod(Module &m, Type *ft, const std::string &name) {
   b.CreateRet(b.CreateBinaryIntrinsic(Intrinsic::copysign, r2, x));
 }
 
+// Defines `floor`, `ceil`, `trunc` or `round` (`kind`), or their `f` versions
+// for `ft`, weak like `fmod`: LLVM calls them where the target has no
+// instruction for its rounding intrinsics (x86_64 before SSE4.1). A float of
+// magnitude 2^(mantissa bits) or more, an infinity or a NaN is its own result;
+// any other one converts to an integer exactly, and back, rounded toward zero.
+// That is corrected by one toward -inf (floor), +inf (ceil) or away from zero
+// (round, when the dropped fraction, which is exact, is at least a half). The
+// sign of the argument stays, also on a zero result (`floor(-0.0)` is `-0.0`,
+// `round(-0.4)` too).
+void define_rounding(Module &m, Type *ft, const std::string &kind) {
+  LLVMContext &ctx = m.getContext();
+  bool f32 = ft->isFloatTy();
+  std::string name = f32 ? kind + "f" : kind;
+  auto *f = Function::Create(FunctionType::get(ft, {ft}, false), GlobalValue::WeakAnyLinkage, name, m);
+  // Unoptimized, so the conversions below are never recognized as the very
+  // intrinsic that calls this function.
+  f->addFnAttr("no-builtins");
+  f->addFnAttr(Attribute::NoUnwind);
+  f->addFnAttr(Attribute::NoInline);
+  f->addFnAttr(Attribute::OptimizeNone);
+  Value *x = f->getArg(0);
+  auto *entry = BasicBlock::Create(ctx, "entry", f);
+  auto *same = BasicBlock::Create(ctx, "same", f);
+  auto *round = BasicBlock::Create(ctx, "round", f);
+  IRBuilder<> b(entry);
+  Value *ax = b.CreateUnaryIntrinsic(Intrinsic::fabs, x);
+  // Not `<`, so NaN goes to `same` too.
+  Value *small = b.CreateFCmpOLT(ax, ConstantFP::get(ft, f32 ? 8388608.0 : 4503599627370496.0));
+  b.CreateCondBr(small, round, same);
+  b.SetInsertPoint(same);
+  b.CreateRet(x);
+
+  b.SetInsertPoint(round);
+  Type *it = f32 ? b.getInt32Ty() : b.getInt64Ty();
+  Value *t = b.CreateBinaryIntrinsic(Intrinsic::copysign, b.CreateSIToFP(b.CreateFPToSI(x, it), ft), x);
+  Value *one = ConstantFP::get(ft, 1.0);
+  Value *r = t;
+  if (kind == "floor") r = b.CreateSelect(b.CreateFCmpOGT(t, x), b.CreateFSub(t, one), t);
+  if (kind == "ceil") r = b.CreateSelect(b.CreateFCmpOLT(t, x), b.CreateFAdd(t, one), t);
+  if (kind == "round") {
+    Value *frac = b.CreateUnaryIntrinsic(Intrinsic::fabs, b.CreateFSub(x, t));
+    Value *away = b.CreateFAdd(t, b.CreateBinaryIntrinsic(Intrinsic::copysign, one, x));
+    r = b.CreateSelect(b.CreateFCmpOGE(frac, ConstantFP::get(ft, 0.5)), away, t);
+  }
+  // A zero result keeps the sign of `x`: `floor(-0.0)`, `ceil(-0.5)`.
+  b.CreateRet(b.CreateBinaryIntrinsic(Intrinsic::copysign, r, x));
+}
+
 // Declares C function `e`, with the extensions the C ABI wants for narrow
 // integers and bools.
 Function *declare_extern(Module &m, const Types &types, const jir::ExternFn &e) {
@@ -1027,6 +1110,10 @@ std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, co
     for (const char *kind : {"memcpy", "memmove", "memset"}) define_mem_function(*mod, kind);
     define_fmod(*mod, Type::getDoubleTy(ctx), "fmod");
     define_fmod(*mod, Type::getFloatTy(ctx), "fmodf");
+    for (const char *kind : {"floor", "ceil", "trunc", "round"}) {
+      define_rounding(*mod, Type::getDoubleTy(ctx), kind);
+      define_rounding(*mod, Type::getFloatTy(ctx), kind);
+    }
   }
 
   std::string err;
