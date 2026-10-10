@@ -794,8 +794,8 @@ fn select() {
         "fn main() { let a = chan(i64)\n let b = chan(str, 1)\n select {\n let x = recv(a) => print(x)\n send(b, \"s\") => {}\n _ => {}\n }\n}",
     )
     .unwrap();
-    assert!(m.to_string().contains("= select [recv %") && m.to_string().contains("; send %"), "{m}");
-    assert!(m.to_string().contains("; default]"), "{m}");
+    assert!(m.to_string().contains("= select [recv %") && m.to_string().contains(" | send %"), "{m}");
+    assert!(m.to_string().contains(" | default]"), "{m}");
 
     let s = |arms: &str| err(&format!("fn main() {{ let a = chan(i64)\n select {{\n{arms}\n}}\n}}"));
     assert!(s("let x = recv(a) => {}\n_ => {}\n_ => {}").contains("at most one `_` arm"));

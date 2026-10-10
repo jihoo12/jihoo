@@ -61,7 +61,7 @@ VM bug where a copy saw later updates of the original was found by about 1 in
 values above `i64::MAX` show it. Run a few thousand seeds after changing the
 VM or the backend.
 
-## Crossing into C
+## C and JIR files
 
 `crates/jihoo-cli/tests/differential.rs` also checks what crosses into C:
 `native_print_matches_the_vm` prints integers, text and some ten thousand
@@ -76,6 +76,10 @@ programs:
 JIHOO_CROSS_CC=aarch64-unknown-linux-gnu-gcc JIHOO_CROSS_RUN=qemu-aarch64 \
   JIHOO_LLC=$PWD/backend-llvm/build/jihoo-llc cargo test --test differential structs
 ```
+
+`crates/jihoo-cli/tests/jir.rs` writes every example and differential program
+as JIR, reads it back (`jihoo emit-ir file.jir` must print the same text), and
+runs the hosted ones from their JIR, which must do what their source does.
 
 ## Backend tests
 

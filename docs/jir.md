@@ -1,10 +1,13 @@
 # JIR — jihoo IR text format (version 4)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
-`jihoo emit-ir` writes it, `jihoo-llc` reads it. Both sides must agree on this
+`jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
+(`jihoo run file.jir`, `jihoo build file.jir`). Both sides must agree on this
 document; the Rust definitions live in `crates/jihoo-ir/src/lib.rs` and the C++ ones
 in `backend-llvm/src/jir.h`. The typing rules are implemented once, in
-`crates/jihoo-ir/src/types.rs`, and checked by `crates/jihoo-ir/src/verify.rs`.
+`crates/jihoo-ir/src/types.rs`, and checked by `crates/jihoo-ir/src/verify.rs`. Each
+side has its reader: `crates/jihoo-ir/src/parse.rs` and
+`backend-llvm/src/jir_parser.cpp`.
 
 ## Versions
 
@@ -30,7 +33,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 1 | the first version that is bumped on change; the header must come first |
 | 2 | the `target` header |
 | 3 | `stringify`, and hygiene marks in the code `quote` builds |
-| 4 | float operations (`sqrt`, `floor`, `ceil`, `trunc`, `round`, `abs`, `copysign`) and `bitcast`; `print` in native modules; structs to and from C by value, and `export` |
+| 4 | float operations (`sqrt`, `floor`, `ceil`, `trunc`, `round`, `abs`, `copysign`) and `bitcast`; `print` in native modules; structs to and from C by value, and `export`; `select` cases separated by `\|` |
 
 ## Example
 
@@ -319,7 +322,7 @@ Types containing a `ref` have no fixed layout, like those containing `str`.
 | `send %c, %v`                       | `chan T, T`           |        | send `%v`, waiting while the channel is full |
 | `%d = recv %c`                      | `chan T`              | `T`    | receive a value, waiting until there is one |
 | `spawn %f(%a, ...)`                 | `%f: fn(P...) -> R`, then `P...` | | call `%f` in a new task; the result is dropped |
-| `%d = select [case; ...]`           | each case `recv %c -> %v` (`%v: T`) or `send %c, %v`, optionally a last `default` | `i64` | do the first case that can go ahead, waiting until one can; `%d` is its index. With `default` it does not wait: `%d` is the number of cases if none can go ahead |
+| `%d = select [case \| ...]`          | each case `recv %c -> %v` (`%v: T`) or `send %c, %v`, optionally a last `default` | `i64` | do the first case that can go ahead, waiting until one can; `%d` is its index. With `default` it does not wait: `%d` is the number of cases if none can go ahead |
 
 The VM runs tasks on one thread with a deterministic round-robin scheduler; the
 run ends when the entry function returns. A task is only switched out at a
@@ -442,7 +445,3 @@ exported function is also the external symbol it exports. A native module
 defines C's `int main(int argc, char **argv)`, which calls `jihoo.main` and
 returns its result truncated to `int` (0 for `unit`). Native objects are
 position independent, since the C compiler that links them usually makes a PIE.
-
-## Planned
-
-- A Rust-side JIR parser so `jihoo run file.jir` works.

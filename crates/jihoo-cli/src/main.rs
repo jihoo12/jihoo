@@ -12,6 +12,9 @@ usage:
   jihoo build <file.jh> [-o out] [link inputs]
                                       compile a native or freestanding program
 
+Each command also takes a JIR file (<file.jir>), such as `emit-ir` writes,
+in place of a source file.
+
 options:
   -I <dir>    also look for imported modules in <dir> (may be repeated)
   --target <t>  compile for x86_64 or aarch64 Linux (emit-ir, build;
@@ -59,6 +62,8 @@ struct Opts {
     output: Option<PathBuf>,
     include: Vec<PathBuf>,
     target: Target,
+    /// `--target` was given, rather than the default.
+    target_given: bool,
     /// Arguments for the C compiler that links a native program: `-l`, `-L`
     /// and extra input files.
     link: Vec<String>,
@@ -73,6 +78,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
     let mut include = Vec::new();
     let mut link = Vec::new();
     let mut target = Target::host();
+    let mut target_given = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -82,6 +88,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
                 let name = it.next().ok_or("`--target` needs a target: x86_64 or aarch64")?;
                 target = Target::parse(name)
                     .ok_or_else(|| format!("unknown target `{name}`; the targets are x86_64 and aarch64"))?;
+                target_given = true;
             }
             "-l" | "-L" => link.push(format!("{a}{}", it.next().ok_or_else(|| format!("`{a}` needs an argument"))?)),
             s if (s.starts_with("-l") || s.starts_with("-L")) && s.len() > 2 => link.push(s.to_string()),
@@ -94,7 +101,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
         }
     }
     let input = input.ok_or_else(|| format!("missing input file\n\n{USAGE}"))?;
-    Ok(Opts { input, output, include, target, link })
+    Ok(Opts { input, output, include, target, target_given, link })
 }
 
 /// `parse_opts` for commands that do not link.
@@ -174,8 +181,24 @@ fn render(files: &[PathBuf], e: &jihoo_syntax::Error) -> String {
     }
 }
 
+/// The module `opts.input` holds: a program compiled from source, or a JIR
+/// file read as it is (its `target` line says what it was made for).
 fn compile(opts: &Opts) -> Result<Module, String> {
     let path = &opts.input;
+    if path.extension().is_some_and(|e| e == "jir") {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let m = jihoo_ir::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        if opts.target_given && m.target != opts.target {
+            return Err(format!(
+                "{}: the module is for {}, not {}; JIR is made for one target",
+                path.display(),
+                m.target.as_str(),
+                opts.target.as_str()
+            ));
+        }
+        jihoo_ir::verify(&m).map_err(|e| format!("{}: invalid IR: {e}", path.display()))?;
+        return Ok(m);
+    }
     let loaded = jihoo_syntax::loader::load(path, &search_path(&opts.include), opts.target.as_str())
         .map_err(|(e, files)| render(&files, &e))?;
     let mut m = jihoo_sema::analyze_modules(&loaded.modules).map_err(|errs| {

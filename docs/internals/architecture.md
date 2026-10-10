@@ -19,7 +19,7 @@ by a VM or compiled by LLVM.
 |------|----------|------|
 | `crates/jihoo-syntax` | Rust | lexer, parser, AST, and the module loader |
 | `crates/jihoo-sema` | Rust | type checking and lowering from the AST to JIR, compile-time evaluation, macros |
-| `crates/jihoo-ir` | Rust | JIR data types, the text printer, layouts, the verifier |
+| `crates/jihoo-ir` | Rust | JIR data types, the text printer and reader, layouts, the verifier |
 | `crates/jihoo-vm` | Rust | the register VM, its task scheduler and the GC heap |
 | `crates/jihoo-cli` | Rust | the `jihoo` command |
 | `backend-llvm` | C++ | `jihoo-llc`: JIR text → LLVM → object file |
@@ -52,7 +52,9 @@ The frontend (Rust) and the LLVM backend (C++) only talk through `.jir` files
 ([JIR](../jir.md)). This keeps the IR an explicit, versioned contract
 ([Versions](../jir.md#versions)), lets the backend be developed and tested on
 its own with hand-written `.jir` ([Testing](testing.md#backend-tests)), and
-keeps the Rust build free of LLVM.
+keeps the Rust build free of LLVM. `jihoo` reads `.jir` files back too
+(`crates/jihoo-ir/src/parse.rs`), so a module written once can be run on the VM
+or built natively without its source.
 
 ## Shared rules
 

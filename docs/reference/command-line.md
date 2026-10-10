@@ -52,6 +52,21 @@ Checks a program of any profile and prints its [JIR](../jir.md), or writes it
 to `out`. Useful to see what the compiler made of a program: monomorphized
 generics, expanded macros, folded constants.
 
+### JIR files
+
+Every command also takes a JIR file, `file.jir`, in place of a source file:
+`jihoo run file.jir` runs a hosted module on the VM, `jihoo build file.jir`
+compiles a native or freestanding one, and `jihoo emit-ir file.jir` prints it
+again. The module is read as it is ([JIR](../jir.md)), checked by the same
+verifier the compiler's output passes, and must be of the JIR version this
+`jihoo` writes. It was made for the target its `target` line names, so
+`--target` cannot change it.
+
+```sh
+jihoo emit-ir fib.jh -o fib.jir      # write the JIR, look at it or edit it
+jihoo run fib.jir                    # and run it
+```
+
 ## Options
 
 | option | meaning |

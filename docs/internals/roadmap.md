@@ -36,10 +36,14 @@
 18. `print` in native programs, with the VM's output to the byte.
 19. Structs by value to and from C, lowered per target (x86_64 System V,
     AAPCS64), and `export fn` for functions C calls.
+20. A Rust-side JIR reader: `jihoo run file.jir`, `jihoo build file.jir`.
 
 ## Next
 
-- **Tooling:** a Rust-side JIR parser, so that `jihoo run file.jir` works.
+- **Floats:** `fma`, which IEEE also defines exactly, but freestanding code on
+  x86_64 would need an exact software version.
+- **Native code:** structs by value through function values handed to C
+  (callbacks take scalars only); `print` in freestanding programs.
 
 ## Library layers
 

@@ -137,7 +137,7 @@ impl Display for Inst {
                 if *default {
                     parts.push("default".into());
                 }
-                write!(f, "{dst} = select [{}]", parts.join("; "))
+                write!(f, "{dst} = select [{}]", parts.join(" | "))
             }
             Inst::Deref { dst, src } => write!(f, "{dst} = deref {src}"),
             Inst::Payload { dst, src, variant, index } => write!(f, "{dst} = payload {src}, {variant}, {index}"),

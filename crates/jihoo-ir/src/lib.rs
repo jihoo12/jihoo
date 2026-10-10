@@ -8,10 +8,12 @@
 //! The LLVM backend gives each register an alloca and lets mem2reg clean up.
 
 pub mod layout;
+mod parse;
 mod print;
 pub mod types;
 mod verify;
 
+pub use parse::{parse, ParseError};
 pub use types::{FloatTy, IntTy, Type};
 pub use verify::verify;
 
