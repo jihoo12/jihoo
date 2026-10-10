@@ -133,18 +133,26 @@ jihoo build bare.jh -o bare
 ./bare
 ```
 
+The `alloc` and `io` libraries make x86_64 Linux system calls; on aarch64, use a
+native program instead.
+
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `jihoo run file.jh` | Run a hosted program on the VM. |
+| `jihoo run file.jh` | Run a hosted program on the VM; its exit status is what `main` returns. |
 | `jihoo build file.jh -o out` | Compile a native program (linked with libc), or a freestanding one to a static binary. |
 | `jihoo emit-ir file.jh` | Print the program's [JIR](../../reference/jir/), the IR both backends share. |
 
 `-I dir` adds a directory to search for imported modules, as does `JIHOO_PATH`.
+All options and environment variables are in the
+[command line reference](../../reference/command-line/).
 
 ## Next steps
 
-- The language, one topic at a time, starting with [profiles](../../language/profiles/).
+- The language, one topic at a time, starting with [profiles](../../language/profiles/)
+  and [syntax](../../language/syntax/).
+- What is built in: [builtins](../../reference/builtins/) and the
+  [standard library](../../reference/standard-library/).
 - Complete programs in [examples](../../examples/hello/).
 - How the compiler fits together: [architecture](../../internals/architecture/).

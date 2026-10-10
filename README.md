@@ -9,9 +9,10 @@ An easy programming language with three profiles:
   through LLVM into tiny static binaries.
 
 All three share one intermediate representation, JIR. Documentation lives at
-**<https://jihoo12.github.io/jihoo/>** (built from [docs/](docs) and
-[examples/](examples)); see [docs/design.md](docs/design.md) for the language and
-architecture and [docs/jir.md](docs/jir.md) for the IR format.
+**<https://jihoo12.github.io/jihoo/>**, built from [docs/](docs) (contents in
+[docs/README.md](docs/README.md)) and [examples/](examples): the language one
+topic at a time, a reference (builtins, standard library, command line, and
+[JIR](docs/jir.md), the IR format), and how the implementation works.
 
 ```jihoo
 fn greet(name: str) -> str {
@@ -37,7 +38,7 @@ fn main(argc: i32, argv: **u8) -> i64 {
 #![freestanding]
 
 fn _start() -> i64 {
-    syscall(1, 1, "hi\n", 3) // write(1, "hi\n", 3)
+    syscall(1, 1, "hi\n", 3) // write(1, "hi\n", 3) on x86_64 Linux
     return 0                 // exit(0)
 }
 ```
@@ -98,31 +99,27 @@ nix build
 | `crates/jihoo-vm`      | Rust     | register VM and GC heap |
 | `crates/jihoo-cli`     | Rust     | the `jihoo` command |
 | `backend-llvm`         | C++      | `jihoo-llc`: JIR text → LLVM → object file |
-| `lib`                  | jihoo    | the standard library (`import libc`, `import alloc`, `import io`) |
+| `lib`                  | jihoo    | the standard library (`libc`, `alloc`, `io`, `coro`) |
+| `docs`                 | Markdown | the documentation, one file per page of the website |
 | `site`                 | Astro    | the website ([site/README.md](site/README.md)) |
 | `tests/diff`           | jihoo    | programs that must behave the same on the VM and natively |
 
 ## Status
 
-v0: static types with local inference; `bool`, `i8`…`u64` and `f32`/`f64` with arithmetic and
-bitwise operators, structs and
-bounds-checked arrays (every profile), `size_of`/`align_of`, `str` (hosted),
-pointers with load/store, `&` and inline asm (native and freestanding);
-C functions through `extern fn`, C files and libraries linked in (native);
-functions, `if`/`while`, `&&`/`||`, `as` casts, `print` (hosted) and `syscall`
-(native and freestanding, x86_64 and aarch64 Linux); compile-time evaluation with `const`
-and `comptime`, run on the VM; generic functions and structs through
-compile-time parameters;
-macros that run at compile time and return code.
-modules with `import`, and a small standard library in [lib/](lib)
-(`libc`; `alloc`: an arena allocator and `Vec(T)`; `io`). See
-[examples/native.jh](examples/native.jh), [examples/floats.jh](examples/floats.jh),
-[examples/pointers.jh](examples/pointers.jh), [examples/asm.jh](examples/asm.jh),
-[examples/arena.jh](examples/arena.jh),
-[examples/comptime.jh](examples/comptime.jh),
-[examples/generics.jh](examples/generics.jh),
-[examples/macros.jh](examples/macros.jh) and the roadmap in
-[docs/design.md](docs/design.md).
+v0. In every profile: static types with local inference; `bool`, `i8`…`u64`
+and `f32`/`f64`; structs, bounds-checked arrays and enums with `match`;
+function values; generic functions and structs; modules; compile-time
+evaluation (`const`, `comptime`) and macros, both run on the VM.
+
+- **hosted:** `str`, `print`, `ref` for recursive data, `cell` for shared
+  state, closures, tasks with channels and `select`.
+- **native and freestanding:** pointers, `syscall` and inline asm (x86_64 and
+  aarch64 Linux); closures passed to `comptime` parameters; the `alloc`, `io`
+  and `coro` libraries (x86_64).
+- **native:** C functions through `extern fn` and the `libc` module, C files and
+  libraries linked in.
+
+See the [examples](examples) and the [roadmap](docs/internals/roadmap.md).
 
 ```sh
 # differential tests: VM vs native

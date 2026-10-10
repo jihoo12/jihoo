@@ -36,11 +36,11 @@ fn main(argc: i32, argv: **u8) -> i64 {
 }
 ```
 
-```jihoo title="tiny.jh — no libc, no GC: a 2 KB static binary"
+```jihoo title="tiny.jh — no libc, no GC: a 3 KB static binary"
 #![freestanding]
 
 fn _start() -> i64 {
-    syscall(1, 1, "hi\n", 3)   // write(1, "hi\n", 3)
+    syscall(1, 1, "hi\n", 3)   // write(1, "hi\n", 3) on x86_64 Linux
     return 0                   // exit(0)
 }
 ```

@@ -1,74 +1,96 @@
 // Builds pages for the website from the repository's own documentation, so that
 // `docs/` and `examples/` stay the single source of truth:
 //
-//   docs/design.md  -> language/*.md and internals/*.md, one page per `##` section
-//   docs/jir.md     -> reference/jir.md
-//   examples/*.jh   -> examples/*.md, the leading comment as text, then the code
+//   docs/**/*.md   -> one page each, placed as docs/README.md's table of contents says
+//   examples/*.jh  -> examples/*.md, the leading comment as text, then the code
 //
-// The output directories are generated (and git-ignored); edit the sources.
+// Relative links between the Markdown files become links between pages, links
+// to other files of the repository point to GitHub, and a link to a file that
+// does not exist stops the build. The output directories are generated (and
+// git-ignored); edit the sources.
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { docs, readToc, repo } from './toc.mjs';
 
-const site = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const repo = path.resolve(site, '..');
+const site = path.join(repo, 'site');
 const out = path.join(site, 'src/content/docs');
 const github = 'https://github.com/jihoo12/jihoo/blob/main';
-
-// Sections of design.md that describe how jihoo is built, not the language.
-const INTERNALS = new Set(['GC', 'Why the IR is a text file', 'Testing', 'Roadmap']);
+const { groups, pages } = readToc();
+const errors = [];
 
 function reset(dir) {
   fs.rmSync(path.join(out, dir), { recursive: true, force: true });
   fs.mkdirSync(path.join(out, dir), { recursive: true });
 }
 
-function slug(title) {
-  return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-}
-
-function page(file, { title, description, order }, body) {
+function writePage(slug, { title, description, sidebar }, body) {
   const front = ['---', `title: ${JSON.stringify(title)}`];
   if (description) front.push(`description: ${JSON.stringify(description)}`);
-  if (order !== undefined) front.push('sidebar:', `  order: ${order}`);
+  if (sidebar) front.push(`sidebar: ${JSON.stringify(sidebar)}`);
   front.push('---', '');
-  fs.writeFileSync(path.join(out, file), front.join('\n') + body.trim() + '\n');
+  fs.mkdirSync(path.dirname(path.join(out, slug)), { recursive: true });
+  fs.writeFileSync(path.join(out, `${slug}.md`), front.join('\n') + body.trim() + '\n');
 }
 
-/** Splits markdown into the text before the first `## ` heading and the sections. */
-function sections(md) {
-  const lines = md.split('\n');
-  const result = { intro: [], sections: [] };
-  let fence = false;
-  for (const line of lines) {
-    if (line.startsWith('```')) fence = !fence;
-    if (!fence && line.startsWith('## ')) {
-      result.sections.push({ title: line.slice(3).trim(), lines: [] });
-    } else if (result.sections.length) {
-      result.sections.at(-1).lines.push(line);
-    } else {
-      result.intro.push(line);
-    }
+/** The page a repository file is shown on, if it has one. */
+function pageOf(abs) {
+  const rel = path.relative(repo, abs);
+  if (rel.startsWith('docs' + path.sep)) {
+    return pages.find((p) => path.join('docs', p.file) === rel)?.slug;
   }
-  return result;
+  const handwritten = rel.match(/^site\/src\/content\/docs\/(.+)\.mdx?$/);
+  if (handwritten) return handwritten[1].replace(/(^|\/)index$/, '');
+  const example = rel.match(/^examples\/([\w-]+)\.jh$/);
+  if (example) return `examples/${example[1]}`;
+  return undefined;
 }
 
-/** One level up (`###` -> `##`), outside code blocks: each section is a page. */
-function promote(lines) {
-  let fence = false;
-  return lines
-    .map((line) => {
-      if (line.startsWith('```')) fence = !fence;
-      return !fence && line.startsWith('### ') ? line.slice(1) : line;
-    })
-    .join('\n');
+/** A link from page `from` to page `to`, relative so that any base path works. */
+function relative(from, to, hash = '') {
+  return '../'.repeat(from.split('/').length) + (to ? `${to}/` : '') + hash;
 }
 
-/** Turns repository paths in code spans into links to the source on GitHub. */
-function linkPaths(md) {
-  return md.replace(/`((?:crates|lib|backend-llvm|examples|tests|docs)\/[\w./-]+)`/g, (m, p) =>
-    fs.existsSync(path.join(repo, p)) ? `[\`${p}\`](${github}/${p})` : m,
+/** Applies `f` to the text outside fenced code blocks. */
+function outsideCode(md, f) {
+  return md
+    .split(/(^```[\s\S]*?^```)/m)
+    .map((part, i) => (i % 2 ? part : f(part)))
+    .join('');
+}
+
+/** Rewrites `[text](target)` links in `md`, a file at `file` shown as page `slug`. */
+function links(md, file, slug) {
+  return outsideCode(md, (text) =>
+    // Inline code is left alone: `[x](y)` there is not a link.
+    text.replace(/(`[^`\n]*`)|\[([^\]\n]*)\]\(([^)\s]+)\)/g, (m, code, label, target) => {
+      if (code || /^([a-z]+:|#)/.test(target)) return m;
+      const [p, hash = ''] = target.split(/(?=#)/);
+      const abs = path.resolve(path.dirname(file), p);
+      if (!fs.existsSync(abs)) {
+        errors.push(`${path.relative(repo, file)}: link to a missing file: ${target}`);
+        return m;
+      }
+      const to = pageOf(abs);
+      if (to !== undefined) return `[${label}](${relative(slug, to, hash)})`;
+      if (abs.endsWith('.md') && abs.startsWith(docs)) {
+        errors.push(`${path.relative(repo, file)}: ${target} is not in docs/README.md`);
+        return m;
+      }
+      return `[${label}](${github}/${path.relative(repo, abs)}${hash})`;
+    }),
+  );
+}
+
+/** Turns repository paths in code spans into links: to their page, or to GitHub. */
+function linkPaths(md, slug) {
+  return outsideCode(md, (text) =>
+    text.replace(/(?<!\[)`((?:crates|lib|backend-llvm|examples|tests|docs|site)\/[\w./-]+)`/g, (m, p) => {
+      const abs = path.join(repo, p);
+      if (!fs.existsSync(abs)) return m;
+      const to = pageOf(abs);
+      return to !== undefined ? `[\`${p}\`](${relative(slug, to)})` : `[\`${p}\`](${github}/${p})`;
+    }),
   );
 }
 
@@ -76,30 +98,41 @@ function firstParagraph(md) {
   return md
     .split(/\n\s*\n/)
     .map((p) => p.trim())
-    .find((p) => p && !p.startsWith('#') && !p.startsWith('```'))
+    .find((p) => p && !/^(#|```|\||-|\d+\.)/.test(p))
     ?.replace(/\s+/g, ' ')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/[`*]/g, '');
 }
 
-// ---- docs/design.md ----
+// ---- docs/ ----
 
-reset('language');
-reset('internals');
-const design = sections(fs.readFileSync(path.join(repo, 'docs/design.md'), 'utf-8'));
-const intro = linkPaths(design.intro.filter((l) => !l.startsWith('# ')).join('\n'));
-page('internals/architecture.md', { title: 'Architecture', order: 0 }, intro);
-design.sections.forEach((s, i) => {
-  const dir = INTERNALS.has(s.title) ? 'internals' : 'language';
-  const body = linkPaths(promote(s.lines));
-  page(`${dir}/${slug(s.title)}.md`, { title: s.title, description: firstParagraph(body), order: i + 1 }, body);
-});
+for (const group of groups) reset(group.dir);
 
-// ---- docs/jir.md ----
+for (const page of pages) {
+  const file = path.join(docs, page.file);
+  if (!fs.existsSync(file)) {
+    errors.push(`docs/README.md: ${page.file} does not exist`);
+    continue;
+  }
+  const md = fs.readFileSync(file, 'utf-8');
+  // The `# Title` line is the page title; the TOC names the page in the sidebar.
+  const title = md.match(/^# (.+)$/m)?.[1] ?? page.title;
+  const body = linkPaths(links(md.replace(/^# .*\n/, ''), file, page.slug), page.slug);
+  const sidebar = title === page.title ? undefined : { label: page.title };
+  writePage(page.slug, { title, description: firstParagraph(body), sidebar }, body);
+}
 
-reset('reference');
-const jir = fs.readFileSync(path.join(repo, 'docs/jir.md'), 'utf-8');
-const jirTitle = jir.match(/^# (.*)$/m)[1];
-page('reference/jir.md', { title: 'JIR', description: jirTitle }, linkPaths(jir.replace(/^# .*\n/, '')));
+// Every page in docs/ must be reachable from the table of contents.
+(function walk(dir) {
+  for (const f of fs.readdirSync(dir, { withFileTypes: true })) {
+    const abs = path.join(dir, f.name);
+    const rel = path.relative(docs, abs);
+    if (f.isDirectory()) walk(abs);
+    else if (f.name.endsWith('.md') && rel !== 'README.md' && !pages.some((p) => p.file === rel)) {
+      errors.push(`docs/${rel} is not in the table of contents in docs/README.md`);
+    }
+  }
+})(docs);
 
 // ---- examples/*.jh ----
 
@@ -113,7 +146,8 @@ examples.forEach((file, i) => {
   const src = fs.readFileSync(path.join(repo, 'examples', file), 'utf-8');
   // The comment block at the top (after an optional `#![...]`) explains the example.
   const lines = src.split('\n');
-  let start = lines[0].startsWith('#![') ? 1 : 0;
+  const attr = lines[0].match(/^#!\[(\w+)\]/)?.[1];
+  let start = attr ? 1 : 0;
   const comment = [];
   while (start < lines.length && lines[start].startsWith('//')) {
     comment.push(lines[start].replace(/^\/\/ ?/, ''));
@@ -122,20 +156,27 @@ examples.forEach((file, i) => {
   const commands = comment.filter((l) => /^\s+jihoo /.test(l)).map((l) => l.trim());
   const prose = comment.filter((l) => !/^\s+jihoo /.test(l)).join('\n').trim();
   const name = file.replace(/\.jh$/, '');
+  const slug = `examples/${name}`;
   // The header comment is shown as text above, so the code starts after it.
-  const code = [...(lines[0].startsWith('#![') ? [lines[0]] : []), ...lines.slice(start)]
+  const code = [...(attr ? [lines[0]] : []), ...lines.slice(start)]
     .join('\n')
     .replace(/^\s*\n/, '')
     .trimEnd();
   const body = [
-    prose,
+    linkPaths(prose, slug),
     commands.length ? '```sh\n' + commands.join('\n') + '\n```' : '',
     '```jihoo title="' + `examples/${file}` + '"\n' + code + '\n```',
     `[View on GitHub](${github}/examples/${file})`,
   ]
     .filter(Boolean)
     .join('\n\n');
-  page(`examples/${name}.md`, { title: name, description: prose.split('\n')[0], order: i }, body);
+  // Compiled examples are marked with their profile in the sidebar.
+  const sidebar = { order: i, ...(attr && { badge: { text: attr, variant: attr === 'native' ? 'note' : 'caution' } }) };
+  writePage(slug, { title: name, description: prose.split('\n')[0], sidebar }, body);
 });
 
-console.log(`synced ${design.sections.length + 1} design pages, the JIR reference, ${examples.length} examples`);
+if (errors.length) {
+  console.error(errors.map((e) => `error: ${e}`).join('\n'));
+  process.exit(1);
+}
+console.log(`synced ${pages.length} pages from docs/ and ${examples.length} examples`);

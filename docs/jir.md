@@ -66,7 +66,7 @@ fn ...                               ; zero or more functions
 
 | profile        | runs on        | GC  | allowed builtins | pointers | C functions |
 |----------------|----------------|-----|------------------|----------|-------------|
-| `hosted`       | VM             | yes | `print`          | no       | no          |
+| `hosted`       | VM             | yes | `print`, `to_str` | no      | no          |
 | `native`       | LLVM + libc    | no  | `syscall`, `asm` | yes      | `extern`    |
 | `freestanding` | LLVM, no libc  | no  | `syscall`, `asm` | yes      | no          |
 
@@ -359,5 +359,4 @@ independent, since the C compiler that links them usually makes a PIE.
 
 ## Planned
 
-- `gcref` types for GC-managed objects beyond `str` and structs.
 - A Rust-side JIR parser so `jihoo run file.jir` works.
