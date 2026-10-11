@@ -16,12 +16,14 @@ One of them, the prelude, needs no import.
 | [`coro`](#coro) | native | stackful coroutines |
 | [`sync`](#sync) | native, freestanding | locks for threads: `Mutex`, `Cond`, `Group` |
 | [`thread`](#thread) | native | threads on all cores, with POSIX threads |
+| [`channel`](#channel) | native | channels between threads, with `close` |
 
 `strings` and `lists` work on `str` and lists, which only hosted programs have.
 `sys`, `alloc`, `io` and `sync` are marked `#![freestanding]`: they use neither
-GC nor libc, only `syscall`, so native programs can import them too. `coro` and
-`thread` are marked `#![native]`: they use the C library to switch stacks and
-start threads. All of them work on both targets, x86_64 and aarch64 Linux.
+GC nor libc, only `syscall`, so native programs can import them too. `coro`,
+`thread` and `channel` are marked `#![native]`: they use the C library to
+switch stacks, start threads and allocate. All of them work on both targets,
+x86_64 and aarch64 Linux.
 
 ## prelude
 
@@ -425,3 +427,66 @@ fn main() -> i64 {
   thread before the function holding it returns.
 - A thread that traps stops the whole program, as it would in C.
 - `main` returning ends the program, even while threads are still running.
+
+## channel
+
+Channels between threads (`examples/pipeline.jh`): what hosted programs'
+[`chan`](../language/tasks-and-channels.md) is for tasks, for native threads
+started with [`thread`](#thread). Values arrive in the order they were sent,
+and `close` tells receivers that no more will come, as in Go.
+
+```jihoo
+#![native]
+import channel
+import thread
+
+fn squares(arg: *u8) -> i64 {
+    let c = *(arg as *channel.Chan(i64))
+    let i = 1
+    while i <= 3 {
+        channel.send(i64, c, i * i)
+        i = i + 1
+    }
+    channel.close(i64, c)
+    return 0
+}
+
+fn main() -> i64 {
+    match channel.new(i64, 0) {
+        Some(c) => {
+            let t = thread.spawn(squares, &c as *u8)
+            let sum = 0
+            let more = true
+            while more {
+                match channel.recv(i64, c) {
+                    Some(x) => sum = sum + x      // 1, 4, 9
+                    None => more = false          // closed, and nothing left
+                }
+            }
+            match t {
+                Some(h) => thread.join(&h)
+                None => {}
+            }
+            channel.free(i64, c)
+            return sum                            // exit status 14
+        }
+        None => return 1
+    }
+}
+```
+
+| item | description |
+|------|-------------|
+| `struct Chan(T: type)` | a channel of `T` values; a handle, so copies of it are the same channel; its fields are private |
+| `fn new(comptime T: type, cap: i64) -> Option(Chan(T))` | a channel that buffers up to `cap` values; with `cap` 0 none, so that each sender waits for a receiver; None if there is no memory. A negative `cap` stops the program |
+| `fn send(comptime T: type, c: Chan(T), v: T)` | sends `v`, waiting while the channel is full (unbuffered: until a receiver took it); sending on a closed channel stops the program |
+| `fn recv(comptime T: type, c: Chan(T)) -> Option(T)` | the next value, waiting until there is one; None once the channel is closed and empty |
+| `fn close(comptime T: type, c: Chan(T))` | no more values will be sent; closing twice stops the program |
+| `fn count(comptime T: type, c: Chan(T)) -> i64` | the values sent and not yet received |
+| `fn free(comptime T: type, c: Chan(T))` | gives the channel's memory back; nothing may use it afterwards |
+
+- A channel is a ring buffer in memory from `malloc`, guarded by a
+  [`sync.Mutex`](#sync), with one `sync.Cond` for receivers and one for
+  senders.
+- Any type can be sent; values are copied in and out, as by assignment.
+- There is no `select` over native channels yet.

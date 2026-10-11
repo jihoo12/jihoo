@@ -144,3 +144,32 @@ impl FnCx<'_> {
         Ok(self.emit_to(Type::Chan(Box::new(elem)), |dst| Inst::NewChan { dst, cap }))
     }
 }
+
+impl FnCx<'_> {
+    /// `send(c, v)`: sends `v` on channel `c`, waiting while it is full.
+    pub(crate) fn chan_send(&mut self, pos: Pos, args: &[Expr]) -> Result<Reg, Error> {
+        let [c, v] = args else {
+            return Err(Error::new(pos, "`send` takes 2 arguments: a channel and a value"));
+        };
+        let chan = self.expr(c, None)?;
+        let Type::Chan(t) = self.ty(chan).clone() else {
+            return Err(Error::new(c.pos, format!("`send` needs a channel, found {}", self.ty(chan))));
+        };
+        let value = self.expr(v, Some(&t))?;
+        self.expect(v.pos, value, &t, "the value sent")?;
+        self.emit(Inst::Send { chan, value });
+        Ok(self.unit())
+    }
+
+    /// `recv(c)`: receives a value from channel `c`, waiting until there is one.
+    pub(crate) fn chan_recv(&mut self, pos: Pos, args: &[Expr]) -> Result<Reg, Error> {
+        let [c] = args else {
+            return Err(Error::new(pos, "`recv` takes 1 argument: a channel"));
+        };
+        let chan = self.expr(c, None)?;
+        let Type::Chan(t) = self.ty(chan).clone() else {
+            return Err(Error::new(c.pos, format!("`recv` needs a channel, found {}", self.ty(chan))));
+        };
+        Ok(self.emit_to(*t, |dst| Inst::Recv { dst, chan }))
+    }
+}

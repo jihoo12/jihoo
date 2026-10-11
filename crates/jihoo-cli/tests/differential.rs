@@ -588,3 +588,33 @@ fn sync_works_freestanding() {
         let c = sync.cond_new()\n  sync.signal(&c)\n  sync.broadcast(&c)\n  ok += 16\n  return ok\n}\n";
     assert_eq!(run_compiled("sync-freestanding", src), Some(31));
 }
+
+/// `lib/channel.jh` passes values between threads: the worker pool example,
+/// and many senders and receivers at once (`tests/threads/channels.jh`).
+#[test]
+fn channels_pass_values_between_threads() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let bin = std::env::temp_dir().join(format!("jihoo-pipeline-{}", std::process::id()));
+    let src = repo_root().join("examples/pipeline.jh");
+    assert_eq!(exit_code(Command::new(JIHOO).arg("build").arg(&src).arg("-o").arg(&bin)), 0);
+    let out = Command::new(&bin).output().unwrap();
+    std::fs::remove_file(&bin).unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "100 jobs done, 3142 steps in all, 118 at most\n");
+    assert_eq!(out.status.code(), Some(0));
+
+    let src = std::fs::read_to_string(repo_root().join("tests/threads/channels.jh")).unwrap();
+    assert_eq!(run_compiled("channels", &src), Some(7));
+
+    let program = |body: &str| format!("#![native]\nimport channel\nfn main() -> i64 {{\n{body}\n  return 0\n}}\n");
+    let misuses = [
+        ("send-closed", "  match channel.new(i64, 1) {\n    Some(c) => {\n      channel.close(i64, c)\n      channel.send(i64, c, 1)\n    }\n    None => {}\n  }"),
+        ("close-twice", "  match channel.new(i64, 1) {\n    Some(c) => {\n      channel.close(i64, c)\n      channel.close(i64, c)\n    }\n    None => {}\n  }"),
+        ("negative-capacity", "  channel.new(i64, -1)"),
+    ];
+    for (name, body) in misuses {
+        assert_eq!(run_compiled(name, &program(body)), None, "{name} should trap");
+    }
+}

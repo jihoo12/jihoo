@@ -1,0 +1,174 @@
+#![native]
+// Channels between threads (lib/thread.jh): one thread sends values, another
+// receives them in the same order, as with hosted programs' `chan` and Go's.
+//
+//   import channel
+//   match channel.new(i64, 8) {             // buffers up to 8 values
+//       Some(c) => {
+//           channel.send(i64, c, 42)        // waits while the channel is full
+//           channel.close(i64, c)
+//           match channel.recv(i64, c) {    // waits until there is a value
+//               Some(x) => use(x)           // 42
+//               None => {}                  // closed, and every value received
+//           }
+//           channel.free(i64, c)
+//       }
+//       None => {}                          // no memory
+//   }
+//
+// A Chan(T) is a handle: copies of it are the same channel, so pass it to
+// threads by value. Its state is in memory from `malloc`, guarded by a
+// `sync.Mutex`. Misuse stops the program with `trap()`: sending on a closed
+// channel or closing one twice, as in Go, or a negative capacity.
+
+import libc
+import sync
+
+const I64_MAX = 9223372036854775807
+
+struct State(T: type) {
+    lock: sync.Mutex
+    // Signalled when there is a value to receive, or the channel closed.
+    ready: sync.Cond
+    // Broadcast when a value was received, or the channel closed.
+    room: sync.Cond
+    // A ring of `cap` values, `len` of them from `head` on.
+    buf: *T
+    cap: i64
+    head: i64
+    len: i64
+    // An unbuffered channel has one slot, and its sender also waits until
+    // the value is taken: sender and receiver meet.
+    unbuffered: bool
+    // How many values were ever sent and taken, so that a sender on an
+    // unbuffered channel knows when its own was.
+    sent: i64
+    taken: i64
+    closed: bool
+}
+
+pub struct Chan(T: type) {
+    s: *State(T)
+}
+
+// A new channel of `T` values that buffers up to `cap` of them; with `cap` 0
+// it buffers none, and each sender waits for a receiver. None if there is no
+// memory for it. `cap` must not be negative.
+pub fn new(comptime T: type, cap: i64) -> Option(Chan(T)) {
+    if cap < 0 {
+        trap()
+    }
+    let slots = cap
+    if cap == 0 {
+        slots = 1
+    }
+    // A size that does not fit is like memory that is not there.
+    let size = size_of(T)
+    if size > 0 && slots > I64_MAX / size {
+        return Option.None
+    }
+    let s = libc.malloc(size_of(State(T)) as u64) as *State(T)
+    if s == 0 as *State(T) {
+        return Option.None
+    }
+    // `malloc(0)` may give null; ask for a byte at least.
+    let bytes = slots * size
+    if bytes == 0 {
+        bytes = 1
+    }
+    let buf = libc.malloc(bytes as u64) as *T
+    if buf == 0 as *T {
+        libc.free(s as *u8)
+        return Option.None
+    }
+    *s = State(T) {
+        lock: sync.mutex_new(),
+        ready: sync.cond_new(),
+        room: sync.cond_new(),
+        buf: buf,
+        cap: slots,
+        head: 0,
+        len: 0,
+        unbuffered: cap == 0,
+        sent: 0,
+        taken: 0,
+        closed: false,
+    }
+    return Option.Some(Chan(T) { s: s })
+}
+
+// Sends `v`, waiting while the channel is full; on an unbuffered channel,
+// until a receiver has taken it. The channel must not be closed, also not
+// while this waits.
+pub fn send(comptime T: type, c: Chan(T), v: T) {
+    let s = c.s
+    sync.lock(&s.lock)
+    while s.len == s.cap && !s.closed {
+        sync.wait(&s.room, &s.lock)
+    }
+    if s.closed {
+        trap()
+    }
+    s.buf[(s.head + s.len) % s.cap] = v
+    s.len = s.len + 1
+    s.sent = s.sent + 1
+    let mine = s.sent
+    sync.signal(&s.ready)
+    if s.unbuffered {
+        while s.taken < mine {
+            sync.wait(&s.room, &s.lock)
+        }
+    }
+    sync.unlock(&s.lock)
+}
+
+// Receives the next value, waiting until there is one; None once the
+// channel is closed and every value sent has been received.
+pub fn recv(comptime T: type, c: Chan(T)) -> Option(T) {
+    let s = c.s
+    sync.lock(&s.lock)
+    while s.len == 0 && !s.closed {
+        sync.wait(&s.ready, &s.lock)
+    }
+    if s.len == 0 {
+        sync.unlock(&s.lock)
+        return Option.None
+    }
+    let v = s.buf[s.head]
+    s.head = (s.head + 1) % s.cap
+    s.len = s.len - 1
+    s.taken = s.taken + 1
+    sync.broadcast(&s.room)
+    sync.unlock(&s.lock)
+    return Option.Some(v)
+}
+
+// Says that no more values will be sent. Receivers still get the values
+// sent before; after them, `recv` gives None. A channel is closed once.
+pub fn close(comptime T: type, c: Chan(T)) {
+    let s = c.s
+    sync.lock(&s.lock)
+    if s.closed {
+        trap()
+    }
+    s.closed = true
+    sync.broadcast(&s.ready)
+    sync.broadcast(&s.room)
+    sync.unlock(&s.lock)
+}
+
+// The number of values sent and not yet received.
+pub fn count(comptime T: type, c: Chan(T)) -> i64 {
+    let s = c.s
+    sync.lock(&s.lock)
+    let n = s.len
+    sync.unlock(&s.lock)
+    return n
+}
+
+// Gives the channel's memory back. No thread may use the channel, or any
+// copy of it, afterwards.
+pub fn free(comptime T: type, c: Chan(T)) {
+    libc.free(c.s.buf as *u8)
+    libc.free(c.s as *u8)
+}

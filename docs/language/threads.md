@@ -148,3 +148,23 @@ sync.unlock(&m)
 
 A Mutex, Cond or Group is shared by pointer and must stay where it is while
 threads use it: a copy is an unrelated second one.
+
+## Channels
+
+Threads can also share nothing and pass values instead, as hosted tasks do:
+the [`channel`](../reference/standard-library.md#channel) library has
+channels between threads, with `close` to say that no more values will come
+(`examples/pipeline.jh`, a worker pool).
+
+```jihoo
+// A worker: takes jobs until the channel is closed and empty.
+let more = true
+while more {
+    match channel.recv(i64, jobs) {
+        Some(n) => channel.send(i64, results, work(n))
+        None => more = false
+    }
+}
+```
+
+The type of the values comes first in each call, as with `alloc`'s `Vec`.

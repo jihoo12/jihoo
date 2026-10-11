@@ -78,8 +78,8 @@ traps loses what is still buffered. Freestanding programs have no `print`; the
 | `recv(c)` | `T` | receives a value, waiting until there is one |
 
 As with the float builtins, a module may take the names `from_bytes`,
-`read_line`, `push` and `pop`: one that defines a function of that name calls
-its own (`alloc.push` is one).
+`read_line`, `push`, `pop`, `send` and `recv`: one that defines a function of
+that name calls its own (`alloc.push` and `channel.send` are two).
 
 ## Native and freestanding
 

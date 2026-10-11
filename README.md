@@ -100,7 +100,7 @@ nix build
 | `crates/jihoo-vm`      | Rust     | register VM and GC heap |
 | `crates/jihoo-cli`     | Rust     | the `jihoo` command |
 | `backend-llvm`         | C++      | `jihoo-llc`: JIR text → LLVM → object file |
-| `lib`                  | jihoo    | the standard library (`prelude`, `strings`, `lists`, `libc`, `alloc`, `io`, `coro`, `sync`, `thread`) |
+| `lib`                  | jihoo    | the standard library (`prelude`, `strings`, `lists`, `libc`, `alloc`, `io`, `coro`, `sync`, `thread`, `channel`) |
 | `docs`                 | Markdown | the documentation, one file per page of the website |
 | `site`                 | Astro    | the website ([site/README.md](site/README.md)) |
 | `tests/diff`           | jihoo    | programs that must behave the same on the VM and natively |
@@ -125,7 +125,8 @@ the VM.
   locks) libraries.
 - **native:** `print`; C functions through `extern fn` and the `libc` module,
   structs passed to C by value, C files and libraries linked in; threads on
-  every core (the `thread` library); the `coro` library.
+  every core and channels between them (the `thread` and `channel`
+  libraries); the `coro` library.
 
 See the [examples](examples) and the [roadmap](docs/internals/roadmap.md).
 

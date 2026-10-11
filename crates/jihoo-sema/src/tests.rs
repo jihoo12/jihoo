@@ -1557,3 +1557,13 @@ fn qualified_types_are_type_arguments() {
     ])
     .unwrap();
 }
+
+#[test]
+fn modules_may_take_send_and_recv() {
+    // `channel.send` is the module's; plain `send` is still the builtin.
+    check_files(&[
+        ("main.jh", "import ch\nfn main() {\n let c = chan(i64, 1)\n send(c, ch.send(1))\n print(recv(c) + ch.recv(2)) }"),
+        ("ch.jh", "pub fn send(x: i64) -> i64 { return x }\npub fn recv(x: i64) -> i64 { return x }"),
+    ])
+    .unwrap();
+}

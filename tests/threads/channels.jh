@@ -1,0 +1,104 @@
+#![native]
+// Channels under contention (lib/channel.jh): four senders and four
+// receivers on an unbuffered and on a buffered channel lose and repeat no
+// value, and values sent before `close` still arrive. Exits with 7 if all
+// three hold (crates/jihoo-cli/tests/differential.rs).
+import channel
+import sync
+import thread
+
+struct Item {
+    from: i64
+    n: u32
+}
+
+struct Shared {
+    c: channel.Chan(Item)
+    sent: sync.Group
+    sum: i64
+    count: i64
+}
+
+fn producer(arg: *u8) -> i64 {
+    let s = arg as *Shared
+    let id = atomic_add(&s.count, 1)
+    let i: u32 = 0
+    while i < 5000 {
+        channel.send(Item, s.c, Item { from: id, n: i })
+        i += 1
+    }
+    sync.group_done(&s.sent)
+    return 0
+}
+
+fn consumer(arg: *u8) -> i64 {
+    let s = arg as *Shared
+    let got = 0
+    let more = true
+    while more {
+        match channel.recv(Item, s.c) {
+            Some(it) => {
+                atomic_add(&s.sum, it.n as i64)
+                got += 1
+            }
+            None => more = false
+        }
+    }
+    return got
+}
+
+fn trial(c: channel.Chan(Item)) -> i64 {
+    let s = Shared { c: c, sent: sync.group_new(), sum: 0, count: 0 }
+    let ps: [Option(thread.Thread); 4] = [Option.None; 4]
+    let cs: [Option(thread.Thread); 4] = [Option.None; 4]
+    sync.group_add(&s.sent, 4)
+    let i = 0
+    while i < 4 {
+        ps[i] = thread.spawn(producer, &s as *u8)
+        cs[i] = thread.spawn(consumer, &s as *u8)
+        i += 1
+    }
+    sync.group_wait(&s.sent)
+    channel.close(Item, c)
+    let got = 0
+    i = 0
+    while i < 4 {
+        match ps[i] {
+            Some(t) => thread.join(&t)
+            None => return -1
+        }
+        match cs[i] {
+            Some(t) => got += thread.join(&t)
+            None => return -1
+        }
+        i += 1
+    }
+    // 4 producers x (0 + ... + 4999)
+    if got != 20000 || atomic_load(&s.sum) != 4 * 12497500 || channel.count(Item, c) != 0 { return -1 }
+    channel.free(Item, c)
+    return 0
+}
+
+fn main() -> i64 {
+    let ok = 0
+    match channel.new(Item, 0) {
+        Some(c) => if trial(c) == 0 { ok += 1 }
+        None => {}
+    }
+    match channel.new(Item, 3) {
+        Some(c) => if trial(c) == 0 { ok += 2 }
+        None => {}
+    }
+    // Values sent before close still arrive; then None.
+    match channel.new(i64, 2) {
+        Some(c) => {
+            channel.send(i64, c, 7)
+            channel.send(i64, c, 8)
+            channel.close(i64, c)
+            if channel.recv(i64, c) == Option.Some(7) && channel.recv(i64, c) == Option.Some(8) && channel.recv(i64, c) == Option.None { ok += 4 }
+            channel.free(i64, c)
+        }
+        None => {}
+    }
+    return ok
+}

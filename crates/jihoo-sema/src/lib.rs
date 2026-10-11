@@ -317,18 +317,16 @@ fn is_builtin(name: &str) -> bool {
             | "to_str"
             | "unique"
             | "ident"
-            | "send"
-            | "recv"
     )
 }
 
 /// Builtins whose names a module may take: a module that defines a function
 /// of that name calls its own (as `alloc.push` is). Floats, atomics, `trap`,
-/// and the hosted builtins for lists and input.
+/// and the hosted builtins for lists, input and channels.
 pub(crate) fn is_takeable_builtin(name: &str) -> bool {
     floats::is_float_builtin(name)
         || atomics::is_atomic_builtin(name)
-        || matches!(name, "trap" | "read_line" | "push" | "pop" | "from_bytes")
+        || matches!(name, "trap" | "read_line" | "push" | "pop" | "from_bytes" | "send" | "recv")
 }
 
 struct BlockBuf {
@@ -1280,29 +1278,6 @@ impl<'a> FnCx<'a> {
                 Ok(self.unit())
             }
             "stringify" => self.stringify(pos, args),
-            "send" => {
-                let [c, v] = args else {
-                    return Err(Error::new(pos, "`send` takes 2 arguments: a channel and a value"));
-                };
-                let chan = self.expr(c, None)?;
-                let Type::Chan(t) = self.ty(chan).clone() else {
-                    return Err(Error::new(c.pos, format!("`send` needs a channel, found {}", self.ty(chan))));
-                };
-                let value = self.expr(v, Some(&t))?;
-                self.expect(v.pos, value, &t, "the value sent")?;
-                self.emit(Inst::Send { chan, value });
-                Ok(self.unit())
-            }
-            "recv" => {
-                let [c] = args else {
-                    return Err(Error::new(pos, "`recv` takes 1 argument: a channel"));
-                };
-                let chan = self.expr(c, None)?;
-                let Type::Chan(t) = self.ty(chan).clone() else {
-                    return Err(Error::new(c.pos, format!("`recv` needs a channel, found {}", self.ty(chan))));
-                };
-                Ok(self.emit_to(*t, |dst| Inst::Recv { dst, chan }))
-            }
             "to_str" => {
                 if self.profile() != Profile::Hosted && !self.in_macro {
                     return Err(Error::new(pos, "`to_str` makes a `str`, so it is only available in hosted programs and macros"));
@@ -1417,6 +1392,8 @@ impl<'a> FnCx<'a> {
                         "push" => self.list_push(pos, args),
                         "pop" => self.list_pop(pos, args),
                         "from_bytes" => self.str_from_bytes(pos, args),
+                        "send" => self.chan_send(pos, args),
+                        "recv" => self.chan_recv(pos, args),
                         _ if atomics::is_atomic_builtin(base) => self.atomic_builtin(pos, base, args),
                         _ => self.float_builtin(pos, base, args, expected),
                     };

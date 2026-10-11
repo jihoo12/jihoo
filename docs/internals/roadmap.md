@@ -48,7 +48,9 @@
     `atomic_swap`, `atomic_add` and the other read-modify-writes,
     `atomic_cas` and `fence`, sequentially consistent; `lib/sync.jh`, futex
     locks (`Mutex`, `Cond`, `Group`) for native and freestanding code;
-    `lib/thread.jh`, POSIX threads for native code.
+    `lib/thread.jh`, POSIX threads for native code; `lib/channel.jh`,
+    channels between threads with `close` (`send` and `recv` are now names
+    a module may take).
 
 ## Next
 
@@ -57,9 +59,9 @@
 - **Native code:** structs by value through function values handed to C
   (callbacks take scalars only); `print` in freestanding programs.
 - **Concurrency:** weaker memory orders (acquire/release) for code that needs
-  the speed; threads in freestanding programs, over `clone`; `go` and
-  channels in native programs, on threads; tasks on more than one core in
-  the VM, which needs a GC that threads can share.
+  the speed; threads in freestanding programs, over `clone`; `select` over
+  native channels, and `go` syntax for native threads; tasks on more than one
+  core in the VM, which needs a GC that threads can share.
 - **Hosted library:** a map keyed by `str`; files; parsing floats; `for`
   loops over lists and ranges, so that library code needs fewer `while` loops.
 
