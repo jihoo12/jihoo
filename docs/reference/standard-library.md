@@ -7,12 +7,15 @@ One of them, the prelude, needs no import.
 | module | profiles | what |
 |--------|----------|------|
 | [prelude](#prelude) | all | `Option(T)` and `Result(T, E)`, without an import |
+| [`strings`](#strings) | hosted | searching, splitting, joining, trimming and parsing text |
+| [`lists`](#lists) | hosted | sorting, mapping and searching lists |
 | [`libc`](#libc) | native | declarations of C library functions |
 | [`sys`](#sys) | native, freestanding | Linux syscall numbers of the target |
 | [`alloc`](#alloc) | native, freestanding | an arena allocator over `mmap`, and `Vec(T)` |
 | [`io`](#io) | native, freestanding | output straight to file descriptors |
 | [`coro`](#coro) | native | stackful coroutines |
 
+`strings` and `lists` work on `str` and lists, which only hosted programs have.
 `sys`, `alloc` and `io` are marked `#![freestanding]`: they use neither GC nor
 libc, only `syscall`, so native programs can import them too. `coro` is marked
 `#![native]`: it uses the C library to switch stacks. All of them work on both
@@ -60,6 +63,82 @@ A module's own item of the same name comes first, so a program that declares
 its own `Option` uses that one. The compiler carries the prelude in itself, so
 it is the one it was built with whatever the search path holds; in JIR its
 types are named `prelude.Option(i64)` and so on.
+
+## strings
+
+Text functions for hosted programs, written in jihoo on top of `len`, `s[i]`,
+`s[lo:hi]` and `from_bytes` ([Types](../language/types.md#strings)). A `str` is
+bytes; these functions treat only ASCII specially (case, spaces, digits), so
+they never split a multi-byte character they did not find themselves.
+
+```jihoo
+import strings
+
+fn main() {
+    let parts = strings.split("a,b,c", ",")      // ["a", "b", "c"]
+    print(strings.join(parts, " + "))            // a + b + c
+    print(strings.to_upper(strings.trim("  hi ")))   // HI
+    match strings.parse_int(" -42 ") {
+        Some(n) => print(n + 1)                  // -41
+        None => print("not a number")
+    }
+}
+```
+
+| function | description |
+|----------|-------------|
+| `index_of(s, sub) -> i64` | where `sub` first occurs in `s`, or -1 |
+| `index_from(s, sub, from) -> i64` | the same, from byte `from` on |
+| `last_index_of(s, sub) -> i64` | where `sub` last occurs, or -1 |
+| `contains(s, sub)`, `starts_with(s, prefix)`, `ends_with(s, suffix)` | `bool` |
+| `count(s, sub) -> i64` | how many times `sub` occurs, not overlapping |
+| `split(s, sep) -> [str]` | the parts between occurrences of `sep`: `split("a,,b", ",")` is `["a", "", "b"]` |
+| `fields(s) -> [str]` | the words: the runs of bytes that are not ASCII spaces |
+| `lines(s) -> [str]` | the lines, without `\n` or `\r\n` |
+| `join(parts, sep) -> str` | `parts` with `sep` between each two |
+| `repeat(s, n) -> str` | `s` written `n` times |
+| `replace(s, old, new) -> str` | every `old` replaced by `new` |
+| `trim(s)`, `trim_start(s)`, `trim_end(s)` | `s` without ASCII spaces at both ends, the start, or the end |
+| `to_upper(s)`, `to_lower(s)` | ASCII letters in the other case |
+| `bytes(s) -> [u8]` | the bytes of `s` |
+| `from_byte(b) -> str` | the one-byte string of `b` |
+| `is_space(b)`, `is_digit(b)`, `is_letter(b)` | ASCII classes of a byte, `bool` |
+| `parse_int(s) -> Option(i64)` | the decimal integer `s` writes, with an optional sign and spaces around it, or `None` if it is not one or does not fit |
+
+`sep`, `sub` and `old` must not be empty. `split`, `join`, `repeat` and
+`replace` build their results byte by byte in a `[u8]`, so they take time in
+proportion to their input and output.
+
+## lists
+
+Generic functions on [lists](../language/lists.md) for hosted programs. Each
+takes the element type first, as generic functions do, and returns a new list:
+the one passed in is never changed.
+
+```jihoo
+import lists
+
+fn main() {
+    let xs: [i64] = [3, 1, 2]
+    let sorted = lists.sort(i64, xs, fn(a: i64, b: i64) -> bool { return a < b })
+    let doubled = lists.map(i64, i64, sorted, fn(x: i64) -> i64 { return x * 2 })
+    print(lists.index_of(i64, doubled, 4))      // 1
+}
+```
+
+| function | description |
+|----------|-------------|
+| `sort(T, xs, less: fn(T, T) -> bool) -> [T]` | sorted by `less`; stable, O(n log n) (merge sort) |
+| `map(T, U, xs, f: fn(T) -> U) -> [U]` | `f` of each element |
+| `filter(T, xs, keep: fn(T) -> bool) -> [T]` | the elements `keep` is true for |
+| `fold(T, A, xs, init: A, f: fn(A, T) -> A) -> A` | `f(... f(f(init, xs[0]), xs[1]) ...)` |
+| `reverse(T, xs) -> [T]` | back to front |
+| `index_of(T, xs, x) -> i64` | where `x` first is, by `==`, or -1 |
+| `contains(T, xs, x) -> bool` | whether `x` is in `xs` |
+| `range(lo, hi) -> [i64]` | `lo` up to but not including `hi` |
+
+`examples/words.jh` puts `read_line`, `strings` and `lists` together: it counts
+the words of its input and prints the most common ones.
 
 ## libc
 

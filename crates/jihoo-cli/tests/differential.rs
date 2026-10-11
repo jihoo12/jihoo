@@ -421,3 +421,23 @@ fn native_structs_cross_into_c() {
     }
     std::fs::remove_dir_all(&work).unwrap();
 }
+
+/// The hosted standard library together: `read_line` from standard input,
+/// lists, and `lib/strings.jh` and `lib/lists.jh`.
+#[test]
+fn words_example_reads_standard_input() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(JIHOO)
+        .arg("run")
+        .arg(repo_root().join("examples/words.jh"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"The cat and the dog\n| a table |\nthe END and\r\nend").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let expected = "11 words\n     3  the\n     2  and\n     2  end\n     1  a\n     1  cat\n";
+    assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
+}

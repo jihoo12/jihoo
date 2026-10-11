@@ -37,6 +37,10 @@
 19. Structs by value to and from C, lowered per target (x86_64 System V,
     AAPCS64), and `export fn` for functions C calls.
 20. A Rust-side JIR reader: `jihoo run file.jir`, `jihoo build file.jir`.
+21. A hosted standard library: strings as bytes with `len`, `s[i]`, slices
+    and ordering; lists `[T]` with `push` and `pop`, in place when unshared;
+    `read_line`; the prelude (`Option`, `Result`); `lib/strings.jh` and
+    `lib/lists.jh`. JIR version 5.
 
 ## Next
 
@@ -44,6 +48,8 @@
   x86_64 would need an exact software version.
 - **Native code:** structs by value through function values handed to C
   (callbacks take scalars only); `print` in freestanding programs.
+- **Hosted library:** a map keyed by `str`; files; parsing floats; `for`
+  loops over lists and ranges, so that library code needs fewer `while` loops.
 
 ## Library layers
 
@@ -55,6 +61,7 @@ alloc  any compiled profile, given an allocator: Vec(T), strings
 core   everywhere: integers, pointers, slices, Option
 ```
 
-Today `alloc` is a bump arena with `Vec(T)` (`lib/alloc.jh`); the goal is for
+Today `std` is the prelude, `strings` and `lists`, on the VM's `str` and `[T]`,
+and `alloc` is a bump arena with `Vec(T)` (`lib/alloc.jh`); the goal is for
 freestanding code to bring its own allocator, written in jihoo on top of
 `syscall`, and use the same collections with it.

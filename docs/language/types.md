@@ -109,6 +109,9 @@ print(line[:5] + line[12:])          // hello 2026
   ([Lists](lists.md)), and `read_line()` reads one from standard input
   ([Builtins](../reference/builtins.md#hosted)).
 
+The `strings` library has searching, splitting, trimming and parsing on top
+of these ([Standard library](../reference/standard-library.md#strings)).
+
 In native and freestanding programs there is no `str`: a string literal is a
 `*u8` pointing to constant NUL-terminated bytes, ready to pass to C or to a
 syscall. [Macros](macros.md) can use `str` in every profile, since they only run

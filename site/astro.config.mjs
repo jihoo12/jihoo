@@ -20,12 +20,14 @@ const sidebar = [
 // the exact origin and path; these defaults match github.com/jihoo12/jihoo.
 const base = process.env.BASE_PATH ?? '/jihoo';
 
-// Pages that moved when the docs were split into one file per topic.
+// Pages that moved: when the docs were split into one file per topic, and since.
 const moved = {
   'language/structs-and-pointers': 'language/structs',
   'language/enums-and-match': 'language/enums',
   'internals/gc': 'internals/vm',
   'internals/why-the-ir-is-a-text-file': 'internals/architecture',
+  // `[T]` lists took the name; the example is about linked lists made of refs.
+  'examples/lists': 'examples/linked_lists',
 };
 
 export default defineConfig({

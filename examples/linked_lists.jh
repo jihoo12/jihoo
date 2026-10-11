@@ -1,7 +1,7 @@
 // Recursive data with `ref`: an immutable reference to a value on the GC heap.
 // A type cannot contain itself, but it can contain a `ref` to itself.
 // Hosted only; freestanding code uses pointers.
-//   jihoo run examples/lists.jh
+//   jihoo run examples/linked_lists.jh
 
 enum List(T: type) {
     Cons(T, ref List(T))

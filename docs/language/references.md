@@ -1,7 +1,7 @@
 # References
 
 `ref T` is an immutable reference to a `T` on the GC heap. It is how hosted
-programs build recursive data such as lists and trees.
+programs build recursive data such as linked lists and trees.
 
 ```jihoo
 enum List(T: type) {
@@ -39,7 +39,7 @@ fn main() {
 Refs are immutable: `*r = v` and `r.x = v` are errors. So a value shared through
 refs behaves exactly as if it had been copied, and jihoo keeps its value
 semantics. A changed version of a structure is built from the parts that change
-and refs to the parts that do not, as in `examples/lists.jh`:
+and refs to the parts that do not, as in `examples/linked_lists.jh`:
 
 ```jihoo
 // A new list with `x` in front: the old list is shared, not copied.

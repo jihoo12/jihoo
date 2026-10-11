@@ -1,0 +1,123 @@
+// Functions on lists (`[T]`) for hosted programs. Each takes the element type
+// first, as generic functions do, and returns a new list: lists are values,
+// so the one passed in is never changed.
+//
+//   import lists
+//   let xs: [i64] = [3, 1, 2]
+//   let sorted = lists.sort(i64, xs, fn(a: i64, b: i64) -> bool { return a < b })
+//   let doubled = lists.map(i64, i64, sorted, fn(x: i64) -> i64 { return x * 2 })
+//   print(lists.index_of(i64, doubled, 4))      // 1
+
+// Where `x` first is in `xs`, or -1.
+pub fn index_of(comptime T: type, xs: [T], x: T) -> i64 {
+    let i = 0
+    while i < len(xs) {
+        if xs[i] == x {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+pub fn contains(comptime T: type, xs: [T], x: T) -> bool {
+    return index_of(T, xs, x) >= 0
+}
+
+// `xs` back to front.
+pub fn reverse(comptime T: type, xs: [T]) -> [T] {
+    let out: [T] = []
+    let i = len(xs) - 1
+    while i >= 0 {
+        push(out, xs[i])
+        i -= 1
+    }
+    return out
+}
+
+// `f` of each element, in order.
+pub fn map(comptime T: type, comptime U: type, xs: [T], f: fn(T) -> U) -> [U] {
+    let out: [U] = []
+    let i = 0
+    while i < len(xs) {
+        push(out, f(xs[i]))
+        i += 1
+    }
+    return out
+}
+
+// The elements for which `keep` is true, in order.
+pub fn filter(comptime T: type, xs: [T], keep: fn(T) -> bool) -> [T] {
+    let out: [T] = []
+    let i = 0
+    while i < len(xs) {
+        if keep(xs[i]) {
+            push(out, xs[i])
+        }
+        i += 1
+    }
+    return out
+}
+
+// `f(... f(f(init, xs[0]), xs[1]) ..., xs[n - 1])`.
+pub fn fold(comptime T: type, comptime A: type, xs: [T], init: A, f: fn(A, T) -> A) -> A {
+    let acc = init
+    let i = 0
+    while i < len(xs) {
+        acc = f(acc, xs[i])
+        i += 1
+    }
+    return acc
+}
+
+// `xs` sorted so that `less(b, a)` is false for every `a` before `b`. The
+// sort is stable (equal elements keep their order) and takes O(n log n) calls
+// of `less`.
+pub fn sort(comptime T: type, xs: [T], less: fn(T, T) -> bool) -> [T] {
+    // Bottom-up merge sort: merge runs of width 1, 2, 4, ... from `src` into `dst`.
+    let src = xs
+    let n = len(xs)
+    let width = 1
+    while width < n {
+        let dst: [T] = []
+        let lo = 0
+        while lo < n {
+            let mid = min(lo + width, n)
+            let hi = min(lo + 2 * width, n)
+            let i = lo
+            let j = mid
+            while i < mid || j < hi {
+                // Take from the right run only when it is strictly less: stable.
+                if i < mid && (j >= hi || !less(src[j], src[i])) {
+                    push(dst, src[i])
+                    i += 1
+                } else {
+                    push(dst, src[j])
+                    j += 1
+                }
+            }
+            lo = hi
+        }
+        src = dst
+        width *= 2
+    }
+    return src
+}
+
+// The integers from `lo` up to but not including `hi`.
+pub fn range(lo: i64, hi: i64) -> [i64] {
+    let out: [i64] = []
+    let i = lo
+    while i < hi {
+        push(out, i)
+        i += 1
+    }
+    return out
+}
+
+fn min(a: i64, b: i64) -> i64 {
+    if a < b {
+        return a
+    }
+    return b
+}

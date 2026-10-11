@@ -1,0 +1,61 @@
+// Counts the words of standard input and prints the most common ones, with
+// the hosted standard library: `read_line`, lists, `strings` and `lists`.
+//   jihoo run examples/words.jh < README.md
+
+import lists
+import strings
+
+struct Count {
+    word: str
+    n: i64
+}
+
+fn main() {
+    // Every word (a field with a letter in it), in lower case.
+    let words: [str] = []
+    let line = read_line()
+    while len(line) > 0 {
+        let fields = strings.fields(strings.to_lower(line))
+        let i = 0
+        while i < len(fields) {
+            if has_letter(fields[i]) {
+                push(words, fields[i])
+            }
+            i += 1
+        }
+        line = read_line()
+    }
+    print(to_str(len(words)) + " words")
+
+    // Sorted, equal words are next to each other: count the runs.
+    let sorted = lists.sort(str, words, fn(a: str, b: str) -> bool { return a < b })
+    let counts: [Count] = []
+    let i = 0
+    while i < len(sorted) {
+        let j = i
+        while j < len(sorted) && sorted[j] == sorted[i] {
+            j += 1
+        }
+        push(counts, Count { word: sorted[i], n: j - i })
+        i = j
+    }
+
+    // Most common first; the sort is stable, so ties stay in alphabetical order.
+    let top = lists.sort(Count, counts, fn(a: Count, b: Count) -> bool { return a.n > b.n })
+    let k = 0
+    while k < len(top) && k < 5 {
+        print(strings.repeat(" ", 6 - len(to_str(top[k].n))) + to_str(top[k].n) + "  " + top[k].word)
+        k += 1
+    }
+}
+
+fn has_letter(s: str) -> bool {
+    let i = 0
+    while i < len(s) {
+        if strings.is_letter(s[i]) {
+            return true
+        }
+        i += 1
+    }
+    return false
+}

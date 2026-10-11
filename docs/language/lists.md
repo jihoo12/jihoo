@@ -80,11 +80,18 @@ So:
 
 ## Strings and bytes
 
-A `str` is not a list. `from_bytes(b)` makes a string of the bytes in `b: [u8]`,
-and pushing `s[i]` for each `i` gives the bytes of a string `s`.
+A `str` is not a list, but converts to and from one: `from_bytes(b)` makes a
+string of the bytes in `b: [u8]`, and `strings.bytes(s)` gives the bytes of a
+string ([Standard library](../reference/standard-library.md#strings)).
 Pushing bytes to a `[u8]` and converting it once at the end is how to build a
 long string in time proportional to its length, where `s = s + piece` in a loop
 copies the text so far each time.
+
+## Library
+
+`lib/lists.jh` has generic functions on lists: `sort`, `map`, `filter`,
+`fold`, `reverse`, `index_of`, `contains` and `range`
+([Standard library](../reference/standard-library.md#lists)).
 
 ## Layout
 
