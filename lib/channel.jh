@@ -27,12 +27,19 @@
 import libc
 import sync
 import sys
+import thread
 
 const I64_MAX = 9223372036854775807
 
 // Futex operations, private to this process.
 const FUTEX_WAIT = 128
 const FUTEX_WAKE = 129
+
+// C's `struct timespec`, for the futex's timeout.
+struct Timespec {
+    sec: i64
+    nsec: i64
+}
 
 // A `Select` waiting on a channel: one per case, linked into the channel's
 // list while the `Select` waits. `word` is the selector's futex word, which
@@ -252,6 +259,9 @@ fn notify(s: *Raw) {
 
 // ---- Select ----
 
+// The longest `wait_ms` waits: about 31 years.
+const MAX_MS = 1000000000000
+
 // The most cases one `Select` has.
 pub const MAX_CASES = 16
 
@@ -342,6 +352,27 @@ pub fn wait(sel: *Select) -> i64 {
     if !any {
         trap()
     }
+    return run(sel, -1)
+}
+
+// Like `wait`, but waits `ms` milliseconds at most: -1 if no case could go
+// ahead by then, as `poll` gives. Each call starts its own clock, as Go's
+// `case <-time.After(d)` does in a loop. With `ms` zero or less it is
+// `poll`; with no case on, it only sleeps.
+pub fn wait_ms(sel: *Select, ms: i64) -> i64 {
+    if ms <= 0 {
+        return poll(sel)
+    }
+    // More than 30 years is as good as forever, and keeps the sums in range.
+    if ms > MAX_MS {
+        ms = MAX_MS
+    }
+    return run(sel, thread.now_ns() + ms * 1000000)
+}
+
+// Waits for a case to go ahead, until `deadline` (on `thread.now_ns`'s clock), or
+// without end if it is negative; -1 if none went ahead.
+fn run(sel: *Select, deadline: i64) -> i64 {
     // Wait on every channel first, so that no change after the look below
     // goes unnoticed.
     let i = 0
@@ -350,11 +381,22 @@ pub fn wait(sel: *Select) -> i64 {
         i = i + 1
     }
     let chosen = -1
-    while chosen < 0 {
+    let late = false
+    while chosen < 0 && !late {
         let seen = atomic_load(&sel.word)
         chosen = first_ready(sel)
-        if chosen < 0 {
+        if chosen < 0 && deadline < 0 {
             syscall(sys.FUTEX, &sel.word, FUTEX_WAIT, seen, 0, 0, 0)
+        } else if chosen < 0 {
+            // The futex takes the time left, which shrinks as wakeups that
+            // change nothing come and go.
+            let left = deadline - thread.now_ns()
+            if left <= 0 {
+                late = true
+            } else {
+                let d = Timespec { sec: left / 1000000000, nsec: left % 1000000000 }
+                syscall(sys.FUTEX, &sel.word, FUTEX_WAIT, seen, &d, 0, 0)
+            }
         }
     }
     i = 0

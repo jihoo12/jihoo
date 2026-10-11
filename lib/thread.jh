@@ -24,10 +24,14 @@ extern fn pthread_join(id: u64, result: **u8) -> i32
 extern fn sched_yield() -> i32
 extern fn sysconf(name: i32) -> i64
 extern fn nanosleep(duration: *Timespec, rest: *Timespec) -> i32
+extern fn clock_gettime(clock: i32, now: *Timespec) -> i32
 
 // `sysconf`'s name for the number of cores online, in glibc on x86_64 and
 // aarch64.
 const SC_NPROCESSORS_ONLN: i32 = 84
+
+// The clock `now_ns` reads, which only goes forward.
+const CLOCK_MONOTONIC: i32 = 1
 
 // C's `struct timespec`.
 struct Timespec {
@@ -112,4 +116,17 @@ pub fn sleep_ms(ms: i64) {
     // Interrupted by a signal, it says how much is left: sleep that too.
     while nanosleep(&d, &d) != 0 {
     }
+}
+
+// Nanoseconds since some moment in the past, on a clock that only goes
+// forward (not the time of day): subtract two readings to time something.
+pub fn now_ns() -> i64 {
+    let t = Timespec { sec: 0, nsec: 0 }
+    clock_gettime(CLOCK_MONOTONIC, &t)
+    return t.sec * 1000000000 + t.nsec
+}
+
+// `now_ns` in milliseconds.
+pub fn now_ms() -> i64 {
+    return now_ns() / 1000000
 }

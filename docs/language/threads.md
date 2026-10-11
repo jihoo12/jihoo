@@ -179,5 +179,6 @@ The type of the values comes first in each call, as with `alloc`'s `Vec`.
 
 To wait on several channels at once, as hosted programs do with `select`,
 use a `channel.Select`: add receive and send cases to it, then
-`channel.wait(&sel)` gives the number of the case that went ahead
+`channel.wait(&sel)` gives the number of the case that went ahead, and
+`channel.wait_ms(&sel, ms)` gives up after `ms` milliseconds with -1
 ([Select](../reference/standard-library.md#select)).

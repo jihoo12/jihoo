@@ -1,0 +1,59 @@
+#![native]
+// `channel.wait_ms`: a Select that gives up after a while. Each check sets a
+// bit of the exit status, which is 31 if all hold
+// (crates/jihoo-cli/tests/differential.rs). The bounds on time are loose, so
+// that a busy machine passes too.
+import channel
+import thread
+
+// Sends 42 after 100 ms.
+fn late_send(c: channel.Chan(i64)) {
+    thread.sleep_ms(100)
+    channel.send(i64, c, 42)
+}
+
+fn main() -> i64 {
+    let ok = 0
+    match channel.new(i64, 1) {
+        Some(c) => {
+            let x: i64 = 0
+            let sel = channel.select_new()
+            let got = channel.on_recv(i64, &sel, c, &x)
+
+            // Nothing comes: -1 after about 50 ms.
+            let t0 = thread.now_ms()
+            let r = channel.wait_ms(&sel, 50)
+            let took = thread.now_ms() - t0
+            if r == -1 && took >= 50 && took < 5000 { ok += 1 }
+
+            // Zero is `poll`.
+            if channel.wait_ms(&sel, 0) == -1 { ok += 2 }
+
+            // A value before the deadline: its case, long before it.
+            go late_send(c)
+            t0 = thread.now_ms()
+            r = channel.wait_ms(&sel, 10000)
+            took = thread.now_ms() - t0
+            if r == got && x == 42 && took < 5000 { ok += 4 }
+
+            // A heartbeat: time out every 10 ms until the value comes.
+            go late_send(c)
+            let beats = 0
+            r = channel.wait_ms(&sel, 10)
+            while r == -1 {
+                beats += 1
+                r = channel.wait_ms(&sel, 10)
+            }
+            if r == got && beats >= 3 { ok += 8 }
+
+            // No case on: it only sleeps.
+            channel.off(&sel, got)
+            t0 = thread.now_ms()
+            r = channel.wait_ms(&sel, 30)
+            took = thread.now_ms() - t0
+            if r == -1 && took >= 30 { ok += 16 }
+        }
+        None => {}
+    }
+    return ok
+}

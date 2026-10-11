@@ -659,3 +659,15 @@ fn go_starts_native_threads() {
     let src = std::fs::read_to_string(repo_root().join("tests/threads/go.jh")).unwrap();
     assert_eq!(run_compiled("go", &src), Some(15));
 }
+
+/// `channel.wait_ms` gives up on a Select after a while
+/// (`tests/threads/timeout.jh`).
+#[test]
+fn select_times_out() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let src = std::fs::read_to_string(repo_root().join("tests/threads/timeout.jh")).unwrap();
+    assert_eq!(run_compiled("timeout", &src), Some(31));
+}

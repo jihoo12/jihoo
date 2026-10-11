@@ -422,6 +422,7 @@ fn main() -> i64 {
 | `fn cpus() -> i64` | the number of cores online, at least 1 |
 | `fn yield()` | lets other threads run before this one goes on |
 | `fn sleep_ms(ms: i64)` | sleeps for `ms` milliseconds |
+| `fn now_ns() -> i64`, `fn now_ms() -> i64` | the time on a clock that only goes forward (`CLOCK_MONOTONIC`), in nanoseconds or milliseconds: subtract two readings to time something |
 
 - Every thread must be joined once: `spawn` takes a little memory from
   `malloc` for the thread's start, which `join` frees.
@@ -529,6 +530,7 @@ while running {
 | `fn on_send(comptime T: type, sel: *Select, c: Chan(T), src: *T) -> i64` | adds a case that sends `*src` on `c`, read when the case goes ahead, and gives its number |
 | `fn wait(sel: *Select) -> i64` | does the first case that can go ahead, waiting until one can, and gives its number |
 | `fn poll(sel: *Select) -> i64` | the same without waiting: -1 if no case can go ahead, like a `_` arm |
+| `fn wait_ms(sel: *Select, ms: i64) -> i64` | like `wait`, but -1 if no case could go ahead within `ms` milliseconds; each call starts its own clock, as `case <-time.After(d)` does in a Go loop. Zero or less is `poll`; with no case on, it only sleeps |
 | `fn received(sel: *Select) -> bool` | whether the receive that `wait` or `poll` just did got a value (false: its channel was closed and empty, and `*dst` is unchanged) |
 | `fn off(sel: *Select, i: i64)` | leaves case `i` out from now on, as Go programs do by setting a channel to nil |
 | `const MAX_CASES = 16` | the most cases one Select has |
@@ -546,4 +548,17 @@ while running {
   send case on a closed channel.
 - While it waits, a Select links a node per case into its channels and
   sleeps on a futex word of its own, which a channel bumps whenever a value
-  comes or goes or it closes; it then looks at its cases again.
+  comes or goes or it closes; it then looks at its cases again. `wait_ms`
+  gives the futex only the time left until its deadline, on
+  [`thread.now_ns`](#thread)'s clock, so wakeups that change nothing do not
+  make it wait longer.
+
+A timeout in a loop, such as a heartbeat while waiting for work:
+
+```jihoo
+let i = channel.wait_ms(&sel, 1000)
+while i == -1 {
+    libc.printf("still waiting\n")     // once a second
+    i = channel.wait_ms(&sel, 1000)
+}
+```
