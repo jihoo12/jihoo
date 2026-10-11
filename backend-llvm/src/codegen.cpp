@@ -572,6 +572,16 @@ class FnGen {
     return types_.lower(*t.pointee);
   }
 
+  // What the pointer `r` of an atomic points to: an integer, or a pointer when
+  // `pointers`.
+  Type *atomic_pointee(uint32_t r, bool pointers) {
+    Type *ty = pointee(r);
+    const jir::Type &t = *type(r).pointee;
+    if (t.kind != jir::Type::Int && !(pointers && t.kind == jir::Type::Ptr))
+      fail(f_.name, "atomics cannot work on " + t.str());
+    return ty;
+  }
+
   // Integers keep their signedness in JIR; LLVM wants it on each operation.
   bool is_signed(uint32_t r) {
     const jir::Type &t = type(r);
@@ -826,6 +836,47 @@ class FnGen {
         if (types_.lower(type(arg_reg(1))) != pointee(arg_reg(0))) fail(f_.name, "stored value has the wrong type");
         write_mem(arg(0), arg_reg(1));
         return;
+      // Atomics are sequentially consistent and naturally aligned, on integers
+      // and pointers (the arithmetic on integers only).
+      case Op::AtomicLoad: {
+        Type *ty = atomic_pointee(arg_reg(0), true);
+        if (types_.lower(type(inst.dst)) != ty) fail(f_.name, "loaded value has the wrong type");
+        LoadInst *l = b_.CreateAlignedLoad(ty, arg(0), mod_.getDataLayout().getABITypeAlign(ty));
+        l->setAtomic(AtomicOrdering::SequentiallyConsistent);
+        store(inst.dst, l);
+        return;
+      }
+      case Op::AtomicStore: {
+        Type *ty = atomic_pointee(arg_reg(0), true);
+        if (types_.lower(type(arg_reg(1))) != ty) fail(f_.name, "stored value has the wrong type");
+        StoreInst *s = b_.CreateAlignedStore(arg(1), arg(0), mod_.getDataLayout().getABITypeAlign(ty));
+        s->setAtomic(AtomicOrdering::SequentiallyConsistent);
+        return;
+      }
+      case Op::AtomicSwap: case Op::AtomicAdd: case Op::AtomicSub:
+      case Op::AtomicAnd: case Op::AtomicOr: case Op::AtomicXor: {
+        static const AtomicRMWInst::BinOp ops[] = {AtomicRMWInst::Xchg, AtomicRMWInst::Add, AtomicRMWInst::Sub,
+                                                   AtomicRMWInst::And,  AtomicRMWInst::Or,  AtomicRMWInst::Xor};
+        Type *ty = atomic_pointee(arg_reg(0), inst.op == Op::AtomicSwap);
+        if (types_.lower(type(arg_reg(1))) != ty || types_.lower(type(inst.dst)) != ty)
+          fail(f_.name, "atomic operand has the wrong type");
+        Value *old = b_.CreateAtomicRMW(ops[int(inst.op) - int(Op::AtomicSwap)], arg(0), arg(1),
+                                        mod_.getDataLayout().getABITypeAlign(ty),
+                                        AtomicOrdering::SequentiallyConsistent);
+        store(inst.dst, old);
+        return;
+      }
+      case Op::AtomicCas: {
+        Type *ty = atomic_pointee(arg_reg(0), true);
+        if (types_.lower(type(arg_reg(1))) != ty || types_.lower(type(arg_reg(2))) != ty)
+          fail(f_.name, "atomic operand has the wrong type");
+        Value *pair = b_.CreateAtomicCmpXchg(arg(0), arg(1), arg(2), mod_.getDataLayout().getABITypeAlign(ty),
+                                             AtomicOrdering::SequentiallyConsistent,
+                                             AtomicOrdering::SequentiallyConsistent);
+        store(inst.dst, b_.CreateExtractValue(pair, 1));
+        return;
+      }
+      case Op::Fence: b_.CreateFence(AtomicOrdering::SequentiallyConsistent); return;
       case Op::Addr: store(inst.dst, slot(arg_reg(0))); return;
       case Op::FieldPtr: {
         const jir::Type &t = type(arg_reg(0));

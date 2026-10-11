@@ -443,6 +443,28 @@ impl Cx<'_> {
                         let pointee = ty(ptr)?.pointee().ok_or_else(|| format!("{ptr} is not a pointer"))?;
                         expect(value, pointee)
                     }
+                    Inst::AtomicLoad { dst, ptr } => {
+                        compiled("atomic_load")?;
+                        expect(dst, atomic_pointee(ty(ptr)?, true)?)
+                    }
+                    Inst::AtomicStore { ptr, value } => {
+                        compiled("atomic_store")?;
+                        expect(value, atomic_pointee(ty(ptr)?, true)?)
+                    }
+                    Inst::AtomicRmw { dst, op, ptr, value } => {
+                        compiled(op.mnemonic())?;
+                        let t = atomic_pointee(ty(ptr)?, *op == AtomicOp::Swap)?;
+                        expect(value, t)?;
+                        expect(dst, t)
+                    }
+                    Inst::AtomicCas { dst, ptr, expected, new } => {
+                        compiled("atomic_cas")?;
+                        let t = atomic_pointee(ty(ptr)?, true)?;
+                        expect(expected, t)?;
+                        expect(new, t)?;
+                        expect(dst, &Type::Bool)
+                    }
+                    Inst::Fence => compiled("fence"),
                     Inst::Addr { dst, src } => {
                         compiled("addr")?;
                         expect(dst, &Type::ptr(ty(src)?.clone()))
@@ -615,5 +637,15 @@ impl Cx<'_> {
             }
         }
         Ok(())
+    }
+}
+
+/// What the pointer `ptr` of an atomic points to, which must be an integer, or
+/// a pointer when `pointers`.
+fn atomic_pointee(ptr: &Type, pointers: bool) -> Result<&Type, String> {
+    match ptr.pointee() {
+        Some(t) if t.is_atomic(pointers) => Ok(t),
+        Some(t) => Err(format!("atomics cannot work on {}", t.jir())),
+        None => Err(format!("atomics need a pointer, found {}", ptr.jir())),
     }
 }

@@ -23,7 +23,7 @@ pub use verify::verify;
 /// module instead of compiling it with other rules. Bump it whenever the
 /// format or the meaning of anything in it changes (see "Versions" in
 /// `docs/jir.md`); the `version` tests check that both sides and the spec agree.
-pub const JIR_VERSION: u32 = 6;
+pub const JIR_VERSION: u32 = 7;
 
 /// Language profile, selected with `#![native]` or `#![freestanding]` at the
 /// top of a source file.
@@ -271,6 +271,36 @@ impl BinOp {
     ];
 }
 
+/// What an atomic read-modify-write (`atomic_add` and so on) does to the
+/// value in memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicOp {
+    /// Replaces it, also for pointers.
+    Swap,
+    /// The integer operations: wrap around like `+` and `-` do.
+    Add,
+    Sub,
+    And,
+    Or,
+    Xor,
+}
+
+impl AtomicOp {
+    pub const ALL: [AtomicOp; 6] = [AtomicOp::Swap, AtomicOp::Add, AtomicOp::Sub, AtomicOp::And, AtomicOp::Or, AtomicOp::Xor];
+
+    /// The JIR opcode, which is also the builtin's name.
+    pub fn mnemonic(self) -> &'static str {
+        match self {
+            AtomicOp::Swap => "atomic_swap",
+            AtomicOp::Add => "atomic_add",
+            AtomicOp::Sub => "atomic_sub",
+            AtomicOp::And => "atomic_and",
+            AtomicOp::Or => "atomic_or",
+            AtomicOp::Xor => "atomic_xor",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
     Neg,
@@ -346,6 +376,20 @@ pub enum Inst {
     Load { dst: Reg, ptr: Reg },
     /// Native and freestanding only: `*ptr = value`.
     Store { ptr: Reg, value: Reg },
+    /// Native and freestanding only: `*ptr`, read atomically. The pointee is
+    /// an integer or a pointer. Atomics are sequentially consistent.
+    AtomicLoad { dst: Reg, ptr: Reg },
+    /// Native and freestanding only: `*ptr = value`, written atomically.
+    AtomicStore { ptr: Reg, value: Reg },
+    /// Native and freestanding only: atomically replaces `*ptr` by `value`
+    /// (`Swap`) or by `*ptr op value`, and gives the old value. The pointee is
+    /// an integer, or for `Swap` also a pointer.
+    AtomicRmw { dst: Reg, op: AtomicOp, ptr: Reg, value: Reg },
+    /// Native and freestanding only: atomically, if `*ptr == expected` then
+    /// `*ptr = new`; `dst` (a `bool`) says whether it did.
+    AtomicCas { dst: Reg, ptr: Reg, expected: Reg, new: Reg },
+    /// Native and freestanding only: a full memory barrier.
+    Fence,
     /// Native and freestanding only: the address of register `src`.
     Addr { dst: Reg, src: Reg },
     /// Native and freestanding only: the address of field `index` of the struct `ptr` points to.
@@ -548,6 +592,7 @@ impl Inst {
             | Unique { dst, prefix: src }
             | Stringify { dst, code: src }
             | Load { dst, ptr: src }
+            | AtomicLoad { dst, ptr: src }
             | FieldPtr { dst, ptr: src, .. }
             | Splat { dst, value: src } => vec![dst, src],
             Binary { dst, lhs, rhs, .. }
@@ -555,10 +600,12 @@ impl Inst {
             | StrByte { dst, src: lhs, index: rhs }
             | Repeat { dst, value: lhs, count: rhs }
             | SetField { dst, src: lhs, value: rhs, .. }
+            | AtomicRmw { dst, ptr: lhs, value: rhs, .. }
             | ElemPtr { dst, ptr: lhs, index: rhs } => vec![dst, lhs, rhs],
+            AtomicCas { dst, ptr, expected, new } => vec![dst, ptr, expected, new],
             SetElem { dst, src, index, value } => vec![dst, src, index, value],
             Slice { dst, src, lo, hi } => vec![dst, src, lo, hi],
-            Store { ptr, value } | Send { chan: ptr, value } => vec![ptr, value],
+            Store { ptr, value } | AtomicStore { ptr, value } | Send { chan: ptr, value } => vec![ptr, value],
             Spawn { callee, args } => std::iter::once(callee).chain(args).collect(),
             GetPath { dst, src, path } | CellGet { dst, cell: src, path } => {
                 [dst, src].into_iter().chain(path_regs(path)).collect()
@@ -575,7 +622,7 @@ impl Inst {
                 }))
                 .collect(),
             Print { src } => vec![src],
-            Trap => vec![],
+            Trap | Fence => vec![],
             Call { dst, args, .. }
             | Struct { dst, fields: args, .. }
             | Variant { dst, fields: args, .. }

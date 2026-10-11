@@ -125,6 +125,11 @@ pub(crate) fn is_type_param(p: &Param) -> bool {
 fn expr_to_type(e: &Expr) -> Result<TypeExpr, Error> {
     let kind = match &e.kind {
         ExprKind::Var(n) => TypeExprKind::Named(n.clone()),
+        // `thread.Thread`, a type of another module, parses as a field.
+        ExprKind::Field(base, name) if matches!(&base.kind, ExprKind::Var(_)) => {
+            let ExprKind::Var(module) = &base.kind else { unreachable!() };
+            TypeExprKind::Named(format!("{module}.{name}"))
+        }
         ExprKind::Deref(inner) => TypeExprKind::Ptr(Box::new(expr_to_type(inner)?)),
         ExprKind::NewRef(inner) => TypeExprKind::Ref(Box::new(expr_to_type(inner)?)),
         ExprKind::ArrayRepeat(elem, n) => TypeExprKind::Array(Box::new(expr_to_type(elem)?), n.clone()),

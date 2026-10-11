@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 6)
+# JIR — jihoo IR text format (version 7)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -36,6 +36,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 4 | float operations (`sqrt`, `floor`, `ceil`, `trunc`, `round`, `abs`, `copysign`) and `bitcast`; `print` in native modules; structs to and from C by value, and `export`; `select` cases separated by `\|` |
 | 5 | lists (`[T]`) with `len`, `slice`, `repeat`, `push`, `pop`, and `array`, `elem`, `setelem` and paths on them; on `str`: `len`, `strbyte`, `slice`, `frombytes`, ordering; `readline` |
 | 6 | `trap` |
+| 7 | atomics: `atomic_load`, `atomic_store`, `atomic_swap`, `atomic_add`, `atomic_sub`, `atomic_and`, `atomic_or`, `atomic_xor`, `atomic_cas`, and `fence` |
 
 ## Example
 
@@ -88,7 +89,7 @@ bb3:
 ## Module
 
 ```
-jir 6                                ; format version, must come first
+jir 7                                ; format version, must come first
 profile hosted|native|freestanding   ; language profile
 target x86_64|aarch64                ; the machine, 64-bit Linux
 struct ...                           ; zero or more structs
@@ -376,6 +377,25 @@ the list is changed in place unless something else refers to it, so a loop of
 | `%d = addr %r`                  | `T`                   | `*T`   | address of register `%r` (valid until the function returns) |
 | `%d = fieldptr %p, N`           | `*$S`                 | `*F` (F = type of field N) | address of a field |
 | `%d = elemptr %p, %i`           | `*[N x T], i64`       | `*T`   | address of an element; bounds-checked |
+
+### Atomics (native and freestanding only)
+
+Atomics read and change memory that threads share, each as one indivisible
+step. All of them are sequentially consistent, and the memory must be aligned
+to its type (as everything jihoo lays out is). `T` is an integer, or for the
+rows that say so also a pointer `*U`.
+
+| syntax                          | operands              | result | meaning |
+|---------------------------------|-----------------------|--------|---------|
+| `%d = atomic_load %p`           | `*T` (int or pointer) | `T`    | read memory |
+| `atomic_store %p, %v`           | `*T, T` (int or pointer) |     | write memory |
+| `%d = atomic_swap %p, %v`       | `*T, T` (int or pointer) | `T` | write `%v`; the result is the old value |
+| `%d = atomic_add\|sub\|and\|or\|xor %p, %v` | `*T, T` (int) | `T` | replace the value `x` by `x op %v` (wrapping, as `add` and `sub` do); the result is the old value |
+| `%d = atomic_cas %p, %e, %n`    | `*T, T, T` (int or pointer) | `bool` | if the value is `%e`, replace it by `%n`; the result says whether it did |
+| `fence`                         |                       |        | a full memory barrier; does nothing on the VM, which has one thread |
+
+The VM has no pointers, so the atomics other than `fence` are runtime errors
+there, as `load` is.
 
 ### Builtins
 

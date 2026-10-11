@@ -117,6 +117,11 @@ impl Display for Inst {
             }
             Inst::Load { dst, ptr } => write!(f, "{dst} = load {ptr}"),
             Inst::Store { ptr, value } => write!(f, "store {ptr}, {value}"),
+            Inst::AtomicLoad { dst, ptr } => write!(f, "{dst} = atomic_load {ptr}"),
+            Inst::AtomicStore { ptr, value } => write!(f, "atomic_store {ptr}, {value}"),
+            Inst::AtomicRmw { dst, op, ptr, value } => write!(f, "{dst} = {} {ptr}, {value}", op.mnemonic()),
+            Inst::AtomicCas { dst, ptr, expected, new } => write!(f, "{dst} = atomic_cas {ptr}, {expected}, {new}"),
+            Inst::Fence => write!(f, "fence"),
             Inst::Addr { dst, src } => write!(f, "{dst} = addr {src}"),
             Inst::FieldPtr { dst, ptr, index } => write!(f, "{dst} = fieldptr {ptr}, {index}"),
             Inst::Variant { dst, index, fields } => write!(f, "{dst} = variant {index}({})", list(fields)),

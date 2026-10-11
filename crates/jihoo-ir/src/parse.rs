@@ -448,6 +448,11 @@ fn assign(l: &mut Line, dst: Reg) -> Result<Inst> {
             Inst::SetField { dst, src, index, value: l.reg()? }
         }
         "load" => Inst::Load { dst, ptr: l.reg()? },
+        "atomic_load" => Inst::AtomicLoad { dst, ptr: l.reg()? },
+        "atomic_cas" => {
+            let (ptr, expected, new) = l.three()?;
+            Inst::AtomicCas { dst, ptr, expected, new }
+        }
         "addr" => Inst::Addr { dst, src: l.reg()? },
         "variant" => {
             let index = l.index()?;
@@ -590,6 +595,9 @@ fn assign(l: &mut Line, dst: Reg) -> Result<Inst> {
             } else if let Some(op) = binop(w) {
                 let (lhs, rhs) = l.two()?;
                 Inst::Binary { dst, op, lhs, rhs }
+            } else if let Some(op) = AtomicOp::ALL.into_iter().find(|op| op.mnemonic() == w) {
+                let (ptr, value) = l.two()?;
+                Inst::AtomicRmw { dst, op, ptr, value }
             } else {
                 return l.err(format!("unknown opcode `{w}`"));
             }
@@ -609,6 +617,10 @@ fn statement(l: &mut Line) -> Result<Stmt> {
         "store" => {
             let (ptr, value) = l.two()?;
             Stmt::Inst(Inst::Store { ptr, value })
+        }
+        "atomic_store" => {
+            let (ptr, value) = l.two()?;
+            Stmt::Inst(Inst::AtomicStore { ptr, value })
         }
         "send" => {
             let (chan, value) = l.two()?;
@@ -634,6 +646,7 @@ fn statement(l: &mut Line) -> Result<Stmt> {
         }
         "print" => Stmt::Inst(Inst::Print { src: l.reg()? }),
         "trap" => Stmt::Inst(Inst::Trap),
+        "fence" => Stmt::Inst(Inst::Fence),
         "jmp" => Stmt::Term(Terminator::Jump(l.block()?)),
         "br" => {
             let cond = l.reg()?;

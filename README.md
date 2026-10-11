@@ -100,7 +100,7 @@ nix build
 | `crates/jihoo-vm`      | Rust     | register VM and GC heap |
 | `crates/jihoo-cli`     | Rust     | the `jihoo` command |
 | `backend-llvm`         | C++      | `jihoo-llc`: JIR text → LLVM → object file |
-| `lib`                  | jihoo    | the standard library (`prelude`, `strings`, `lists`, `libc`, `alloc`, `io`, `coro`) |
+| `lib`                  | jihoo    | the standard library (`prelude`, `strings`, `lists`, `libc`, `alloc`, `io`, `coro`, `sync`, `thread`) |
 | `docs`                 | Markdown | the documentation, one file per page of the website |
 | `site`                 | Astro    | the website ([site/README.md](site/README.md)) |
 | `tests/diff`           | jihoo    | programs that must behave the same on the VM and natively |
@@ -121,10 +121,11 @@ the VM.
 - **native and freestanding:** pointers, `syscall` and inline asm, for x86_64
   and aarch64 Linux (`--target` builds for either, and modules can have one
   file per target); closures passed to `comptime` parameters; functions C can
-  call (`export fn`); the `alloc`, `io` and `sys` libraries.
+  call (`export fn`); atomics; the `alloc`, `io`, `sys` and `sync` (futex
+  locks) libraries.
 - **native:** `print`; C functions through `extern fn` and the `libc` module,
-  structs passed to C by value, C files and libraries linked in; the `coro`
-  library.
+  structs passed to C by value, C files and libraries linked in; threads on
+  every core (the `thread` library); the `coro` library.
 
 See the [examples](examples) and the [roadmap](docs/internals/roadmap.md).
 

@@ -1,0 +1,115 @@
+#![native]
+// Threads for native programs: functions that run at the same time, on all
+// of the machine's cores, with the C library's POSIX threads.
+//
+//   import thread
+//   fn work(arg: *u8) -> i64 {
+//       return *(arg as *i64) * 2
+//   }
+//   let x = 21
+//   match thread.spawn(work, &x as *u8) {
+//       Some(t) => print(thread.join(&t))     // 42
+//       None => print("no thread")
+//   }
+//
+// Threads share memory, so two of them must not use the same memory at the
+// same time unless all of them only read it. Coordinate them with the
+// atomic builtins (`atomic_add` and the others) or the `sync` library's
+// locks.
+
+import libc
+
+extern fn pthread_create(id: *u64, attr: *u8, start: fn(*u8) -> *u8, arg: *u8) -> i32
+extern fn pthread_join(id: u64, result: **u8) -> i32
+extern fn sched_yield() -> i32
+extern fn sysconf(name: i32) -> i64
+extern fn nanosleep(duration: *Timespec, rest: *Timespec) -> i32
+
+// `sysconf`'s name for the number of cores online, in glibc on x86_64 and
+// aarch64.
+const SC_NPROCESSORS_ONLN: i32 = 84
+
+// C's `struct timespec`.
+struct Timespec {
+    sec: i64
+    nsec: i64
+}
+
+// What a new thread runs and where it leaves the result, from `malloc`.
+struct Start {
+    body: fn(*u8) -> i64
+    arg: *u8
+    result: i64
+}
+
+// A running thread, until `join` waits for it.
+pub struct Thread {
+    id: u64
+    start: *Start
+}
+
+// Every thread starts here, as C wants its start function.
+fn run(p: *u8) -> *u8 {
+    let s = p as *Start
+    let body = s.body
+    s.result = body(s.arg)
+    return 0 as *u8
+}
+
+// Starts a thread that calls `body(arg)`, or gives None if the system has no
+// thread or memory to spare. Each thread must be joined once, which frees
+// what it holds.
+pub fn spawn(body: fn(*u8) -> i64, arg: *u8) -> Option(Thread) {
+    let s = libc.malloc(size_of(Start) as u64) as *Start
+    if s == 0 as *Start {
+        return Option.None
+    }
+    *s = Start { body: body, arg: arg, result: 0 }
+    let id: u64 = 0
+    if pthread_create(&id, 0 as *u8, run, s as *u8) != 0 {
+        libc.free(s as *u8)
+        return Option.None
+    }
+    return Option.Some(Thread { id: id, start: s })
+}
+
+// Waits for `t` to finish and gives what its function returned. A thread
+// is joined once: joining the same `t` again stops the program. A copy of a
+// Thread does not know that the other was joined, so join only one.
+pub fn join(t: *Thread) -> i64 {
+    if t.start == 0 as *Start {
+        trap()
+    }
+    if pthread_join(t.id, 0 as **u8) != 0 {
+        trap()
+    }
+    let result = t.start.result
+    libc.free(t.start as *u8)
+    t.start = 0 as *Start
+    return result
+}
+
+// The number of cores online, at least 1.
+pub fn cpus() -> i64 {
+    let n = sysconf(SC_NPROCESSORS_ONLN)
+    if n < 1 {
+        return 1
+    }
+    return n
+}
+
+// Lets other threads run before this one goes on.
+pub fn yield() {
+    sched_yield()
+}
+
+// Sleeps for `ms` milliseconds; nothing for zero or less.
+pub fn sleep_ms(ms: i64) {
+    if ms <= 0 {
+        return
+    }
+    let d = Timespec { sec: ms / 1000, nsec: ms % 1000 * 1000000 }
+    // Interrupted by a signal, it says how much is left: sleep that too.
+    while nanosleep(&d, &d) != 0 {
+    }
+}

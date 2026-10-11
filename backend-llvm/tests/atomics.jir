@@ -1,0 +1,83 @@
+; Atomics on integers of two widths and on pointers: the old value comes
+; back, arithmetic wraps, and a failed compare-and-swap changes nothing. Each
+; check sets one bit of the result.
+; expect: exit 127
+jir 7
+profile freestanding
+
+fn @bit(bool, i64) -> i64 {
+  regs bool i64 i64 i64
+bb0:
+  %2 = cast %0
+  %3 = shl %2, %1
+  ret %3
+}
+
+fn @_start() -> i64 {
+  regs u8 *u8 u8 u8 u8 bool u8 u8 bool u8 u8 bool bool bool u8 u8 bool u8 bool i64 *i64 i64 i64 i64 i64 i64 i64 i64 bool i64 *i64 *i64 **i64 *i64 bool *i64 bool bool i64 bool bool bool i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64 i64
+bb0:
+  %0 = const 255
+  %1 = addr %0
+  %2 = const 1
+  %3 = atomic_add %1, %2
+  %4 = const 255
+  %5 = eq %3, %4
+  %6 = atomic_load %1
+  %7 = const 0
+  %8 = eq %6, %7
+  %9 = const 5
+  %10 = const 9
+  %11 = atomic_cas %1, %9, %10
+  %12 = not %11
+  %13 = atomic_cas %1, %7, %10
+  %14 = const 10
+  %15 = atomic_sub %1, %14
+  %16 = eq %15, %10
+  %17 = atomic_load %1
+  %18 = eq %17, %4
+  fence
+  %19 = const 12
+  %20 = addr %19
+  %21 = const 3
+  %22 = atomic_or %20, %21
+  %23 = const 6
+  %24 = atomic_and %20, %23
+  %25 = const 5
+  %26 = atomic_xor %20, %25
+  %27 = atomic_load %20
+  %28 = eq %27, %21
+  %29 = const 0
+  %30 = addr %29
+  %31 = copy %20
+  %32 = addr %31
+  %33 = atomic_swap %32, %30
+  %34 = eq %33, %20
+  %35 = atomic_load %32
+  %36 = eq %35, %30
+  %37 = and %34, %36
+  %38 = const 15
+  %39 = eq %24, %38
+  %40 = and %28, %39
+  %41 = and %16, %18
+  %42 = const 0
+  %43 = const 1
+  %44 = const 2
+  %45 = const 3
+  %46 = const 4
+  %47 = const 5
+  %48 = const 6
+  %49 = call @bit(%5, %42)
+  %50 = call @bit(%8, %43)
+  %51 = call @bit(%12, %44)
+  %52 = call @bit(%13, %45)
+  %53 = call @bit(%41, %46)
+  %54 = call @bit(%40, %47)
+  %55 = call @bit(%37, %48)
+  %56 = or %49, %50
+  %57 = or %56, %51
+  %58 = or %57, %52
+  %59 = or %58, %53
+  %60 = or %59, %54
+  %61 = or %60, %55
+  ret %61
+}

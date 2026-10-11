@@ -49,6 +49,7 @@ same on GitHub.
 - [Pointers](language/pointers.md)
 - [Calling C](language/calling-c.md)
 - [Inline assembly](language/inline-assembly.md)
+- [Threads and atomics](language/threads.md)
 
 ## Reference
 

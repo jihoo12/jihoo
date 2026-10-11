@@ -448,9 +448,9 @@ fn trap_fails_on_both_backends() {
     fails_on_both_backends("trap", body, "trap: the program called `trap()`");
 }
 
-/// Builds the freestanding program `src` and runs it: its exit status, or
+/// Builds the native or freestanding program `src` and runs it: its exit status, or
 /// `None` if it trapped.
-fn run_freestanding(name: &str, src: &str) -> Option<i32> {
+fn run_compiled(name: &str, src: &str) -> Option<i32> {
     let work = std::env::temp_dir().join(format!("jihoo-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&work).unwrap();
     let (file, bin) = (work.join(format!("{name}.jh")), work.join(name));
@@ -486,7 +486,7 @@ fn alloc_traps_on_misuse() {
         ("negative-count", "  alloc.alloc_array(i64, &a, -1)\n  return 0"),
     ];
     for (name, body) in misuses {
-        assert_eq!(run_freestanding(name, &program(body)), None, "{name} should trap");
+        assert_eq!(run_compiled(name, &program(body)), None, "{name} should trap");
     }
 
     // Running out is not misuse: null or false, and nothing changes. Each
@@ -506,5 +506,85 @@ fn alloc_traps_on_misuse() {
         let w = alloc.vec_new(u8, &none)\n\
         if !alloc.push(u8, &w, 1) && alloc.vec_len(u8, &w) == 0 { ok += 64 }\n\
         return ok";
-    assert_eq!(run_freestanding("alloc-limits", &program(body)), Some(127));
+    assert_eq!(run_compiled("alloc-limits", &program(body)), Some(127));
+}
+
+/// `lib/thread.jh` runs threads on POSIX threads, and `lib/sync.jh` makes
+/// them take turns.
+#[test]
+fn thread_example_runs_natively() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let bin = std::env::temp_dir().join(format!("jihoo-threads-{}", std::process::id()));
+    let src = repo_root().join("examples/threads.jh");
+    assert_eq!(exit_code(Command::new(JIHOO).arg("build").arg(&src).arg("-o").arg(&bin)), 0);
+    let out = Command::new(&bin).output().unwrap();
+    std::fs::remove_file(&bin).unwrap();
+    let expected = "1000000 steps, total 1999998\nthe workers' own sums add up to 1999998\nreceived 55 through the mailbox\n";
+    assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+/// Threads that fight over a Mutex, a spin lock made of atomics, and a Cond
+/// lose no updates; misusing the locks or threads traps.
+#[test]
+fn sync_holds_under_contention() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let src = "#![native]\nimport sync\nimport thread\n\
+        struct S {\n  m: sync.Mutex\n  locked: i64\n  spun: i64\n  flag: u8\n  counted: i64\n  c: sync.Cond\n  turn: i64\n  g: sync.Group\n}\n\
+        fn hammer(arg: *u8) -> i64 {\n  let s = arg as *S\n  let i = 0\n  while i < 20000 {\n\
+            sync.lock(&s.m)\n    s.locked += 1\n    sync.unlock(&s.m)\n\
+            while atomic_swap(&s.flag, 1) != 0 { thread.yield() }\n    s.spun += 1\n    atomic_store(&s.flag, 0)\n\
+            atomic_add(&s.counted, 1)\n    i += 1\n  }\n  sync.group_done(&s.g)\n  return i\n}\n\
+        // Two players take turns, each waiting for its parity.\n\
+        fn play(s: *S, parity: i64) {\n  let k = 0\n  while k < 2000 {\n    sync.lock(&s.m)\n\
+            while s.turn % 2 != parity { sync.wait(&s.c, &s.m) }\n\
+            s.turn += 1\n    sync.signal(&s.c)\n    sync.unlock(&s.m)\n    k += 1\n  }\n}\n\
+        fn odd(arg: *u8) -> i64 {\n  play(arg as *S, 1)\n  return 0\n}\n\
+        fn main() -> i64 {\n  let s = S { m: sync.mutex_new(), locked: 0, spun: 0, flag: 0, counted: 0, c: sync.cond_new(), turn: 0, g: sync.group_new() }\n\
+          let ts: [Option(thread.Thread); 6] = [Option.None; 6]\n  sync.group_add(&s.g, 6)\n\
+          let i = 0\n  while i < 6 {\n    ts[i] = thread.spawn(hammer, &s as *u8)\n    i += 1\n  }\n\
+          sync.group_wait(&s.g)\n  let joined = 0\n  i = 0\n  while i < 6 {\n\
+            match ts[i] {\n      Some(t) => joined += thread.join(&t)\n      None => return 1\n    }\n    i += 1\n  }\n\
+          let o = thread.spawn(odd, &s as *u8)\n  play(&s, 0)\n\
+          match o {\n    Some(t) => thread.join(&t)\n    None => return 1\n  }\n\
+          let ok = 0\n  if s.locked == 120000 { ok += 1 }\n  if s.spun == 120000 { ok += 2 }\n\
+          if atomic_load(&s.counted) == 120000 { ok += 4 }\n  if joined == 120000 { ok += 8 }\n\
+          if s.turn == 4000 { ok += 16 }\n  if sync.try_lock(&s.m) { ok += 32 }\n\
+          if !sync.try_lock(&s.m) { ok += 64 }\n  return ok\n}\n";
+    assert_eq!(run_compiled("sync-contention", src), Some(127));
+
+    let program = |body: &str| format!("#![native]\nimport sync\nimport thread\nfn id(x: *u8) -> i64 {{ return 0 }}\nfn main() -> i64 {{\n{body}\n  return 0\n}}\n");
+    let misuses = [
+        ("unlock-unlocked", "  let m = sync.mutex_new()\n  sync.unlock(&m)"),
+        ("unlock-twice", "  let m = sync.mutex_new()\n  sync.lock(&m)\n  sync.unlock(&m)\n  sync.unlock(&m)"),
+        ("group-below-zero", "  let g = sync.group_new()\n  sync.group_add(&g, 1)\n  sync.group_done(&g)\n  sync.group_done(&g)"),
+        (
+            "join-twice",
+            "  match thread.spawn(id, 0 as *u8) {\n    Some(t) => {\n      thread.join(&t)\n      thread.join(&t)\n    }\n    None => {}\n  }",
+        ),
+    ];
+    for (name, body) in misuses {
+        assert_eq!(run_compiled(name, &program(body)), None, "{name} should trap");
+    }
+}
+
+/// `lib/sync.jh` needs no libc: freestanding programs can use its locks.
+#[test]
+fn sync_works_freestanding() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let src = "#![freestanding]\nimport sync\nfn _start() -> i64 {\n  let m = sync.mutex_new()\n  let ok = 0\n\
+        if sync.try_lock(&m) { ok += 1 }\n  if !sync.try_lock(&m) { ok += 2 }\n  sync.unlock(&m)\n\
+        sync.lock(&m)\n  if !sync.try_lock(&m) { ok += 4 }\n  sync.unlock(&m)\n\
+        let g = sync.group_new()\n  sync.group_add(&g, 2)\n  sync.group_done(&g)\n  sync.group_done(&g)\n  sync.group_wait(&g)\n  ok += 8\n\
+        let c = sync.cond_new()\n  sync.signal(&c)\n  sync.broadcast(&c)\n  ok += 16\n  return ok\n}\n";
+    assert_eq!(run_compiled("sync-freestanding", src), Some(31));
 }

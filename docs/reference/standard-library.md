@@ -14,12 +14,14 @@ One of them, the prelude, needs no import.
 | [`alloc`](#alloc) | native, freestanding | an arena allocator over `mmap`, and a checked `Vec(T)` |
 | [`io`](#io) | native, freestanding | output straight to file descriptors |
 | [`coro`](#coro) | native | stackful coroutines |
+| [`sync`](#sync) | native, freestanding | locks for threads: `Mutex`, `Cond`, `Group` |
+| [`thread`](#thread) | native | threads on all cores, with POSIX threads |
 
 `strings` and `lists` work on `str` and lists, which only hosted programs have.
-`sys`, `alloc` and `io` are marked `#![freestanding]`: they use neither GC nor
-libc, only `syscall`, so native programs can import them too. `coro` is marked
-`#![native]`: it uses the C library to switch stacks. All of them work on both
-targets, x86_64 and aarch64 Linux.
+`sys`, `alloc`, `io` and `sync` are marked `#![freestanding]`: they use neither
+GC nor libc, only `syscall`, so native programs can import them too. `coro` and
+`thread` are marked `#![native]`: they use the C library to switch stacks and
+start threads. All of them work on both targets, x86_64 and aarch64 Linux.
 
 ## prelude
 
@@ -192,6 +194,7 @@ fn _start() -> i64 {
 | `MMAP` | 9 | 222 |
 | `MUNMAP` | 11 | 215 |
 | `EXIT` | 60 | 93 |
+| `FUTEX` | 202 | 98 |
 
 ## alloc
 
@@ -330,3 +333,95 @@ fn main() -> i64 {
   from the fields at its start, which are at the same offsets on both.
 - `makecontext` and `swapcontext` are in glibc but not in every C library
   (musl has neither).
+
+## sync
+
+Locks for threads that share memory (`examples/threads.jh`), built on the
+[atomic builtins](../language/threads.md#atomics) and the Linux kernel's
+futexes: a thread that has to wait sleeps in the kernel instead of spinning,
+and a lock nobody waits for is taken and released without a system call. The
+module uses no libc, so freestanding programs can import it as well as native
+ones; native programs start threads with [`thread`](#thread).
+
+```jihoo
+#![native]
+import sync
+
+struct Account {
+    lock: sync.Mutex
+    balance: i64
+}
+
+fn deposit(a: *Account, n: i64) {
+    sync.lock(&a.lock)
+    a.balance = a.balance + n
+    sync.unlock(&a.lock)
+}
+```
+
+| item | description |
+|------|-------------|
+| `struct Mutex` | a lock that one thread holds at a time; its fields are private |
+| `fn mutex_new() -> Mutex` | a new, unlocked Mutex |
+| `fn lock(m: *Mutex)` | takes the lock, waiting while another thread holds it; a thread that takes a lock it holds already waits forever |
+| `fn try_lock(m: *Mutex) -> bool` | takes the lock if it is free, and says whether it did |
+| `fn unlock(m: *Mutex)` | releases the lock, waking a thread that waits for it; the program stops if the Mutex is not locked |
+| `struct Cond` | a condition variable; its fields are private |
+| `fn cond_new() -> Cond` | a new Cond |
+| `fn wait(c: *Cond, m: *Mutex)` | releases `m` (which the thread holds), sleeps until a `signal` or `broadcast`, and takes `m` again; it can also return without one, so wait in a loop that checks the condition |
+| `fn signal(c: *Cond)` | wakes one thread waiting on `c` |
+| `fn broadcast(c: *Cond)` | wakes every thread waiting on `c` |
+| `struct Group` | a count of unfinished work, like Go's `sync.WaitGroup`; its fields are private |
+| `fn group_new() -> Group` | a new Group with a count of zero |
+| `fn group_add(g: *Group, n: i64)` | adds `n` (which may be negative) to the count; at zero, `group_wait` returns. The program stops if the count leaves 0 to 2^31 - 1 |
+| `fn group_done(g: *Group)` | `group_add(g, -1)`: one piece of work is finished |
+| `fn group_wait(g: *Group)` | waits until the count is zero |
+
+- A Mutex, Cond or Group is shared by pointer and must stay where it is while
+  threads use it: a copy is an unrelated second one.
+- The Mutex is Ulrich Drepper's from "Futexes Are Tricky": its state is 0
+  (free), 1 (held) or 2 (held, and a thread may be sleeping on it), and
+  `unlock` makes a `futex` call only in state 2. A Cond is a sequence number
+  that every signal changes, so a waiter that has released the Mutex does not
+  miss a signal. All futex calls are private to the process.
+- A Mutex is not fair: a thread that unlocks and locks again at once may get
+  the lock again before one that was waiting.
+
+## thread
+
+Threads for native programs, on the C library's POSIX threads: functions that
+run at the same time, on every core of the machine. Coordinate them with the
+atomics or [`sync`](#sync) ([Threads and atomics](../language/threads.md)).
+
+```jihoo
+#![native]
+import thread
+
+fn double(arg: *u8) -> i64 {
+    return *(arg as *i64) * 2
+}
+
+fn main() -> i64 {
+    let x = 21
+    match thread.spawn(double, &x as *u8) {
+        Some(t) => return thread.join(&t)     // exit status 42
+        None => return 1
+    }
+}
+```
+
+| item | description |
+|------|-------------|
+| `struct Thread` | a started thread; its fields are private |
+| `fn spawn(body: fn(*u8) -> i64, arg: *u8) -> Option(Thread)` | starts a thread that calls `body(arg)`; `None` if the system has no thread or memory to spare |
+| `fn join(t: *Thread) -> i64` | waits for `t` to finish and gives what `body` returned; joining the same `Thread` twice stops the program (a copy of one does not know the other was joined, so join only one) |
+| `fn cpus() -> i64` | the number of cores online, at least 1 |
+| `fn yield()` | lets other threads run before this one goes on |
+| `fn sleep_ms(ms: i64)` | sleeps for `ms` milliseconds |
+
+- Every thread must be joined once: `spawn` takes a little memory from
+  `malloc` for the thread's start, which `join` frees.
+- What `arg` points to must outlive the thread, for instance by joining the
+  thread before the function holding it returns.
+- A thread that traps stops the whole program, as it would in C.
+- `main` returning ends the program, even while threads are still running.

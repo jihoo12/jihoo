@@ -44,6 +44,11 @@
 22. `trap()` in every profile (JIR version 6), and a checked `alloc`: bounds
     checks on `Vec`, traps on misuse, overflow-safe sizes, private fields,
     `arena_free`.
+23. Threads and atomics (JIR version 7): `atomic_load`, `atomic_store`,
+    `atomic_swap`, `atomic_add` and the other read-modify-writes,
+    `atomic_cas` and `fence`, sequentially consistent; `lib/sync.jh`, futex
+    locks (`Mutex`, `Cond`, `Group`) for native and freestanding code;
+    `lib/thread.jh`, POSIX threads for native code.
 
 ## Next
 
@@ -51,6 +56,10 @@
   x86_64 would need an exact software version.
 - **Native code:** structs by value through function values handed to C
   (callbacks take scalars only); `print` in freestanding programs.
+- **Concurrency:** weaker memory orders (acquire/release) for code that needs
+  the speed; threads in freestanding programs, over `clone`; `go` and
+  channels in native programs, on threads; tasks on more than one core in
+  the VM, which needs a GC that threads can share.
 - **Hosted library:** a map keyed by `str`; files; parsing floats; `for`
   loops over lists and ranges, so that library code needs fewer `while` loops.
 

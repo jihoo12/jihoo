@@ -87,8 +87,15 @@ its own (`alloc.push` is one).
 |---------|--------|-------------|
 | `syscall(n, args...)` | `i64` | the raw Linux system call `n` with up to six integer or pointer arguments ([Inline assembly](../language/inline-assembly.md#syscall)) |
 | `asm(template..., operands...)` | the output type, or `unit` | inline assembly ([Inline assembly](../language/inline-assembly.md#asm)) |
+| `atomic_load(p)`, `atomic_store(p, v)` | `T`, `unit` | read or write `*p` (`p: *T`) atomically ([Threads and atomics](../language/threads.md#atomics)) |
+| `atomic_swap(p, v)`, `atomic_add(p, v)`, `atomic_sub(p, v)`, `atomic_and(p, v)`, `atomic_or(p, v)`, `atomic_xor(p, v)` | `T` | replace `*p` atomically by `v` or by `*p op v`, and give the old value |
+| `atomic_cas(p, old, new)` | `bool` | if `*p` is `old`, write `new`, atomically; says whether it did |
+| `fence()` | `unit` | a full memory barrier |
 
-Neither can run at compile time.
+The atomics work on integers, and all but the arithmetic also on pointers;
+they are sequentially consistent. A module may take their names, as it may
+`sqrt`. None of these can run at compile time, except `fence`, which does
+nothing there.
 
 ## Macros only
 

@@ -13,6 +13,7 @@
 //! remaining items are still checked.
 
 mod asm;
+mod atomics;
 mod closures;
 mod comptime;
 mod enums;
@@ -322,10 +323,12 @@ fn is_builtin(name: &str) -> bool {
 }
 
 /// Builtins whose names a module may take: a module that defines a function
-/// of that name calls its own (as `alloc.push` is). Floats, `trap`, and the
-/// hosted builtins for lists and input.
+/// of that name calls its own (as `alloc.push` is). Floats, atomics, `trap`,
+/// and the hosted builtins for lists and input.
 pub(crate) fn is_takeable_builtin(name: &str) -> bool {
-    floats::is_float_builtin(name) || matches!(name, "trap" | "read_line" | "push" | "pop" | "from_bytes")
+    floats::is_float_builtin(name)
+        || atomics::is_atomic_builtin(name)
+        || matches!(name, "trap" | "read_line" | "push" | "pop" | "from_bytes")
 }
 
 struct BlockBuf {
@@ -1414,6 +1417,7 @@ impl<'a> FnCx<'a> {
                         "push" => self.list_push(pos, args),
                         "pop" => self.list_pop(pos, args),
                         "from_bytes" => self.str_from_bytes(pos, args),
+                        _ if atomics::is_atomic_builtin(base) => self.atomic_builtin(pos, base, args),
                         _ => self.float_builtin(pos, base, args, expected),
                     };
                 }

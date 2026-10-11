@@ -267,6 +267,8 @@ const std::unordered_map<std::string, Op> kBinOps = {
     {"le", Op::Le},   {"gt", Op::Gt},   {"ge", Op::Ge},   {"and", Op::And},
     {"or", Op::Or},   {"xor", Op::Xor}, {"shl", Op::Shl}, {"shr", Op::Shr},
     {"copysign", Op::Copysign},
+    {"atomic_swap", Op::AtomicSwap}, {"atomic_add", Op::AtomicAdd}, {"atomic_sub", Op::AtomicSub},
+    {"atomic_and", Op::AtomicAnd},   {"atomic_or", Op::AtomicOr},   {"atomic_xor", Op::AtomicXor},
 };
 
 // `%d = <op> %a`
@@ -275,6 +277,7 @@ const std::unordered_map<std::string, Op> kUnOps = {
     {"floor", Op::Floor}, {"ceil", Op::Ceil},   {"trunc", Op::Trunc}, {"round", Op::Round},
     {"abs", Op::Abs},     {"cast", Op::Cast},   {"bitcast", Op::Bitcast},
     {"load", Op::Load},   {"addr", Op::Addr},   {"splat", Op::Splat}, {"tag", Op::Tag},
+    {"atomic_load", Op::AtomicLoad},
 };
 
 // `%d = <op> ...`
@@ -364,8 +367,8 @@ Inst parse_assign(Line &l) {
     uint32_t a = l.reg();
     l.punct(",");
     inst.args = {a, l.reg()};
-  } else if (w == "setelem") {
-    inst.op = Op::SetElem;
+  } else if (w == "setelem" || w == "atomic_cas") {
+    inst.op = w == "setelem" ? Op::SetElem : Op::AtomicCas;
     uint32_t a = l.reg();
     l.punct(",");
     uint32_t i = l.reg();
@@ -603,18 +606,18 @@ Module parse(const std::string &text) {
       }
       const std::string &w = l.next("an instruction").text;
       Terminator &t = block->term;
-      if (w == "trap") {
+      if (w == "trap" || w == "fence") {
         Inst inst{};
-        inst.op = Op::Trap;
+        inst.op = w == "trap" ? Op::Trap : Op::Fence;
         block->insts.push_back(inst);
         l.end();
         continue;
       }
-      if (w == "print" || w == "store") {
+      if (w == "print" || w == "store" || w == "atomic_store") {
         Inst inst{};
-        inst.op = w == "print" ? Op::Print : Op::Store;
+        inst.op = w == "print" ? Op::Print : w == "store" ? Op::Store : Op::AtomicStore;
         inst.args = {l.reg()};
-        if (inst.op == Op::Store) {
+        if (inst.op != Op::Print) {
           l.punct(",");
           inst.args.push_back(l.reg());
         }

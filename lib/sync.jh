@@ -1,0 +1,172 @@
+#![freestanding]
+// Locks and waiting for threads that share memory (x86_64 and aarch64
+// Linux), built on the atomic builtins and the kernel's futexes. It uses
+// neither GC nor libc, so native programs, which start threads with the
+// `thread` library, can import it too.
+//
+//   import sync
+//   let m = sync.mutex_new()
+//   sync.lock(&m)
+//   total = total + 1             // one thread at a time
+//   sync.unlock(&m)
+//
+// A Mutex, Cond or Group is shared by pointer and must stay where it is
+// while threads use it: copying one makes an unrelated second one. Misuse
+// stops the program with `trap()`: unlocking a Mutex nobody holds, or a
+// Group's count going below zero.
+
+import sys
+
+// Futex operations, private to this process (`FUTEX_PRIVATE_FLAG`).
+const FUTEX_WAIT = 128
+const FUTEX_WAKE = 129
+
+const I32_MAX = 2147483647
+
+// Sleeps while the 32-bit word at `addr` holds `seen`. It can return early,
+// so callers check again.
+fn futex_wait(addr: *u8, seen: i64) {
+    syscall(sys.FUTEX, addr, FUTEX_WAIT, seen, 0, 0, 0)
+}
+
+// Wakes up to `n` threads sleeping on the word at `addr`.
+fn futex_wake(addr: *u8, n: i64) {
+    syscall(sys.FUTEX, addr, FUTEX_WAKE, n, 0, 0, 0)
+}
+
+// ---- Mutex ----
+
+// A lock that one thread holds at a time. Its state is 0 when unlocked, 1
+// when locked, and 2 when locked and another thread may be sleeping on it,
+// so that an unlock without sleepers needs no system call (Ulrich Drepper,
+// "Futexes Are Tricky").
+pub struct Mutex {
+    state: u32
+}
+
+// A new, unlocked Mutex.
+pub fn mutex_new() -> Mutex {
+    return Mutex { state: 0 }
+}
+
+// Takes the lock, waiting until no other thread holds it. A thread must not
+// take a lock it holds already: it would wait forever.
+pub fn lock(m: *Mutex) {
+    if atomic_cas(&m.state, 0, 1) {
+        return
+    }
+    sleep_lock(m)
+}
+
+// Takes the lock without having seen it free: marks it as having sleepers,
+// since this thread may become one.
+fn sleep_lock(m: *Mutex) {
+    while atomic_swap(&m.state, 2) != 0 {
+        futex_wait(&m.state as *u8, 2)
+    }
+}
+
+// Takes the lock if no thread holds it, and says whether it did.
+pub fn try_lock(m: *Mutex) -> bool {
+    return atomic_cas(&m.state, 0, 1)
+}
+
+// Releases the lock, waking a thread that waits for it. The lock must be
+// held.
+pub fn unlock(m: *Mutex) {
+    let old = atomic_swap(&m.state, 0)
+    if old == 0 {
+        trap()
+    }
+    if old == 2 {
+        futex_wake(&m.state as *u8, 1)
+    }
+}
+
+// ---- Cond ----
+
+// A condition variable: threads wait on it, holding a Mutex, until another
+// thread signals that what they wait for may have happened. Waiting can
+// also end without a signal, so wait in a loop that checks:
+//
+//   sync.lock(&m)
+//   while !ready {
+//       sync.wait(&c, &m)
+//   }
+//   sync.unlock(&m)
+//
+// Its sequence number changes with every signal, so a waiter that has let
+// go of the Mutex does not miss one.
+pub struct Cond {
+    seq: u32
+}
+
+// A new Cond.
+pub fn cond_new() -> Cond {
+    return Cond { seq: 0 }
+}
+
+// Releases `m`, which the thread must hold, sleeps until a signal, and takes
+// `m` again before returning.
+pub fn wait(c: *Cond, m: *Mutex) {
+    let seen = atomic_load(&c.seq)
+    unlock(m)
+    futex_wait(&c.seq as *u8, seen as i64)
+    sleep_lock(m)
+}
+
+// Wakes one thread waiting on `c`, if any.
+pub fn signal(c: *Cond) {
+    atomic_add(&c.seq, 1)
+    futex_wake(&c.seq as *u8, 1)
+}
+
+// Wakes every thread waiting on `c`.
+pub fn broadcast(c: *Cond) {
+    atomic_add(&c.seq, 1)
+    futex_wake(&c.seq as *u8, I32_MAX)
+}
+
+// ---- Group ----
+
+// Waits for a group of threads to finish, like Go's `sync.WaitGroup`: add
+// to the count before starting each thread, have each call `group_done`
+// when finished, and `group_wait` until the count is back to zero.
+pub struct Group {
+    count: i32
+}
+
+// A new Group with a count of zero.
+pub fn group_new() -> Group {
+    return Group { count: 0 }
+}
+
+// Adds `n`, which may be negative, to the count; at zero, the threads in
+// `group_wait` go on. The count must stay from zero up to 2^31 - 1, the
+// most a futex word holds.
+pub fn group_add(g: *Group, n: i64) {
+    if n < -I32_MAX || n > I32_MAX {
+        trap()
+    }
+    let now = atomic_add(&g.count, n as i32) as i64 + n
+    if now < 0 || now > I32_MAX {
+        trap()
+    }
+    if now == 0 {
+        futex_wake(&g.count as *u8, I32_MAX)
+    }
+}
+
+// One thread of the group is finished: `group_add(g, -1)`.
+pub fn group_done(g: *Group) {
+    group_add(g, -1)
+}
+
+// Waits until the count is zero.
+pub fn group_wait(g: *Group) {
+    let n = atomic_load(&g.count)
+    while n != 0 {
+        futex_wait(&g.count as *u8, n as i64)
+        n = atomic_load(&g.count)
+    }
+}

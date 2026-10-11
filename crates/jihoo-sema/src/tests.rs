@@ -1519,3 +1519,41 @@ fn trap_ends_a_path() {
     // A module's own `trap` wins over the builtin.
     check("fn trap() -> i64 { return 1 }\nfn main() { print(trap()) }").unwrap();
 }
+
+#[test]
+fn atomics_take_pointers_to_integers() {
+    let m = check(&fs("fn f(p: *u32, q: **u8) -> bool {\n\
+        let old = atomic_add(p, 1)\n\
+        atomic_store(p, atomic_load(p) | old)\n\
+        let r = atomic_swap(q, 0 as *u8)\n\
+        fence()\n\
+        return atomic_cas(p, 2, 3) && atomic_cas(q, r, r)\n}"))
+    .unwrap();
+    let text = m.to_string();
+    for inst in ["= atomic_add ", "= atomic_load ", "  atomic_store ", "= atomic_swap ", "  fence\n", "= atomic_cas "] {
+        assert!(text.contains(inst), "{inst} missing in\n{text}");
+    }
+    // A literal takes the type pointed to.
+    check(&fs("fn f(p: *u8) -> u8 { return atomic_sub(p, 255) }")).unwrap();
+    assert!(err(&fs("fn f(p: *u8) -> u8 { return atomic_sub(p, 256) }")).contains("u8"));
+    assert!(err(&fs("fn f(p: *i64) { atomic_add(p, 1 as i32) }")).contains("must be i64, found i32"));
+    // Arithmetic is on integers only; loads, stores, swaps and CAS also take pointers.
+    assert!(err(&fs("fn f(p: **u8) { atomic_add(p, 0 as *u8) }")).contains("works on integers, not *u8"));
+    assert!(err(&fs("fn f(p: *bool) { atomic_store(p, true) }")).contains("integers and pointers, not bool"));
+    assert!(err(&fs("fn f(x: i64) { atomic_load(x) }")).contains("needs a pointer, found i64"));
+    assert!(err(&fs("fn f(p: *i64) { atomic_cas(p, 1) }")).contains("`atomic_cas` takes 3 arguments"));
+    assert!(err(&fs("fn f() { fence(1) }")).contains("`fence` takes no arguments"));
+    // Hosted programs have no pointers to share.
+    assert!(err("fn main() { fence() }").contains("only available in native and freestanding mode"));
+    // A module's own function of the name wins over the builtin.
+    check("fn fence() -> i64 { return 1 }\nfn main() { print(fence()) }").unwrap();
+}
+
+#[test]
+fn qualified_types_are_type_arguments() {
+    check_files(&[
+        ("main.jh", "import shapes\nfn main() {\n let o: Option(shapes.Dot) = Option.Some(shapes.Dot { x: 1 })\n print(o == Option.None) }"),
+        ("shapes.jh", "pub struct Dot {\n pub x: i64\n}"),
+    ])
+    .unwrap();
+}

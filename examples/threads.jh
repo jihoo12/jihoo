@@ -1,0 +1,138 @@
+#![native]
+// Threads that run at the same time on several cores (lib/thread.jh), and
+// three ways to coordinate them: atomics, a Mutex, and a Cond with a Group
+// (lib/sync.jh).
+//   jihoo build examples/threads.jh -o out/threads && ./out/threads
+import libc
+import sync
+import thread
+
+const WORKERS = 4
+const N = 1000000
+
+// What the workers share. They get a pointer to it, so it stays in `main`'s
+// frame until they are all joined.
+struct Shared {
+    // Updated with `atomic_add`: no lock needed.
+    steps: i64
+    // Updated under `lock`.
+    lock: sync.Mutex
+    total: i64
+    // Counts the workers still running.
+    running: sync.Group
+}
+
+// One worker's part of the job: the numbers from `lo` up to `hi`.
+struct Job {
+    shared: *Shared
+    lo: i64
+    hi: i64
+}
+
+fn sum_squares(arg: *u8) -> i64 {
+    let job = arg as *Job
+    let s = job.shared
+    let sum = 0
+    let i = job.lo
+    while i < job.hi {
+        sum = sum + i * i % 7
+        i = i + 1
+    }
+    atomic_add(&s.steps, job.hi - job.lo)
+    sync.lock(&s.lock)
+    s.total = s.total + sum
+    sync.unlock(&s.lock)
+    sync.group_done(&s.running)
+    return sum
+}
+
+// A one-value mailbox: `put` waits while it is full, `take` while it is
+// empty.
+struct Mailbox {
+    lock: sync.Mutex
+    changed: sync.Cond
+    full: bool
+    value: i64
+}
+
+fn put(b: *Mailbox, v: i64) {
+    sync.lock(&b.lock)
+    while b.full {
+        sync.wait(&b.changed, &b.lock)
+    }
+    b.value = v
+    b.full = true
+    sync.broadcast(&b.changed)
+    sync.unlock(&b.lock)
+}
+
+fn take(b: *Mailbox) -> i64 {
+    sync.lock(&b.lock)
+    while !b.full {
+        sync.wait(&b.changed, &b.lock)
+    }
+    let v = b.value
+    b.full = false
+    sync.broadcast(&b.changed)
+    sync.unlock(&b.lock)
+    return v
+}
+
+// Sends 1 to 10, then -1 to say it is done.
+fn producer(arg: *u8) -> i64 {
+    let b = arg as *Mailbox
+    let i = 1
+    while i <= 10 {
+        put(b, i)
+        i = i + 1
+    }
+    put(b, -1)
+    return 0
+}
+
+fn main() -> i64 {
+    let shared = Shared { steps: 0, lock: sync.mutex_new(), total: 0, running: sync.group_new() }
+    let jobs: [Job; WORKERS] = [Job { shared: &shared, lo: 0, hi: 0 }; WORKERS]
+    let threads: [Option(thread.Thread); WORKERS] = [Option.None; WORKERS]
+    let i = 0
+    while i < WORKERS {
+        jobs[i].lo = N / WORKERS * i
+        jobs[i].hi = N / WORKERS * (i + 1)
+        sync.group_add(&shared.running, 1)
+        threads[i] = thread.spawn(sum_squares, &jobs[i] as *u8)
+        if threads[i] == Option.None {
+            return 1
+        }
+        i = i + 1
+    }
+    sync.group_wait(&shared.running)
+    libc.printf("%ld steps, total %ld\n", atomic_load(&shared.steps), shared.total)
+    let joined = 0
+    i = 0
+    while i < WORKERS {
+        match threads[i] {
+            Some(t) => joined = joined + thread.join(&t)
+            None => {}
+        }
+        i = i + 1
+    }
+    libc.printf("the workers' own sums add up to %ld\n", joined)
+
+    let box = Mailbox { lock: sync.mutex_new(), changed: sync.cond_new(), full: false, value: 0 }
+    let producing = thread.spawn(producer, &box as *u8)
+    if producing == Option.None {
+        return 1
+    }
+    let got = 0
+    let v = take(&box)
+    while v != -1 {
+        got = got + v
+        v = take(&box)
+    }
+    libc.printf("received %ld through the mailbox\n", got)
+    match producing {
+        Some(t) => thread.join(&t)
+        None => {}
+    }
+    return 0
+}

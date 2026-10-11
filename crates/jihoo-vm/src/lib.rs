@@ -698,9 +698,15 @@ impl<'m> Vm<'m> {
             | Inst::Store { .. }
             | Inst::Addr { .. }
             | Inst::FieldPtr { .. }
-            | Inst::ElemPtr { .. } => {
+            | Inst::ElemPtr { .. }
+            | Inst::AtomicLoad { .. }
+            | Inst::AtomicStore { .. }
+            | Inst::AtomicRmw { .. }
+            | Inst::AtomicCas { .. } => {
                 return Err(self.error("pointers are not available on the VM"))
             }
+            // The VM runs one thread, and keeps nothing from it in caches.
+            Inst::Fence => {}
             // A closure is an aggregate of the function and the captured values,
             // which become its first arguments.
             Inst::Closure { dst, func, captures } => {

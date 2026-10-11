@@ -11,3 +11,4 @@ pub const WRITE = 64
 pub const MMAP = 222
 pub const MUNMAP = 215
 pub const EXIT = 93
+pub const FUTEX = 98

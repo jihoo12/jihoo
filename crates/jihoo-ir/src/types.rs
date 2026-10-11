@@ -245,6 +245,13 @@ impl Type {
         matches!(self, Type::Int(_) | Type::Ptr(_))
     }
 
+    /// Whether atomics work on memory of this type: integers, and pointers
+    /// when `pointers` (loads, stores, swaps and compare-and-swaps; not
+    /// arithmetic).
+    pub fn is_atomic(&self, pointers: bool) -> bool {
+        matches!(self, Type::Int(_)) || (pointers && matches!(self, Type::Ptr(_)))
+    }
+
     /// How this type is spelled in JIR text (`*u8`, `$Point`, `$"Pair(i64)"`).
     pub fn jir(&self) -> String {
         match self {
