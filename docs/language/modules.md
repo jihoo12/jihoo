@@ -21,7 +21,7 @@ fn _start() -> i64 {
 
 Items of another module are always written `alias.item`: functions
 (`alloc.push(...)`), macros (`alias.m!(...)`), types (`alias.T`,
-`alias.Vec(i64)`), struct literals (`alloc.Arena { ... }`), enum variants
+`alias.Vec(i64)`), struct literals (`geo.Point { ... }`), enum variants
 (`geo.Shape.Empty`) and constants (`alloc.PROT_WRITE`). There is no way to
 import names unqualified.
 
@@ -61,7 +61,8 @@ Another module can read and assign `a.balance`, but not `a.id`, and it cannot
 build an `Account` with a literal, which would have to name `id`; it calls
 `open` instead. A struct pattern may name only public fields there, and `..`
 skips the others. So a module can keep what its structs hold to itself and
-change it later, as `alloc.Vec(T)` does with its arena pointer.
+change it later, as `alloc.Vec(T)` and `alloc.Arena` do with all of theirs: only
+`alloc` can change a Vec's length, so its bounds checks hold.
 
 A macro's code may use the private fields of the module the macro is defined
 in, wherever it is expanded, just as it may use that module's private items

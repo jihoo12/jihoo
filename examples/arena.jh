@@ -23,23 +23,25 @@ fn _start() -> i64 {
     }
     let sum = 0
     i = 0
-    while i < squares.len {
+    while i < alloc.vec_len(i64, &squares) {
         sum = sum + alloc.get(i64, &squares, i)
         i = i + 1
     }
-    io.print_int(squares.len)          // 1000
-    io.print_int(squares.cap)          // 1024
-    io.print_int(sum)                  // 332833500
+    io.print_int(alloc.vec_len(i64, &squares))  // 1000
+    io.print_int(alloc.vec_cap(i64, &squares))  // 1024
+    io.print_int(sum)                           // 332833500
 
     // The same library code, instantiated for a struct of this program.
     let points = alloc.vec_new(Point, &arena)
     alloc.push(Point, &points, Point { x: 3, y: 4 })
     alloc.push(Point, &points, Point { x: 5, y: 12 })
     let p = alloc.pop(Point, &points)
-    io.print_int(p.x * p.y)            // 60
-    io.print_int(arena.used)           // bytes handed out by the arena
-    io.print_int(0 - alloc.PROT_WRITE) // -2: constants of other modules work too
+    io.print_int(p.x * p.y)                     // 60
+    io.print_int(alloc.arena_used(&arena))      // bytes handed out by the arena
+    io.print_int(0 - alloc.PROT_WRITE)          // -2: constants of other modules work too
     io.puts("done\n")
 
-    return points.len                  // 1 after the pop
+    let n = alloc.vec_len(Point, &points)
+    alloc.arena_free(&arena)
+    return n                                    // 1 after the pop
 }

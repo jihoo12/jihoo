@@ -447,3 +447,64 @@ fn trap_fails_on_both_backends() {
     let body = "fn check(x: i64) -> i64 {\n  if x < 10 { return x }\n  trap()\n}\nfn entry() -> i64 { return check(3) + check(30) }\n";
     fails_on_both_backends("trap", body, "trap: the program called `trap()`");
 }
+
+/// Builds the freestanding program `src` and runs it: its exit status, or
+/// `None` if it trapped.
+fn run_freestanding(name: &str, src: &str) -> Option<i32> {
+    let work = std::env::temp_dir().join(format!("jihoo-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&work).unwrap();
+    let (file, bin) = (work.join(format!("{name}.jh")), work.join(name));
+    std::fs::write(&file, src).unwrap();
+    assert_eq!(exit_code(Command::new(JIHOO).arg("build").arg(&file).arg("-o").arg(&bin)), 0, "{name}");
+    let status = Command::new(&bin).status().unwrap();
+    std::fs::remove_dir_all(&work).unwrap();
+    status.code()
+}
+
+/// `lib/alloc.jh` traps on misuse instead of reading or writing outside what
+/// it allocated, and reports running out of memory.
+#[test]
+fn alloc_traps_on_misuse() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let program = |body: &str| {
+        format!(
+            "#![freestanding]\nimport alloc\nfn _start() -> i64 {{\n  let a = alloc.arena_new(4096)\n  \
+             let v = alloc.vec_new(i64, &a)\n  alloc.push(i64, &v, 7)\n{body}\n}}\n"
+        )
+    };
+    let misuses = [
+        ("get-past-end", "  return alloc.get(i64, &v, 1)"),
+        ("get-negative", "  return alloc.get(i64, &v, -1)"),
+        ("set-past-end", "  alloc.set(i64, &v, 1, 0)\n  return 0"),
+        ("pop-empty", "  alloc.pop(i64, &v)\n  return alloc.pop(i64, &v)"),
+        ("align-not-power-of-two", "  alloc.alloc(&a, 8, 3)\n  return 0"),
+        ("align-zero", "  alloc.alloc(&a, 8, 0)\n  return 0"),
+        ("negative-size", "  alloc.alloc(&a, -1, 8)\n  return 0"),
+        ("negative-count", "  alloc.alloc_array(i64, &a, -1)\n  return 0"),
+    ];
+    for (name, body) in misuses {
+        assert_eq!(run_freestanding(name, &program(body)), None, "{name} should trap");
+    }
+
+    // Running out is not misuse: null or false, and nothing changes. Each
+    // check adds a bit to the exit status, which is 127 if all hold.
+    let body = "  let ok = 0\n\
+        if alloc.get(i64, &v, 0) == 7 { ok += 1 }\n\
+        if alloc.alloc(&a, 1 << 40, 8) == 0 as *u8 { ok += 2 }\n\
+        if alloc.alloc_array(i64, &a, 9223372036854775807) == 0 as *i64 { ok += 4 }\n\
+        let p = alloc.alloc(&a, 1, 1)\n\
+        let q = alloc.alloc(&a, 8, 16)\n\
+        if (q as i64) % 16 == 0 && q as i64 > p as i64 { ok += 8 }\n\
+        alloc.arena_free(&a)\n\
+        alloc.arena_free(&a)\n\
+        if alloc.arena_cap(&a) == 0 && alloc.alloc(&a, 1, 1) == 0 as *u8 { ok += 16 }\n\
+        let none = alloc.arena_new(-5)\n\
+        if alloc.arena_cap(&none) == 0 { ok += 32 }\n\
+        let w = alloc.vec_new(u8, &none)\n\
+        if !alloc.push(u8, &w, 1) && alloc.vec_len(u8, &w) == 0 { ok += 64 }\n\
+        return ok";
+    assert_eq!(run_freestanding("alloc-limits", &program(body)), Some(127));
+}

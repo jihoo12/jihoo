@@ -11,7 +11,7 @@ One of them, the prelude, needs no import.
 | [`lists`](#lists) | hosted | sorting, mapping and searching lists |
 | [`libc`](#libc) | native | declarations of C library functions |
 | [`sys`](#sys) | native, freestanding | Linux syscall numbers of the target |
-| [`alloc`](#alloc) | native, freestanding | an arena allocator over `mmap`, and `Vec(T)` |
+| [`alloc`](#alloc) | native, freestanding | an arena allocator over `mmap`, and a checked `Vec(T)` |
 | [`io`](#io) | native, freestanding | output straight to file descriptors |
 | [`coro`](#coro) | native | stackful coroutines |
 
@@ -204,36 +204,60 @@ fn _start() -> i64 {
     let v = alloc.vec_new(i64, &arena)
     alloc.push(i64, &v, 42)
     alloc.push(i64, &v, 7)
-    return alloc.get(i64, &v, 0) + alloc.pop(i64, &v)   // 49
+    let n = alloc.get(i64, &v, 0) + alloc.pop(i64, &v)   // 49
+    alloc.arena_free(&arena)
+    return n
 }
 ```
+
+Misuse stops the program with [`trap()`](builtins.md#everywhere), as an array
+index out of bounds does: an index outside the Vec, `pop` on an empty Vec, an
+alignment that is not a power of two, a negative size or count. Running out
+of memory is not misuse: `alloc` gives null and `push` gives false, and
+nothing changes. The structs' fields are private, so only the module changes
+them, and every size computation is checked for overflow.
 
 ### Arena
 
 An arena hands out memory from one block, and everything is freed at once by
-dropping it.
+`arena_free`. Nothing it handed out may be used afterwards.
 
 | item | description |
 |------|-------------|
-| `struct Arena { base: *u8, pub used: i64, pub cap: i64 }` | a block of `cap` bytes, of which `used` are handed out |
-| `fn arena_new(cap: i64) -> Arena` | a new arena of `cap` bytes from `mmap`, or one with `cap == 0` if the kernel refused |
-| `fn alloc(a: *Arena, size: i64, align: i64) -> *u8` | `size` bytes aligned to `align` (a power of two), or null when the arena is full |
-| `fn alloc_array(comptime T: type, a: *Arena, n: i64) -> *T` | room for `n` values of type `T` |
+| `struct Arena` | a block of memory, of which a part is handed out; its fields are private |
+| `fn arena_new(cap: i64) -> Arena` | a new arena of `cap` bytes from `mmap`, or one with no room (`arena_cap` is 0) if `cap` is not positive or the kernel refused |
+| `fn arena_free(a: *Arena)` | gives the memory back with `munmap`; afterwards the arena has no room. Freeing twice does nothing |
+| `fn arena_used(a: *Arena) -> i64` | the bytes handed out so far, padding included |
+| `fn arena_cap(a: *Arena) -> i64` | the bytes the arena has in all |
+| `fn alloc(a: *Arena, size: i64, align: i64) -> *u8` | `size` bytes aligned to `align`, or null when the arena has no room; traps if `size` is negative or `align` is not a power of two |
+| `fn alloc_array(comptime T: type, a: *Arena, n: i64) -> *T` | room for `n` values of type `T`, or null; traps if `n` is negative |
 | `PROT_READ`, `PROT_WRITE`, `MAP_PRIVATE`, `MAP_ANONYMOUS` | the `mmap` constants it uses |
 
 ### Vec(T)
 
 A growable array in an arena. Its storage doubles when full (4, 8, 16, ...);
-the old storage stays in the arena until the arena is dropped.
+the old storage stays in the arena until the arena is freed.
 
 | item | description |
 |------|-------------|
-| `struct Vec(T: type) { pub data: *T, pub len: i64, pub cap: i64, arena: *Arena }` | `len` elements at `data`, room for `cap` |
+| `struct Vec(T: type)` | elements in an arena; its fields are private |
 | `fn vec_new(comptime T: type, a: *Arena) -> Vec(T)` | an empty vector allocating from `a` |
-| `fn push(comptime T: type, v: *Vec(T), x: T) -> bool` | appends `x`; false if the arena has no room left |
-| `fn get(comptime T: type, v: *Vec(T), i: i64) -> T` | element `i` (not bounds-checked) |
-| `fn set(comptime T: type, v: *Vec(T), i: i64, x: T)` | replaces element `i` (not bounds-checked) |
-| `fn pop(comptime T: type, v: *Vec(T)) -> T` | removes and returns the last element; the vector must not be empty |
+| `fn vec_len(comptime T: type, v: *Vec(T)) -> i64` | the number of elements |
+| `fn vec_cap(comptime T: type, v: *Vec(T)) -> i64` | room before it grows |
+| `fn vec_data(comptime T: type, v: *Vec(T)) -> *T` | the elements as a raw pointer, for a syscall or C; not checked, and valid only until the next `push` |
+| `fn push(comptime T: type, v: *Vec(T), x: T) -> bool` | appends `x`; false, changing nothing, if the arena has no room left |
+| `fn get(comptime T: type, v: *Vec(T), i: i64) -> T` | element `i`; traps unless `0 <= i < vec_len` |
+| `fn set(comptime T: type, v: *Vec(T), i: i64, x: T)` | replaces element `i`; traps unless `0 <= i < vec_len` |
+| `fn pop(comptime T: type, v: *Vec(T)) -> T` | removes and returns the last element; traps if the vector is empty |
+| `fn clear(comptime T: type, v: *Vec(T))` | removes every element, keeping the storage |
+
+What the library cannot check:
+
+- A `Vec` holds a pointer to its elements, so a copy (`let w = v`) shares them
+  with the original, and pushing to both makes them overwrite each other.
+  Keep one `Vec` and pass a pointer to it, as the functions take it.
+- Memory from an arena must not be used after `arena_free`, and a `Vec` must
+  not outlive its arena.
 
 ## io
 

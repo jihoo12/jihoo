@@ -41,6 +41,9 @@
     and ordering; lists `[T]` with `push` and `pop`, in place when unshared;
     `read_line`; the prelude (`Option`, `Result`); `lib/strings.jh` and
     `lib/lists.jh`. JIR version 5.
+22. `trap()` in every profile (JIR version 6), and a checked `alloc`: bounds
+    checks on `Vec`, traps on misuse, overflow-safe sizes, private fields,
+    `arena_free`.
 
 ## Next
 
