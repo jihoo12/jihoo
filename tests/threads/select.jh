@@ -1,0 +1,164 @@
+#![native]
+// `Select` over native channels (lib/channel.jh). Each check sets a bit of
+// the exit status, which is 63 if all hold
+// (crates/jihoo-cli/tests/differential.rs).
+import channel
+import thread
+
+enum Shape {
+    Square(i64)
+    Circle(i64)
+}
+
+struct Fan {
+    numbers: channel.Chan(i64)
+    shapes: channel.Chan(Shape)
+}
+
+fn numbers(arg: *u8) -> i64 {
+    let f = arg as *Fan
+    let i = 1
+    while i <= 1000 {
+        channel.send(i64, f.numbers, i)
+        i += 1
+    }
+    channel.close(i64, f.numbers)
+    return 0
+}
+
+fn shapes(arg: *u8) -> i64 {
+    let f = arg as *Fan
+    let i = 0
+    while i < 500 {
+        channel.send(Shape, f.shapes, Shape.Square(i))
+        channel.send(Shape, f.shapes, Shape.Circle(1))
+        i += 1
+    }
+    channel.close(Shape, f.shapes)
+    return 0
+}
+
+// Fan-in: one Select over two channels of different types, until both are
+// closed.
+fn fan_in(f: *Fan) -> bool {
+    let a = thread.spawn(numbers, f as *u8)
+    let b = thread.spawn(shapes, f as *u8)
+    let n: i64 = 0
+    let s = Shape.Circle(0)
+    let sel = channel.select_new()
+    let on_n = channel.on_recv(i64, &sel, f.numbers, &n)
+    let on_s = channel.on_recv(Shape, &sel, f.shapes, &s)
+    let sum = 0
+    let squares = 0
+    let circles = 0
+    let open = 2
+    while open > 0 {
+        let i = channel.wait(&sel)
+        if !channel.received(&sel) {
+            // A closed channel stays ready: stop asking it.
+            channel.off(&sel, i)
+            open -= 1
+        } else if i == on_n {
+            sum += n
+        } else {
+            match s {
+                Square(x) => squares += x
+                Circle(r) => circles += r
+            }
+        }
+    }
+    match a {
+        Some(t) => thread.join(&t)
+        None => return false
+    }
+    match b {
+        Some(t) => thread.join(&t)
+        None => return false
+    }
+    return sum == 500500 && squares == 124750 && circles == 500
+}
+
+struct Pair {
+    c: channel.Chan(i64)
+}
+
+// The other side of `meet`: a Select that only sends.
+fn select_sender(arg: *u8) -> i64 {
+    let p = arg as *Pair
+    let i: i64 = 0
+    let sel = channel.select_new()
+    channel.on_send(i64, &sel, p.c, &i)
+    while i < 1000 {
+        channel.wait(&sel)
+        i += 1
+    }
+    return 0
+}
+
+// Two Selects meet on an unbuffered channel: one sends, one receives.
+fn meet() -> bool {
+    match channel.new(i64, 0) {
+        Some(c) => {
+            let p = Pair { c: c }
+            let t = thread.spawn(select_sender, &p as *u8)
+            let got: i64 = 0
+            let sum = 0
+            let sel = channel.select_new()
+            channel.on_recv(i64, &sel, c, &got)
+            let k = 0
+            while k < 1000 {
+                channel.wait(&sel)
+                sum += got
+                k += 1
+            }
+            match t {
+                Some(h) => thread.join(&h)
+                None => return false
+            }
+            return sum == 499500
+        }
+        None => return false
+    }
+}
+
+fn main() -> i64 {
+    let ok = 0
+    match channel.new(i64, 4) {
+        Some(nums) => match channel.new(Shape, 0) {
+            Some(shs) => {
+                let f = Fan { numbers: nums, shapes: shs }
+                if fan_in(&f) { ok += 1 }
+            }
+            None => return 100
+        }
+        None => return 100
+    }
+    if meet() { ok += 2 }
+    match channel.new(i64, 1) {
+        Some(a) => match channel.new(i64, 1) {
+            Some(b) => {
+                let x: i64 = 0
+                let one: i64 = 1
+                let sel = channel.select_new()
+                let ra = channel.on_recv(i64, &sel, a, &x)
+                let rb = channel.on_recv(i64, &sel, b, &x)
+                // Nothing to receive: poll does not wait.
+                if channel.poll(&sel) == -1 { ok += 4 }
+                // Both ready: the first added wins.
+                channel.send(i64, a, 10)
+                channel.send(i64, b, 20)
+                if channel.poll(&sel) == ra && x == 10 && channel.poll(&sel) == rb && x == 20 { ok += 8 }
+                // A send case on a full channel is not ready; on room it is.
+                let out = channel.select_new()
+                let sa = channel.on_send(i64, &out, a, &one)
+                if channel.poll(&out) == sa && channel.poll(&out) == -1 && channel.recv(i64, a) == Option.Some(1) { ok += 16 }
+                // A closed channel is ready, without a value.
+                channel.close(i64, b)
+                if channel.wait(&sel) == rb && !channel.received(&sel) && x == 20 { ok += 32 }
+            }
+            None => return 100
+        }
+        None => return 100
+    }
+    return ok
+}

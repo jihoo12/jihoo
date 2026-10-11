@@ -1,6 +1,7 @@
 #![native]
 // Channels between threads (lib/thread.jh): one thread sends values, another
-// receives them in the same order, as with hosted programs' `chan` and Go's.
+// receives them in the same order, as with hosted programs' `chan` and Go's;
+// a `Select` waits on several channels at once (`wait`, `poll`).
 //
 //   import channel
 //   match channel.new(i64, 8) {             // buffers up to 8 values
@@ -17,23 +18,41 @@
 //   }
 //
 // A Chan(T) is a handle: copies of it are the same channel, so pass it to
-// threads by value. Its state is in memory from `malloc`, guarded by a
-// `sync.Mutex`. Misuse stops the program with `trap()`: sending on a closed
-// channel or closing one twice, as in Go, or a negative capacity.
+// threads by value. Underneath, a channel holds bytes, not `T`s, so that one
+// `Select` can wait on channels of different types; the functions that take
+// a `T` are the typed doors to it. Misuse stops the program with `trap()`:
+// sending on a closed channel or closing one twice, as in Go, a negative
+// capacity, or a `Select` with no cases or too many.
 
 import libc
 import sync
+import sys
 
 const I64_MAX = 9223372036854775807
 
-struct State(T: type) {
+// Futex operations, private to this process.
+const FUTEX_WAIT = 128
+const FUTEX_WAKE = 129
+
+// A `Select` waiting on a channel: one per case, linked into the channel's
+// list while the `Select` waits. `word` is the selector's futex word, which
+// the channel bumps when anything changes.
+struct Waiter {
+    next: *Waiter
+    prev: *Waiter
+    word: *u32
+}
+
+// A channel, whatever its type of values.
+struct Raw {
     lock: sync.Mutex
     // Signalled when there is a value to receive, or the channel closed.
     ready: sync.Cond
     // Broadcast when a value was received, or the channel closed.
     room: sync.Cond
-    // A ring of `cap` values, `len` of them from `head` on.
-    buf: *T
+    // A ring of `cap` values of `size` bytes each, `len` of them from `head` on.
+    buf: *u8
+    size: i64
     cap: i64
     head: i64
     len: i64
@@ -45,16 +64,29 @@ struct State(T: type) {
     sent: i64
     taken: i64
     closed: bool
+    // Receivers waiting right now, in `recv` or in a `Select`: a `Select`
+    // may send on an unbuffered channel only when one is there to take it.
+    receivers: i64
+    // The selects waiting on this channel.
+    waiters: *Waiter
 }
 
 pub struct Chan(T: type) {
-    s: *State(T)
+    s: *Raw
 }
 
 // A new channel of `T` values that buffers up to `cap` of them; with `cap` 0
 // it buffers none, and each sender waits for a receiver. None if there is no
 // memory for it. `cap` must not be negative.
 pub fn new(comptime T: type, cap: i64) -> Option(Chan(T)) {
+    let s = raw_new(size_of(T), cap)
+    if s == 0 as *Raw {
+        return Option.None
+    }
+    return Option.Some(Chan(T) { s: s })
+}
+
+fn raw_new(size: i64, cap: i64) -> *Raw {
     if cap < 0 {
         trap()
     }
@@ -63,29 +95,29 @@ pub fn new(comptime T: type, cap: i64) -> Option(Chan(T)) {
         slots = 1
     }
     // A size that does not fit is like memory that is not there.
-    let size = size_of(T)
     if size > 0 && slots > I64_MAX / size {
-        return Option.None
+        return 0 as *Raw
     }
-    let s = libc.malloc(size_of(State(T)) as u64) as *State(T)
-    if s == 0 as *State(T) {
-        return Option.None
+    let s = libc.malloc(size_of(Raw) as u64) as *Raw
+    if s == 0 as *Raw {
+        return s
     }
     // `malloc(0)` may give null; ask for a byte at least.
     let bytes = slots * size
     if bytes == 0 {
         bytes = 1
     }
-    let buf = libc.malloc(bytes as u64) as *T
-    if buf == 0 as *T {
+    let buf = libc.malloc(bytes as u64)
+    if buf == 0 as *u8 {
         libc.free(s as *u8)
-        return Option.None
+        return 0 as *Raw
     }
-    *s = State(T) {
+    *s = Raw {
         lock: sync.mutex_new(),
         ready: sync.cond_new(),
         room: sync.cond_new(),
         buf: buf,
+        size: size,
         cap: slots,
         head: 0,
         len: 0,
@@ -93,15 +125,21 @@ pub fn new(comptime T: type, cap: i64) -> Option(Chan(T)) {
         sent: 0,
         taken: 0,
         closed: false,
+        receivers: 0,
+        waiters: 0 as *Waiter,
     }
-    return Option.Some(Chan(T) { s: s })
+    return s
 }
 
 // Sends `v`, waiting while the channel is full; on an unbuffered channel,
 // until a receiver has taken it. The channel must not be closed, also not
 // while this waits.
 pub fn send(comptime T: type, c: Chan(T), v: T) {
-    let s = c.s
+    let value = v
+    raw_send(c.s, &value as *u8)
+}
+
+fn raw_send(s: *Raw, src: *u8) {
     sync.lock(&s.lock)
     while s.len == s.cap && !s.closed {
         sync.wait(&s.room, &s.lock)
@@ -109,11 +147,8 @@ pub fn send(comptime T: type, c: Chan(T), v: T) {
     if s.closed {
         trap()
     }
-    s.buf[(s.head + s.len) % s.cap] = v
-    s.len = s.len + 1
-    s.sent = s.sent + 1
+    put(s, src)
     let mine = s.sent
-    sync.signal(&s.ready)
     if s.unbuffered {
         while s.taken < mine {
             sync.wait(&s.room, &s.lock)
@@ -125,22 +160,31 @@ pub fn send(comptime T: type, c: Chan(T), v: T) {
 // Receives the next value, waiting until there is one; None once the
 // channel is closed and every value sent has been received.
 pub fn recv(comptime T: type, c: Chan(T)) -> Option(T) {
-    let s = c.s
+    // Room for a `T`, aligned for anything.
+    let out = [0 as u64; size_of(T) / 8 + 1]
+    if raw_recv(c.s, &out as *u8) {
+        return Option.Some(*(&out as *T))
+    }
+    return Option.None
+}
+
+fn raw_recv(s: *Raw, dst: *u8) -> bool {
     sync.lock(&s.lock)
-    while s.len == 0 && !s.closed {
-        sync.wait(&s.ready, &s.lock)
+    if s.len == 0 && !s.closed {
+        s.receivers = s.receivers + 1
+        notify(s)
+        while s.len == 0 && !s.closed {
+            sync.wait(&s.ready, &s.lock)
+        }
+        s.receivers = s.receivers - 1
     }
     if s.len == 0 {
         sync.unlock(&s.lock)
-        return Option.None
+        return false
     }
-    let v = s.buf[s.head]
-    s.head = (s.head + 1) % s.cap
-    s.len = s.len - 1
-    s.taken = s.taken + 1
-    sync.broadcast(&s.room)
+    take(s, dst)
     sync.unlock(&s.lock)
-    return Option.Some(v)
+    return true
 }
 
 // Says that no more values will be sent. Receivers still get the values
@@ -154,6 +198,7 @@ pub fn close(comptime T: type, c: Chan(T)) {
     s.closed = true
     sync.broadcast(&s.ready)
     sync.broadcast(&s.room)
+    notify(s)
     sync.unlock(&s.lock)
 }
 
@@ -169,6 +214,254 @@ pub fn count(comptime T: type, c: Chan(T)) -> i64 {
 // Gives the channel's memory back. No thread may use the channel, or any
 // copy of it, afterwards.
 pub fn free(comptime T: type, c: Chan(T)) {
-    libc.free(c.s.buf as *u8)
+    libc.free(c.s.buf)
     libc.free(c.s as *u8)
+}
+
+// ---- With the lock held ----
+
+// Adds the value at `src` behind the others. There must be room.
+fn put(s: *Raw, src: *u8) {
+    let slot = (s.head + s.len) % s.cap
+    libc.memcpy(s.buf + slot * s.size, src, s.size as u64)
+    s.len = s.len + 1
+    s.sent = s.sent + 1
+    sync.signal(&s.ready)
+    notify(s)
+}
+
+// Moves the first value to `dst`. There must be one.
+fn take(s: *Raw, dst: *u8) {
+    libc.memcpy(dst, s.buf + s.head * s.size, s.size as u64)
+    s.head = (s.head + 1) % s.cap
+    s.len = s.len - 1
+    s.taken = s.taken + 1
+    sync.broadcast(&s.room)
+    notify(s)
+}
+
+// Tells every waiting `Select` that something changed.
+fn notify(s: *Raw) {
+    let w = s.waiters
+    while w != 0 as *Waiter {
+        atomic_add(w.word, 1)
+        syscall(sys.FUTEX, w.word, FUTEX_WAKE, 1, 0, 0, 0)
+        w = w.next
+    }
+}
+
+// ---- Select ----
+
+// The most cases one `Select` has.
+pub const MAX_CASES = 16
+
+struct Case {
+    s: *Raw
+    // Where a received value goes, or where the value to send is.
+    data: *u8
+    sending: bool
+    // Cleared by `off`: the case is left out.
+    on: bool
+    waiter: Waiter
+}
+
+// The cases of a `Select`: receives and sends on channels of any types. Add
+// them with `on_recv` and `on_send`, then call `wait` or `poll`, as often as
+// you like; the cases stay.
+pub struct Select {
+    cases: [Case; MAX_CASES]
+    n: i64
+    // Bumped by a channel when something changes, so that a waiting
+    // `Select` wakes up and looks again.
+    word: u32
+    // Whether the last receive got a value, rather than a closed channel.
+    received: bool
+}
+
+// A `Select` without cases.
+pub fn select_new() -> Select {
+    let none = Case {
+        s: 0 as *Raw,
+        data: 0 as *u8,
+        sending: false,
+        on: false,
+        waiter: Waiter { next: 0 as *Waiter, prev: 0 as *Waiter, word: 0 as *u32 },
+    }
+    return Select { cases: [none; MAX_CASES], n: 0, word: 0, received: false }
+}
+
+// Adds a case that receives from `c` into `*dst`, and gives its number:
+// cases count from 0 in the order they are added. It can go ahead when `c`
+// has a value, or is closed and empty: then `*dst` is left as it was, and
+// `received` says false.
+pub fn on_recv(comptime T: type, sel: *Select, c: Chan(T), dst: *T) -> i64 {
+    return add_case(sel, c.s, dst as *u8, false)
+}
+
+// Adds a case that sends `*src` on `c`, and gives its number. The value is
+// read when the case goes ahead, so `*src` must stay valid. It can go ahead
+// when `c` has room; on an unbuffered channel, when a receiver is waiting,
+// and then it does not wait for the receiver to take the value. A send to a
+// closed channel stops the program, as `send` does.
+pub fn on_send(comptime T: type, sel: *Select, c: Chan(T), src: *T) -> i64 {
+    return add_case(sel, c.s, src as *u8, true)
+}
+
+fn add_case(sel: *Select, s: *Raw, data: *u8, sending: bool) -> i64 {
+    if sel.n == MAX_CASES {
+        trap()
+    }
+    let i = sel.n
+    sel.cases[i].s = s
+    sel.cases[i].data = data
+    sel.cases[i].sending = sending
+    sel.cases[i].on = true
+    sel.n = i + 1
+    return i
+}
+
+// Leaves case `i` out of the Select from now on, as Go programs do by
+// setting a channel to nil: for one that was closed, say.
+pub fn off(sel: *Select, i: i64) {
+    if i < 0 || i >= sel.n {
+        trap()
+    }
+    sel.cases[i].on = false
+}
+
+// Does the first case that can go ahead, waiting until one can, and gives
+// its number. If several can, the first added wins. With no case left on, it
+// would wait forever, so it stops the program instead.
+pub fn wait(sel: *Select) -> i64 {
+    let any = false
+    let k = 0
+    while k < sel.n {
+        any = any || sel.cases[k].on
+        k = k + 1
+    }
+    if !any {
+        trap()
+    }
+    // Wait on every channel first, so that no change after the look below
+    // goes unnoticed.
+    let i = 0
+    while i < sel.n {
+        enlist(sel, i)
+        i = i + 1
+    }
+    let chosen = -1
+    while chosen < 0 {
+        let seen = atomic_load(&sel.word)
+        chosen = first_ready(sel)
+        if chosen < 0 {
+            syscall(sys.FUTEX, &sel.word, FUTEX_WAIT, seen, 0, 0, 0)
+        }
+    }
+    i = 0
+    while i < sel.n {
+        delist(sel, i)
+        i = i + 1
+    }
+    return chosen
+}
+
+// Does the first case that can go ahead without waiting, and gives its
+// number; -1 if none can, as a `select` with a `_` arm would.
+pub fn poll(sel: *Select) -> i64 {
+    return first_ready(sel)
+}
+
+// Whether the receive the last `wait` or `poll` did got a value (true), or found its
+// channel closed and empty (false).
+pub fn received(sel: *Select) -> bool {
+    return sel.received
+}
+
+// Tries the cases in order; does the first that can go ahead.
+fn first_ready(sel: *Select) -> i64 {
+    let i = 0
+    while i < sel.n {
+        let c = &sel.cases[i]
+        if !c.on {
+            i = i + 1
+            continue
+        }
+        let s = c.s
+        sync.lock(&s.lock)
+        let done = false
+        if c.sending {
+            if s.closed {
+                trap()
+            }
+            // Unbuffered: the slot is free, and someone is there to take it.
+            let can = s.len < s.cap
+            if s.unbuffered {
+                can = s.len == 0 && s.receivers > 0
+            }
+            if can {
+                put(s, c.data)
+                done = true
+            }
+        } else if s.len > 0 {
+            take(s, c.data)
+            sel.received = true
+            done = true
+        } else if s.closed {
+            sel.received = false
+            done = true
+        }
+        sync.unlock(&s.lock)
+        if done {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Links case `i`'s waiter into its channel's list.
+fn enlist(sel: *Select, i: i64) {
+    let c = &sel.cases[i]
+    if !c.on {
+        return
+    }
+    let s = c.s
+    let w = &c.waiter
+    sync.lock(&s.lock)
+    w.word = &sel.word
+    w.prev = 0 as *Waiter
+    w.next = s.waiters
+    if s.waiters != 0 as *Waiter {
+        s.waiters.prev = w
+    }
+    s.waiters = w
+    if !c.sending {
+        s.receivers = s.receivers + 1
+        // A sender on an unbuffered channel in a Select may now go ahead.
+        notify(s)
+    }
+    sync.unlock(&s.lock)
+}
+
+// Unlinks case `i`'s waiter.
+fn delist(sel: *Select, i: i64) {
+    let c = &sel.cases[i]
+    if !c.on {
+        return
+    }
+    let s = c.s
+    let w = &c.waiter
+    sync.lock(&s.lock)
+    if w.prev == 0 as *Waiter {
+        s.waiters = w.next
+    } else {
+        w.prev.next = w.next
+    }
+    if w.next != 0 as *Waiter {
+        w.next.prev = w.prev
+    }
+    if !c.sending {
+        s.receivers = s.receivers - 1
+    }
+    sync.unlock(&s.lock)
 }

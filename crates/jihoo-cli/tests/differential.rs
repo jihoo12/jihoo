@@ -618,3 +618,32 @@ fn channels_pass_values_between_threads() {
         assert_eq!(run_compiled(name, &program(body)), None, "{name} should trap");
     }
 }
+
+/// A `Select` waits on native channels of different types at once
+/// (`tests/threads/select.jh`); misusing one traps.
+#[test]
+fn select_waits_on_native_channels() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let src = std::fs::read_to_string(repo_root().join("tests/threads/select.jh")).unwrap();
+    assert_eq!(run_compiled("select", &src), Some(63));
+
+    let program = |body: &str| {
+        format!(
+            "#![native]\nimport channel\nfn main() -> i64 {{\n  let sel = channel.select_new()\n  let x: i64 = 0\n\
+             match channel.new(i64, 1) {{\n    Some(c) => {{\n{body}\n    }}\n    None => {{}}\n  }}\n  return 0\n}}\n"
+        )
+    };
+    let misuses = [
+        ("wait-no-cases", "      channel.wait(&sel)"),
+        ("wait-all-off", "      let i = channel.on_recv(i64, &sel, c, &x)\n      channel.off(&sel, i)\n      channel.wait(&sel)"),
+        ("off-unknown-case", "      channel.off(&sel, 0)"),
+        ("too-many-cases", "      let k = 0\n      while k <= channel.MAX_CASES {\n        channel.on_recv(i64, &sel, c, &x)\n        k += 1\n      }"),
+        ("send-case-closed", "      channel.on_send(i64, &sel, c, &x)\n      channel.close(i64, c)\n      channel.poll(&sel)"),
+    ];
+    for (name, body) in misuses {
+        assert_eq!(run_compiled(name, &program(body)), None, "{name} should trap");
+    }
+}

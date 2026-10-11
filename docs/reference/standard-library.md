@@ -485,8 +485,63 @@ fn main() -> i64 {
 | `fn count(comptime T: type, c: Chan(T)) -> i64` | the values sent and not yet received |
 | `fn free(comptime T: type, c: Chan(T))` | gives the channel's memory back; nothing may use it afterwards |
 
-- A channel is a ring buffer in memory from `malloc`, guarded by a
+- A channel is a ring buffer of bytes in memory from `malloc`, guarded by a
   [`sync.Mutex`](#sync), with one `sync.Cond` for receivers and one for
-  senders.
+  senders. It holds bytes rather than `T`s so that one `Select` can wait on
+  channels of different types; the functions that take `T` are typed doors
+  to it.
 - Any type can be sent; values are copied in and out, as by assignment.
-- There is no `select` over native channels yet.
+
+### Select
+
+A `Select` waits on several channels at once, like hosted programs'
+[`select`](../language/tasks-and-channels.md#select). `select` is a keyword,
+so the functions are `wait` and `poll`. Cases are added once and stay, so a
+loop can wait on the same cases again and again:
+
+```jihoo
+let n: i64 = 0
+let stop = false
+let sel = channel.select_new()
+let got_n = channel.on_recv(i64, &sel, numbers, &n)      // case 0
+let got_stop = channel.on_recv(bool, &sel, quit, &stop)  // case 1
+let running = true
+while running {
+    let i = channel.wait(&sel)       // the case that went ahead
+    if !channel.received(&sel) {
+        channel.off(&sel, i)         // closed: leave it out from now on
+        running = i != got_n
+    } else if i == got_n {
+        total = total + n
+    } else {
+        running = false
+    }
+}
+```
+
+| item | description |
+|------|-------------|
+| `struct Select` | the cases of a select; its fields are private |
+| `fn select_new() -> Select` | a Select without cases |
+| `fn on_recv(comptime T: type, sel: *Select, c: Chan(T), dst: *T) -> i64` | adds a case that receives from `c` into `*dst`, and gives its number (cases count from 0) |
+| `fn on_send(comptime T: type, sel: *Select, c: Chan(T), src: *T) -> i64` | adds a case that sends `*src` on `c`, read when the case goes ahead, and gives its number |
+| `fn wait(sel: *Select) -> i64` | does the first case that can go ahead, waiting until one can, and gives its number |
+| `fn poll(sel: *Select) -> i64` | the same without waiting: -1 if no case can go ahead, like a `_` arm |
+| `fn received(sel: *Select) -> bool` | whether the receive that `wait` or `poll` just did got a value (false: its channel was closed and empty, and `*dst` is unchanged) |
+| `fn off(sel: *Select, i: i64)` | leaves case `i` out from now on, as Go programs do by setting a channel to nil |
+| `const MAX_CASES = 16` | the most cases one Select has |
+
+- A receive case can go ahead when its channel has a value, or is closed and
+  empty. A send case can go ahead when its channel has room; on an
+  unbuffered channel, when a receiver is waiting (in `recv`, or in a `wait`
+  with a receive case on it), and then it does not wait for the receiver to
+  take the value.
+- If several cases can go ahead, the first added wins, as with hosted
+  `select`.
+- What `dst` and `src` point to must stay valid while the Select is used.
+- Misuse stops the program: `wait` with no case on (it would wait forever),
+  more than `MAX_CASES` cases, `off` with a number that is not a case, and a
+  send case on a closed channel.
+- While it waits, a Select links a node per case into its channels and
+  sleeps on a futex word of its own, which a channel bumps whenever a value
+  comes or goes or it closes; it then looks at its cases again.
