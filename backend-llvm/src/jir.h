@@ -12,7 +12,7 @@ namespace jir {
 
 // The one JIR version this backend reads, from the `jir N` header. It must
 // equal JIR_VERSION in crates/jihoo-ir/src/lib.rs (a Rust test checks this).
-constexpr int64_t kVersion = 7;
+constexpr int64_t kVersion = 8;
 
 enum class Profile { Hosted, Native, Freestanding };
 
@@ -127,6 +127,7 @@ enum class Op {
   Cast, Call, FuncRef, CallIndirect, Struct, Field, SetField, Load, Store, Addr, FieldPtr,
   Array, Splat, Elem, SetElem, ElemPtr, Variant, Tag, Payload, GetPath, SetPath,
   Syscall, Print, Asm, Trap,
+  Spawn,
   AtomicLoad, AtomicStore, AtomicSwap, AtomicAdd, AtomicSub, AtomicAnd, AtomicOr, AtomicXor, AtomicCas, Fence,
 };
 
@@ -138,7 +139,7 @@ struct PathStep {
 
 struct Inst {
   Op op;
-  uint32_t dst = 0;            // unused for Store, AtomicStore, Print, Trap and Fence
+  uint32_t dst = 0;            // unused for Store, AtomicStore, Spawn, Print, Trap and Fence
   std::vector<uint32_t> args;  // operand registers
   int64_t imm = 0;             // Const value, field index, or variant index
   double fimm = 0;             // FConst value

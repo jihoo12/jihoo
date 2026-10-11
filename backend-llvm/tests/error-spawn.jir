@@ -1,0 +1,21 @@
+; `spawn` starts a thread of the C library's, which freestanding modules do
+; not have.
+; expect: error `spawn` starts a thread of the C library's; it is only available in native modules
+jir 8
+profile freestanding
+
+fn @idle() -> unit {
+  regs unit
+bb0:
+  %0 = unit
+  ret %0
+}
+
+fn @_start() -> i64 {
+  regs fn() -> unit i64
+bb0:
+  %0 = funcref @idle
+  spawn %0()
+  %1 = const 0
+  ret %1
+}

@@ -103,7 +103,11 @@ then the next ready task gets its turn.
 ## Hosted only
 
 Tasks need the VM's scheduler, so they exist only in hosted programs, and
-run on one OS thread. Native programs have [threads](threads.md), which run
-on every core, and [coroutines](../reference/standard-library.md#coro)
-instead. In JIR, tasks and channels are the `chan`, `send`, `recv`, `select`
-and `spawn` instructions.
+run on one OS thread. In native programs `go f(x)` starts a
+[thread](threads.md) instead, which runs on any core, and the `channel`
+library has channels and `Select` for them; `chan`, `send`, `recv` and
+`select` themselves are hosted only. Native programs also have
+[coroutines](../reference/standard-library.md#coro).
+
+In JIR, tasks and channels are the `chan`, `send`, `recv`, `select` and
+`spawn` instructions.

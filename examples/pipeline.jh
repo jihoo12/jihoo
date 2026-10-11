@@ -1,19 +1,21 @@
 #![native]
 // A worker pool on threads and channels (lib/channel.jh), as Go programs
-// write them: one channel of jobs, several workers that take jobs until it
-// is closed, and one channel of results.
+// write them: `go` starts several workers that take jobs from one channel
+// until it is closed, and send their results on another.
 //   jihoo build examples/pipeline.jh -o out/pipeline && ./out/pipeline
 import channel
 import libc
-import thread
+import sync
 
 const WORKERS = 4
 const JOBS = 100
 
-// What each worker gets: the channels, which it shares with the others.
+// What the workers share: the channels, and a count of the jobs done.
 struct Pool {
     jobs: channel.Chan(i64)
     results: channel.Chan(i64)
+    done: i64
+    running: sync.Group
 }
 
 // The number of steps the Collatz sequence takes from `n` to 1.
@@ -30,29 +32,27 @@ fn collatz(n: i64) -> i64 {
     return steps
 }
 
-// Takes jobs until the channel is closed and empty; gives how many it did.
-fn worker(arg: *u8) -> i64 {
-    let pool = arg as *Pool
-    let done = 0
+// Takes jobs until the channel is closed and empty.
+fn worker(pool: *Pool) {
     let more = true
     while more {
         match channel.recv(i64, pool.jobs) {
             Some(n) => {
                 channel.send(i64, pool.results, collatz(n))
-                done = done + 1
+                atomic_add(&pool.done, 1)
             }
             None => more = false
         }
     }
-    return done
+    sync.group_done(&pool.running)
 }
 
 fn run(jobs: channel.Chan(i64), results: channel.Chan(i64)) -> i64 {
-    let pool = Pool { jobs: jobs, results: results }
-    let workers: [Option(thread.Thread); WORKERS] = [Option.None; WORKERS]
+    let pool = Pool { jobs: jobs, results: results, done: 0, running: sync.group_new() }
+    sync.group_add(&pool.running, WORKERS)
     let i = 0
     while i < WORKERS {
-        workers[i] = thread.spawn(worker, &pool as *u8)
+        go worker(&pool)
         i = i + 1
     }
 
@@ -80,16 +80,9 @@ fn run(jobs: channel.Chan(i64), results: channel.Chan(i64)) -> i64 {
         }
         k = k + 1
     }
-    let done = 0
-    i = 0
-    while i < WORKERS {
-        match workers[i] {
-            Some(t) => done = done + thread.join(&t)
-            None => return 1
-        }
-        i = i + 1
-    }
-    libc.printf("%ld jobs done, %ld steps in all, %ld at most\n", done, total, longest)
+    // The workers use `pool` until they finish: wait for them.
+    sync.group_wait(&pool.running)
+    libc.printf("%ld jobs done, %ld steps in all, %ld at most\n", atomic_load(&pool.done), total, longest)
     channel.free(i64, jobs)
     channel.free(i64, results)
     return 0

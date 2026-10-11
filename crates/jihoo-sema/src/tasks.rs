@@ -1,9 +1,11 @@
 //! Tasks and channels: `go f(x)`, `chan(T, n)`, `send`, `recv` and `select`.
 //!
 //! They need the VM's scheduler (`crates/jihoo-vm/src/lib.rs`), so they are
-//! hosted only. A task shares nothing with the one that started it except what
-//! it is given: arguments are copied, closures capture by value, `ref`s are
-//! immutable. Channels are the only way for tasks to communicate.
+//! hosted only, except `go`: natively it starts a thread of the C library's
+//! (`backend-llvm/src/codegen.cpp`). A task shares nothing with the one that
+//! started it except what it is given: arguments are copied, closures capture
+//! by value, `ref`s are immutable. Channels are the only way for tasks to
+//! communicate.
 
 use jihoo_ir::{BinOp, Inst, Profile, Reg, SelectCase, Terminator, Type};
 use jihoo_syntax::ast::{Expr, ExprKind, SelectArm, SelectOp, TypeExpr};
@@ -21,9 +23,13 @@ impl FnCx<'_> {
     }
 
     /// `go f(x, y)`: evaluates the function and the arguments here, then runs
-    /// the call in a new task.
+    /// the call in a new task on the VM, or natively in a new thread of the C
+    /// library's.
     pub(crate) fn go_stmt(&mut self, pos: Pos, call: &Expr) -> Result<(), Error> {
-        self.check_hosted(pos, "tasks (`go`)")?;
+        if self.profile() == Profile::Freestanding && !self.in_macro {
+            let msg = "`go` needs the VM's scheduler or the C library's threads: hosted and native only";
+            return Err(Error::new(pos, msg));
+        }
         let (callee, args, what) = match &call.kind {
             ExprKind::Call(name, args) => {
                 // `s.f(x)` with a local `s` calls a function stored in a field.

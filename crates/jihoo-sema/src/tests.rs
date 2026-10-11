@@ -856,7 +856,7 @@ fn tasks_and_channels() {
     assert!(err("fn main() { let c = chan(i64)\n print(c == c) }").contains("cannot apply `==`"));
     assert!(err("const C = chan(i64)\nfn main() {}").contains("channel cannot be computed at compile time"));
     assert!(err(&fs("fn f() { let c = chan(i64) }")).contains("only available in hosted mode"));
-    assert!(err(&fs("fn g() {}\nfn f() { go g() }")).contains("only available in hosted mode"));
+    assert!(err(&fs("fn g() {}\nfn f() { go g() }")).contains("hosted and native only"));
     assert!(err(&fs("fn f(c: chan u8) {}")).contains("only available in hosted mode"));
 }
 
@@ -1566,4 +1566,11 @@ fn modules_may_take_send_and_recv() {
         ("ch.jh", "pub fn send(x: i64) -> i64 { return x }\npub fn recv(x: i64) -> i64 { return x }"),
     ])
     .unwrap();
+}
+
+#[test]
+fn go_starts_threads_natively() {
+    let m = check("#![native]\nfn work(p: *i64, n: i64) { atomic_add(p, n) }\nfn main() -> i64 {\n let x = 0\n go work(&x, 1)\n return 0 }").unwrap();
+    assert!(m.to_string().contains("  spawn %"), "{m}");
+    assert!(err(&fs("fn f() {}\nfn g() { go f() }")).contains("`go` needs the VM's scheduler or the C library's threads"));
 }

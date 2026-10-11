@@ -1,0 +1,110 @@
+#![native]
+// `go f(x)` in native code starts a thread (lib/sync.jh waits for them).
+// Each check sets a bit of the exit status, which is 15 if all hold
+// (crates/jihoo-cli/tests/differential.rs).
+import channel
+import sync
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+enum Op {
+    Add(i64)
+    Mul(i64)
+}
+
+struct Shared {
+    total: i64
+    done: sync.Group
+}
+
+fn add(s: *Shared, n: i64) {
+    atomic_add(&s.total, n)
+    sync.group_done(&s.done)
+}
+
+// Aggregates by value: each thread has its own copy.
+fn sum_points(s: *Shared, p: Point, xs: [i64; 4], op: Op) -> Point {
+    let v = p.x + p.y + xs[0] + xs[1] + xs[2] + xs[3]
+    match op {
+        Add(k) => v = v + k
+        Mul(k) => v = v * k
+    }
+    atomic_add(&s.total, v)
+    sync.group_done(&s.done)
+    return Point { x: v, y: v }
+}
+
+fn send_square(c: channel.Chan(i64), n: i64) {
+    channel.send(i64, c, n * n)
+}
+
+fn main() -> i64 {
+    let ok = 0
+
+    // Many threads at once.
+    let s = Shared { total: 0, done: sync.group_new() }
+    sync.group_add(&s.done, 200)
+    let i = 1
+    while i <= 200 {
+        go add(&s, i)
+        i += 1
+    }
+    sync.group_wait(&s.done)
+    if atomic_load(&s.total) == 20100 { ok += 1 }
+
+    // Structs, arrays and enums, copied before the caller changes them.
+    let t = Shared { total: 0, done: sync.group_new() }
+    sync.group_add(&t.done, 2)
+    let p = Point { x: 1, y: 2 }
+    let xs = [3, 4, 5, 6]
+    go sum_points(&t, p, xs, Op.Add(10))
+    p.x = 1000
+    xs[0] = 1000
+    go sum_points(&t, p, xs, Op.Mul(1))
+    sync.group_wait(&t.done)
+    if atomic_load(&t.total) == 31 + 2017 { ok += 2 }
+
+    // A function value, and channels for the results.
+    match channel.new(i64, 0) {
+        Some(c) => {
+            let f = send_square
+            let k = 1
+            while k <= 10 {
+                go f(c, k)
+                k += 1
+            }
+            let sum = 0
+            k = 0
+            while k < 10 {
+                match channel.recv(i64, c) {
+                    Some(v) => sum += v
+                    None => {}
+                }
+                k += 1
+            }
+            if sum == 385 { ok += 4 }
+        }
+        None => {}
+    }
+
+    // A function value in a struct field.
+    let u = Shared { total: 0, done: sync.group_new() }
+    sync.group_add(&u.done, 1)
+    let h = Holder { f: add }
+    go h.f(&u, 7)
+    sync.group_wait(&u.done)
+    if atomic_load(&u.total) == 7 { ok += 8 }
+
+    // A function with no arguments: nothing to copy.
+    go idle()
+    return ok
+}
+
+fn idle() {}
+
+struct Holder {
+    f: fn(*Shared, i64)
+}

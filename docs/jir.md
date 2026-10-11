@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 7)
+# JIR — jihoo IR text format (version 8)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -37,6 +37,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 5 | lists (`[T]`) with `len`, `slice`, `repeat`, `push`, `pop`, and `array`, `elem`, `setelem` and paths on them; on `str`: `len`, `strbyte`, `slice`, `frombytes`, ordering; `readline` |
 | 6 | `trap` |
 | 7 | atomics: `atomic_load`, `atomic_store`, `atomic_swap`, `atomic_add`, `atomic_sub`, `atomic_and`, `atomic_or`, `atomic_xor`, `atomic_cas`, and `fence` |
+| 8 | `spawn` in native modules, starting a thread |
 
 ## Example
 
@@ -89,7 +90,7 @@ bb3:
 ## Module
 
 ```
-jir 7                                ; format version, must come first
+jir 8                                ; format version, must come first
 profile hosted|native|freestanding   ; language profile
 target x86_64|aarch64                ; the machine, 64-bit Linux
 struct ...                           ; zero or more structs
@@ -318,20 +319,27 @@ Types containing a `ref` have no fixed layout, like those containing `str`.
 | `%d = cellget %c, (step, ...)`      | `cell T`, a path into `T` (may be empty) | type at the end of the path | read what the cell holds, or a part of it |
 | `cellset %c, (step, ...), %v`       | `cell T`, a path, the type at its end | | replace what the cell holds, or a part of it |
 
-### Tasks and channels (hosted only)
+### Tasks and channels (hosted only, but `spawn`)
 
 | syntax                              | operands              | result | meaning |
 |-------------------------------------|-----------------------|--------|---------|
 | `%d = chan %n`                      | `i64`                 | `chan T` | a new channel buffering up to `%n` values (0: sender and receiver meet) |
 | `send %c, %v`                       | `chan T, T`           |        | send `%v`, waiting while the channel is full |
 | `%d = recv %c`                      | `chan T`              | `T`    | receive a value, waiting until there is one |
-| `spawn %f(%a, ...)`                 | `%f: fn(P...) -> R`, then `P...` | | call `%f` in a new task; the result is dropped |
+| `spawn %f(%a, ...)`                 | `%f: fn(P...) -> R`, then `P...` | | call `%f` in a new task; the result is dropped. Also native: in a new, detached thread of the C library's |
 | `%d = select [case \| ...]`          | each case `recv %c -> %v` (`%v: T`) or `send %c, %v`, optionally a last `default` | `i64` | do the first case that can go ahead, waiting until one can; `%d` is its index. With `default` it does not wait: `%d` is the number of cases if none can go ahead |
 
 The VM runs tasks on one thread with a deterministic round-robin scheduler; the
 run ends when the entry function returns. A task is only switched out at a
 call, at a jump to a block with a lower or equal number (every loop has one,
 since blocks are numbered breadth-first), or when it waits on a channel.
+
+In a native module, `spawn` copies `%f` and the arguments into memory from
+`malloc` and starts a thread with `pthread_create`, which calls `%f` with
+them, frees the memory and ends; the thread is detached (`pthread_detach`),
+so nothing waits for it, and returning from `main` ends the program with it.
+Running out of memory or threads traps. Freestanding modules have no
+`spawn`.
 
 ### Arrays
 

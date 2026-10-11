@@ -8,16 +8,15 @@ library keep them from getting in each other's way (`examples/threads.jh`).
 #![native]
 import libc
 import sync
-import thread
 
 struct Counter {
     lock: sync.Mutex
     total: i64
     hits: i64
+    running: sync.Group
 }
 
-fn work(arg: *u8) -> i64 {
-    let c = arg as *Counter
+fn work(c: *Counter) {
     let i = 0
     while i < 1000 {
         sync.lock(&c.lock)          // one thread at a time in here
@@ -26,21 +25,15 @@ fn work(arg: *u8) -> i64 {
         atomic_add(&c.hits, 1)      // no lock needed
         i = i + 1
     }
-    return 0
+    sync.group_done(&c.running)
 }
 
 fn main() -> i64 {
-    let c = Counter { lock: sync.mutex_new(), total: 0, hits: 0 }
-    let a = thread.spawn(work, &c as *u8)
-    let b = thread.spawn(work, &c as *u8)
-    match a {
-        Some(t) => thread.join(&t)
-        None => return 1
-    }
-    match b {
-        Some(t) => thread.join(&t)
-        None => return 1
-    }
+    let c = Counter { lock: sync.mutex_new(), total: 0, hits: 0, running: sync.group_new() }
+    sync.group_add(&c.running, 2)
+    go work(&c)                     // two threads, on two cores
+    go work(&c)
+    sync.group_wait(&c.running)     // until both are done
     libc.printf("%ld %ld\n", c.total, c.hits)    // 999000 2000
     return 0
 }
@@ -48,8 +41,23 @@ fn main() -> i64 {
 
 ## Threads
 
+`go f(x, y)` starts a thread that calls `f(x, y)`, as it starts a
+[task](tasks-and-channels.md) in hosted programs. The function and its
+arguments are evaluated first, in the thread that says `go`, and copied, so
+the new thread has values of its own; a pointer argument still points to the
+same memory. Any function value works, and the result is dropped.
+
+- The thread is the C library's (`pthread_create`), and runs on any core.
+- Nothing waits for it: `main` returning ends the program, threads and all,
+  as in Go. Wait for threads with a `sync.Group`, or have them send their
+  results over a [channel](#channels).
+- If the system has no thread or memory to spare, the program stops, as it
+  does for a failed bounds check.
+- Freestanding programs have no threads, so no `go`.
+
 The [`thread`](../reference/standard-library.md#thread) library starts
-threads with the C library's POSIX threads, so it is for native programs.
+threads too, ones that can be joined to get their result, and that report
+failing to start instead of stopping the program:
 
 - `thread.spawn(f, arg)` starts a thread that calls `f(arg)`, where `f` is a
   `fn(*u8) -> i64` and `arg` is any pointer, cast to `*u8`. It gives
@@ -60,9 +68,9 @@ threads with the C library's POSIX threads, so it is for native programs.
 - `thread.cpus()` is the number of cores; `thread.yield()` and
   `thread.sleep_ms(ms)` give the others a turn.
 
-A thread's function gets its input through `arg`, usually a pointer to a
-struct. Whatever it points to must outlive the thread: memory from `malloc`,
-or a local of a function that joins the thread before it returns.
+Whatever a pointer given to a thread points to must outlive the thread's use
+of it: memory from `malloc`, or a local of a function that waits for the
+thread (with `join` or a `sync.Group`) before it returns.
 
 ## Data races
 

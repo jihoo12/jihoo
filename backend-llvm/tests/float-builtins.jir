@@ -4,7 +4,7 @@
 ; and every NaN reads as the one quiet NaN. Each failed check exits with its
 ; own number.
 ; expect: exit 0
-jir 7
+jir 8
 profile freestanding
 
 ; Whether `a` and `b` have the same bits.

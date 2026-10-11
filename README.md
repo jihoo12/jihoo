@@ -125,8 +125,8 @@ the VM.
   locks) libraries.
 - **native:** `print`; C functions through `extern fn` and the `libc` module,
   structs passed to C by value, C files and libraries linked in; threads on
-  every core and channels between them (the `thread` and `channel`
-  libraries); the `coro` library.
+  every core (`go`, and the `thread` library) and channels and `Select`
+  between them (the `channel` library); the `coro` library.
 
 See the [examples](examples) and the [roadmap](docs/internals/roadmap.md).
 

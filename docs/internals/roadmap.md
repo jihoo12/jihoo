@@ -50,7 +50,8 @@
     locks (`Mutex`, `Cond`, `Group`) for native and freestanding code;
     `lib/thread.jh`, POSIX threads for native code; `lib/channel.jh`,
     channels between threads with `close`, and `Select` over them (`send`
-    and `recv` are now names a module may take).
+    and `recv` are now names a module may take); `go f(x)` in native code,
+    starting a detached thread (JIR version 8).
 
 ## Next
 
@@ -59,9 +60,9 @@
 - **Native code:** structs by value through function values handed to C
   (callbacks take scalars only); `print` in freestanding programs.
 - **Concurrency:** weaker memory orders (acquire/release) for code that needs
-  the speed; threads in freestanding programs, over `clone`; `go` syntax for
-  native threads; a timeout case for `Select`; tasks on more than one core
-  in the VM, which needs a GC that threads can share.
+  the speed; threads in freestanding programs, over `clone`; a timeout case
+  for `Select`; tasks on more than one core in the VM, which needs a GC that
+  threads can share.
 - **Hosted library:** a map keyed by `str`; files; parsing floats; `for`
   loops over lists and ranges, so that library code needs fewer `while` loops.
 

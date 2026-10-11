@@ -402,8 +402,9 @@ impl Cx<'_> {
                         expect(dst, &Type::I64)
                     }
                     Inst::Spawn { callee, args } => {
-                        if profile != Profile::Hosted {
-                            return Err(at("`spawn` needs the VM's scheduler; hosted only".into()));
+                        // A task on the VM, a thread of the C library natively.
+                        if profile == Profile::Freestanding {
+                            return Err(at("`spawn` needs the VM or the C library; not freestanding".into()));
                         }
                         let Type::Fn(params, _) = ty(callee)? else {
                             return Err(at(format!("{callee} is not a function")));

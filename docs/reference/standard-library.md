@@ -394,6 +394,8 @@ fn deposit(a: *Account, n: i64) {
 Threads for native programs, on the C library's POSIX threads: functions that
 run at the same time, on every core of the machine. Coordinate them with the
 atomics or [`sync`](#sync) ([Threads and atomics](../language/threads.md)).
+`go f(x)` starts a thread with less ceremony, but one that cannot be joined;
+this library's threads give back their result, and report failing to start.
 
 ```jihoo
 #![native]

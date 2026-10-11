@@ -613,6 +613,16 @@ Module parse(const std::string &text) {
         l.end();
         continue;
       }
+      // `spawn %f(%a, ...)`: the function value first, then the arguments.
+      if (w == "spawn") {
+        Inst inst{};
+        inst.op = Op::Spawn;
+        inst.args = {l.reg()};
+        for (uint32_t r : l.reg_list()) inst.args.push_back(r);
+        block->insts.push_back(inst);
+        l.end();
+        continue;
+      }
       if (w == "print" || w == "store" || w == "atomic_store") {
         Inst inst{};
         inst.op = w == "print" ? Op::Print : w == "store" ? Op::Store : Op::AtomicStore;

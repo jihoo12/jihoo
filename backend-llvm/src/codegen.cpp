@@ -427,6 +427,66 @@ class FnGen {
     fail(f_.name, "cannot print " + t.str());
   }
 
+  // `spawn %f(%a, ...)` in a native module: a detached thread of the C
+  // library's that calls `f(a, ...)`. The function value and the arguments
+  // are copied into memory from `malloc`, which the thread frees after the
+  // call; failing to get the memory or the thread traps.
+  void spawn(const jir::Inst &inst) {
+    if (!native_) fail(f_.name, "`spawn` starts a thread of the C library's; it is only available in native modules");
+    const jir::Type &ft = type(inst.args.at(0));
+    if (ft.kind != jir::Type::Fn) fail(f_.name, "`spawn` needs a function value");
+    if (ft.params.size() != inst.args.size() - 1) fail(f_.name, "wrong number of arguments to `spawn`");
+    Type *ptr = PointerType::get(ctx_, 0);
+    std::vector<Type *> fields{ptr};
+    for (size_t i = 1; i < inst.args.size(); i++) {
+      if (type(inst.args[i]) != ft.params[i - 1])
+        fail(f_.name, "argument " + std::to_string(i) + " to `spawn` has the wrong type");
+      fields.push_back(types_.lower(ft.params[i - 1]));
+    }
+    StructType *env_ty = StructType::get(ctx_, fields);
+    uint64_t size = mod_.getDataLayout().getTypeAllocSize(env_ty);
+
+    FunctionCallee malloc_fn = mod_.getOrInsertFunction("malloc", FunctionType::get(ptr, {i64_}, false));
+    Value *env = b_.CreateCall(malloc_fn, {b_.getInt64(size)});
+    check(b_.CreateIsNotNull(env), "spawn.env");
+    b_.CreateStore(load(inst.args[0]), b_.CreateStructGEP(env_ty, env, 0));
+    for (size_t i = 1; i < inst.args.size(); i++)
+      write_mem(b_.CreateStructGEP(env_ty, env, unsigned(i)), inst.args[i]);
+
+    // pthread_t is an unsigned long on Linux, on x86_64 and aarch64 alike.
+    Type *i32 = b_.getInt32Ty();
+    FunctionCallee create = mod_.getOrInsertFunction("pthread_create", FunctionType::get(i32, {ptr, ptr, ptr, ptr}, false));
+    FunctionCallee detach = mod_.getOrInsertFunction("pthread_detach", FunctionType::get(i32, {i64_}, false));
+    AllocaInst *id = b_.CreateAlloca(i64_, nullptr, "thread");
+    Value *err = b_.CreateCall(create, {id, ConstantPointerNull::get(PointerType::get(ctx_, 0)),
+                                        spawn_trampoline(ft, env_ty), env});
+    check(b_.CreateICmpEQ(err, ConstantInt::get(i32, 0)), "spawn.started");
+    b_.CreateCall(detach, {b_.CreateLoad(i64_, id)});
+  }
+
+  // A C thread start function, `void *(void *env)`, that calls the function
+  // value in `env` (of type `ft`) with the arguments after it, frees `env`,
+  // and returns null. Aggregates are passed by pointer, as everywhere: here
+  // pointers into `env`, which the callee copies before `env` is freed.
+  Function *spawn_trampoline(const jir::Type &ft, StructType *env_ty) {
+    Type *ptr = PointerType::get(ctx_, 0);
+    auto *fn = Function::Create(FunctionType::get(ptr, {ptr}, false), GlobalValue::InternalLinkage, "jihoo.go", mod_);
+    IRBuilder<> b(BasicBlock::Create(ctx_, "entry", fn));
+    Value *env = fn->getArg(0);
+    std::vector<Value *> args;
+    const jir::Type &ret = *ft.pointee;
+    if (Types::is_agg(ret)) args.push_back(b.CreateAlloca(types_.lower(ret)));  // the result, dropped
+    Value *callee = b.CreateLoad(ptr, b.CreateStructGEP(env_ty, env, 0));
+    for (size_t i = 0; i < ft.params.size(); i++) {
+      Value *field = b.CreateStructGEP(env_ty, env, unsigned(i + 1));
+      args.push_back(Types::is_agg(ft.params[i]) ? field : b.CreateLoad(types_.lower(ft.params[i]), field));
+    }
+    b.CreateCall(types_.signature(ft.params, ret), callee, args);
+    b.CreateCall(mod_.getOrInsertFunction("free", FunctionType::get(Type::getVoidTy(ctx_), {ptr}, false)), {env});
+    b.CreateRet(ConstantPointerNull::get(PointerType::get(ctx_, 0)));
+    return fn;
+  }
+
   void memcopy(Value *dst, Value *src, const jir::Type &t) {
     const DataLayout &dl = mod_.getDataLayout();
     Type *ty = types_.lower(t);
@@ -877,6 +937,7 @@ class FnGen {
         return;
       }
       case Op::Fence: b_.CreateFence(AtomicOrdering::SequentiallyConsistent); return;
+      case Op::Spawn: spawn(inst); return;
       case Op::Addr: store(inst.dst, slot(arg_reg(0))); return;
       case Op::FieldPtr: {
         const jir::Type &t = type(arg_reg(0));

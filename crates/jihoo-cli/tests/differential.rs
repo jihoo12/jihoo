@@ -647,3 +647,15 @@ fn select_waits_on_native_channels() {
         assert_eq!(run_compiled(name, &program(body)), None, "{name} should trap");
     }
 }
+
+/// `go f(x)` in native code starts a detached thread, with the arguments
+/// copied (`tests/threads/go.jh`).
+#[test]
+fn go_starts_native_threads() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let src = std::fs::read_to_string(repo_root().join("tests/threads/go.jh")).unwrap();
+    assert_eq!(run_compiled("go", &src), Some(15));
+}
