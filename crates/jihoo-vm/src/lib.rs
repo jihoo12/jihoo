@@ -906,6 +906,7 @@ impl<'m> Vm<'m> {
                 };
                 writeln!(out, "{line}").map_err(|e| self.error(&format!("print failed: {e}")))?;
             }
+            Inst::Trap => return Err(self.error("trap: the program called `trap()`")),
             Inst::Syscall { .. } => return Err(self.error("`syscall` is not available on the VM")),
             Inst::Asm { .. } => return Err(self.error("inline asm is not available on the VM")),
             Inst::Quote { dst, pieces, holes, kinds } => {
@@ -2089,5 +2090,14 @@ fn main() {
         assert!(run(&m, &mut Vec::new()).unwrap_err().msg.contains("index 1 out of bounds for length 1"));
         let m = compile("fn main() {\n let n = 0 - 1\n let xs: [i64] = [0; n] }");
         assert!(run(&m, &mut Vec::new()).unwrap_err().msg.contains("cannot make a list of -1 elements"));
+    }
+
+    #[test]
+    fn trap_stops_the_program() {
+        let m = compile("fn main() {\n print(1)\n trap()\n print(2) }");
+        let mut out = Vec::new();
+        let err = Vm::new(&m).run_main(&mut out).unwrap_err();
+        assert!(err.msg.contains("trap"), "{}", err.msg);
+        assert_eq!(String::from_utf8(out).unwrap(), "1\n");
     }
 }

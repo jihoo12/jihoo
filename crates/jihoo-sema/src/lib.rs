@@ -322,10 +322,10 @@ fn is_builtin(name: &str) -> bool {
 }
 
 /// Builtins whose names a module may take: a module that defines a function
-/// of that name calls its own (as `alloc.push` is). Floats, and the hosted
-/// builtins for lists and input.
+/// of that name calls its own (as `alloc.push` is). Floats, `trap`, and the
+/// hosted builtins for lists and input.
 pub(crate) fn is_takeable_builtin(name: &str) -> bool {
-    floats::is_float_builtin(name) || matches!(name, "read_line" | "push" | "pop" | "from_bytes")
+    floats::is_float_builtin(name) || matches!(name, "trap" | "read_line" | "push" | "pop" | "from_bytes")
 }
 
 struct BlockBuf {
@@ -1141,6 +1141,19 @@ impl<'a> FnCx<'a> {
         Ok(self.emit_to(self.ty(src).clone(), |dst| Inst::Slice { dst, src, lo, hi }))
     }
 
+    /// `trap()`: stops the program. Code after it is unreachable, so a
+    /// function may end with it instead of a `return`.
+    fn trap(&mut self, pos: Pos, args: &[Expr]) -> Result<Reg, Error> {
+        if !args.is_empty() {
+            return Err(Error::new(pos, "`trap` takes no arguments"));
+        }
+        self.emit(Inst::Trap);
+        self.terminate(Terminator::Unreachable);
+        let dead = self.new_block();
+        self.switch_to(dead);
+        Ok(self.unit())
+    }
+
     /// `read_line()`: the next line of standard input with its `\n`, or `""`
     /// at the end.
     fn read_line(&mut self, pos: Pos, args: &[Expr]) -> Result<Reg, Error> {
@@ -1396,6 +1409,7 @@ impl<'a> FnCx<'a> {
                 let (module, base) = hygiene::qualified(name).unwrap_or((self.bindings.module, name));
                 if is_takeable_builtin(base) && !self.env.has_function(module, base) {
                     return match base {
+                        "trap" => self.trap(pos, args),
                         "read_line" => self.read_line(pos, args),
                         "push" => self.list_push(pos, args),
                         "pop" => self.list_pop(pos, args),

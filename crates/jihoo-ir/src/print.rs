@@ -153,6 +153,7 @@ impl Display for Inst {
             Inst::ElemPtr { dst, ptr, index } => write!(f, "{dst} = elemptr {ptr}, {index}"),
             Inst::Syscall { dst, args } => write!(f, "{dst} = syscall({})", list(args)),
             Inst::Print { src } => write!(f, "print {src}"),
+            Inst::Trap => write!(f, "trap"),
             Inst::ToStr { dst, src } => write!(f, "{dst} = to_str {src}"),
             Inst::Len { dst, src } => write!(f, "{dst} = len {src}"),
             Inst::StrByte { dst, src, index } => write!(f, "{dst} = strbyte {src}, {index}"),

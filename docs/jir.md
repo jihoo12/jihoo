@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 5)
+# JIR — jihoo IR text format (version 6)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -35,6 +35,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 3 | `stringify`, and hygiene marks in the code `quote` builds |
 | 4 | float operations (`sqrt`, `floor`, `ceil`, `trunc`, `round`, `abs`, `copysign`) and `bitcast`; `print` in native modules; structs to and from C by value, and `export`; `select` cases separated by `\|` |
 | 5 | lists (`[T]`) with `len`, `slice`, `repeat`, `push`, `pop`, and `array`, `elem`, `setelem` and paths on them; on `str`: `len`, `strbyte`, `slice`, `frombytes`, ordering; `readline` |
+| 6 | `trap` |
 
 ## Example
 
@@ -87,7 +88,7 @@ bb3:
 ## Module
 
 ```
-jir 5                                ; format version, must come first
+jir 6                                ; format version, must come first
 profile hosted|native|freestanding   ; language profile
 target x86_64|aarch64                ; the machine, 64-bit Linux
 struct ...                           ; zero or more structs
@@ -381,6 +382,7 @@ the list is changed in place unless something else refers to it, so a loop of
 | syntax                          | operands              | result | meaning |
 |---------------------------------|-----------------------|--------|---------|
 | `%d = syscall(%n, %a, ...)`     | int or `*T`, 1 to 7 operands | `i64` | native and freestanding only: raw Linux syscall `%n` |
+| `trap`                          |                       |        | stop the program: a runtime error on the VM, `llvm.trap` natively (as a failed bounds or division check); the block ends with `unreachable` after it |
 | `print %a`                      | number, `bool`, and `str` (hosted) or `*u8` (native) |      | hosted and native: print the value and a newline (floats as the shortest text that reads back exactly, ties rounded up: `0.1`, `1.0`, `1e100`, `inf`, `NaN`; a `*u8` is a NUL-terminated string); natively through the C library's `stdout` |
 | `%d = to_str %a`                | number or `bool`      | `str`  | hosted (and macros): the value as text, as `print` writes it |
 | `%d = unique %p`                | `str`                 | `str`  | compile time only: `p` plus a number unique in this compilation |

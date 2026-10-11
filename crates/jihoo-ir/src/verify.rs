@@ -587,6 +587,7 @@ impl Cx<'_> {
                         expect(src, &Type::List(Box::new(Type::U8))).and(expect(dst, &Type::Str))
                     }
                     Inst::ReadLine { dst } => expect(dst, &Type::Str),
+                    Inst::Trap => Ok(()),
                     Inst::Unique { .. } => Err("`unique` only exists at compile time".into()),
                     Inst::Stringify { .. } => Err("`stringify` only exists at compile time".into()),
                     Inst::Print { src } => {

@@ -603,6 +603,13 @@ Module parse(const std::string &text) {
       }
       const std::string &w = l.next("an instruction").text;
       Terminator &t = block->term;
+      if (w == "trap") {
+        Inst inst{};
+        inst.op = Op::Trap;
+        block->insts.push_back(inst);
+        l.end();
+        continue;
+      }
       if (w == "print" || w == "store") {
         Inst inst{};
         inst.op = w == "print" ? Op::Print : Op::Store;

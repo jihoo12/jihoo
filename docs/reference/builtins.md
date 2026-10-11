@@ -12,6 +12,7 @@ function value. A local variable of a non-function type does not hide them, so
 | `len(a)` | `i64` | the length of an array `a: [T; N]`, or of the array `a: *[T; N]` points to, a constant; in hosted programs also the bytes of a `str` or the elements of a list `[T]` |
 | `size_of(T)` | `i64` | the size of type `T` in bytes, by C layout rules for 64-bit targets; a constant |
 | `align_of(T)` | `i64` | the alignment of type `T` in bytes; a constant |
+| `trap()` | never returns | stops the program: a runtime error on the VM, a trap (SIGILL) natively, as a failed bounds check does. Code after it is unreachable, so a function can end with it instead of a `return`. A module may take the name, as it may `sqrt` |
 
 `size_of` and `align_of` take a type, and work for every type with a fixed
 layout: not `str`, `ref`, `cell`, `chan`, or types containing them

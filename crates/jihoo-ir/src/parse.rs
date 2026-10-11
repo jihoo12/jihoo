@@ -633,6 +633,7 @@ fn statement(l: &mut Line) -> Result<Stmt> {
             Stmt::Inst(Inst::Push { root, path, value: l.reg()? })
         }
         "print" => Stmt::Inst(Inst::Print { src: l.reg()? }),
+        "trap" => Stmt::Inst(Inst::Trap),
         "jmp" => Stmt::Term(Terminator::Jump(l.block()?)),
         "br" => {
             let cond = l.reg()?;

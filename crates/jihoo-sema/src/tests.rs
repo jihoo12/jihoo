@@ -1508,3 +1508,14 @@ fn the_prelude_is_everywhere() {
     ])
     .unwrap();
 }
+
+#[test]
+fn trap_ends_a_path() {
+    // Code after `trap()` is unreachable, so the function needs no `return` there.
+    let m = check("fn f(x: i64) -> i64 {\n if x > 0 { return x }\n trap()\n}\nfn main() { print(f(1)) }").unwrap();
+    assert!(m.to_string().contains("  trap\n  unreachable\n"), "{m}");
+    check(&fs("fn f() -> i64 { trap() }")).unwrap();
+    assert!(err("fn main() { trap(1) }").contains("`trap` takes no arguments"));
+    // A module's own `trap` wins over the builtin.
+    check("fn trap() -> i64 { return 1 }\nfn main() { print(trap()) }").unwrap();
+}

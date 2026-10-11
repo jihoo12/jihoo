@@ -918,6 +918,11 @@ class FnGen {
         return;
       }
       case Op::Print: print(arg_reg(0)); return;
+      // Goes to the shared trap block; what follows in the JIR block is dead.
+      case Op::Trap: {
+        check(ConstantInt::getFalse(ctx_), "after.trap");
+        return;
+      }
     }
   }
 

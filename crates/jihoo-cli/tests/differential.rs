@@ -441,3 +441,9 @@ fn words_example_reads_standard_input() {
     let expected = "11 words\n     3  the\n     2  and\n     2  end\n     1  a\n     1  cat\n";
     assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
 }
+
+#[test]
+fn trap_fails_on_both_backends() {
+    let body = "fn check(x: i64) -> i64 {\n  if x < 10 { return x }\n  trap()\n}\nfn entry() -> i64 { return check(3) + check(30) }\n";
+    fails_on_both_backends("trap", body, "trap: the program called `trap()`");
+}

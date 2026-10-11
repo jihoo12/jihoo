@@ -23,7 +23,7 @@ pub use verify::verify;
 /// module instead of compiling it with other rules. Bump it whenever the
 /// format or the meaning of anything in it changes (see "Versions" in
 /// `docs/jir.md`); the `version` tests check that both sides and the spec agree.
-pub const JIR_VERSION: u32 = 5;
+pub const JIR_VERSION: u32 = 6;
 
 /// Language profile, selected with `#![native]` or `#![freestanding]` at the
 /// top of a source file.
@@ -400,6 +400,9 @@ pub enum Inst {
     ElemPtr { dst: Reg, ptr: Reg, index: Reg },
     /// Native and freestanding only. First argument is the syscall number, then up to 6 more.
     Syscall { dst: Reg, args: Vec<Reg> },
+    /// Stops the program: an error on the VM, a trap natively. The block
+    /// ends with `unreachable` after it.
+    Trap,
     /// Hosted-only builtin.
     Print { src: Reg },
     /// Hosted (and macros): a number or bool as text.
@@ -572,6 +575,7 @@ impl Inst {
                 }))
                 .collect(),
             Print { src } => vec![src],
+            Trap => vec![],
             Call { dst, args, .. }
             | Struct { dst, fields: args, .. }
             | Variant { dst, fields: args, .. }
