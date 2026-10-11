@@ -34,7 +34,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 2 | the `target` header |
 | 3 | `stringify`, and hygiene marks in the code `quote` builds |
 | 4 | float operations (`sqrt`, `floor`, `ceil`, `trunc`, `round`, `abs`, `copysign`) and `bitcast`; `print` in native modules; structs to and from C by value, and `export`; `select` cases separated by `\|` |
-| 5 | strings as bytes: `len`, `strbyte`, `slice` and ordering on `str`; `readline` |
+| 5 | lists (`[T]`) with `len`, `slice`, `repeat`, `push`, `pop`, and `array`, `elem`, `setelem` and paths on them; on `str`: `len`, `strbyte`, `slice`, `frombytes`, ordering; `readline` |
 
 ## Example
 
@@ -151,6 +151,7 @@ cannot be a `funcref`.
 | `$Name`           | struct or enum, by value                 | named struct  |
 | `expr`, `stmts`, `items` | code, inside macros; compile time only | —        |
 | `[N x T]`         | array of `N` `T`s, by value              | `[N x T]`     |
+| `[T]`             | list of any number of `T`s, by value, hosted only | —     |
 | `fn(T, ...) -> R` | function value                           | `ptr`         |
 | `ref T`           | immutable GC reference to a `T`, hosted only | —         |
 | `chan T`          | channel of `T` values between tasks, hosted only | —     |
@@ -260,9 +261,9 @@ The result type is what the destination register must be declared as.
 | `%d = bitcast %a`               | `f32`, `f64`, `u32` or `u64` | `u32`, `u64`, `f32` or `f64` | the same bits as the other type: a float as the unsigned integer of its width, or back; every NaN reads as the quiet NaN with a clear sign (`0x7fc00000`, `0x7ff8000000000000`) |
 | `%d = and\|or\|xor %a, %b`      | `T, T` (int or `bool`) | `T`   | bitwise (for `bool`: logical, both sides evaluated) |
 | `%d = shl\|shr %a, %b`          | `T, T` (int)          | `T`    | shift by `%b` modulo the bit width; `shr` is arithmetic for signed types, logical for unsigned |
-| `%d = add %a, %b`               | `str, str`            | `str`  | concatenation |
+| `%d = add %a, %b`               | `str, str` or `[T], [T]` | the same | concatenation |
 | `%d = add\|sub %a, %b`          | `*T, i64`             | `*T`   | pointer offset in elements of `T` |
-| `%d = eq\|ne %a, %b`            | `T, T`: `bool`, int, float, `str`, `*U` | `bool` | equality (`str` compares contents; floats as IEEE: NaN is unequal to itself, `0.0 == -0.0`); the frontend compares structs, enums, arrays and refs with helper functions `@fn.eq.N` |
+| `%d = eq\|ne %a, %b`            | `T, T`: `bool`, int, float, `str`, `*U` | `bool` | equality (`str` compares contents; floats as IEEE: NaN is unequal to itself, `0.0 == -0.0`); the frontend compares structs, enums, arrays, lists and refs with helper functions `@fn.eq.N` |
 | `%d = lt\|le\|gt\|ge %a, %b`    | `T, T`: int, float, `str` or `*U` | `bool` | ordered comparison, signed or unsigned by type; pointers unsigned; `str` byte by byte, a prefix first; false if either float is NaN |
 | `%d = cast %a`                  | see below             | dst type | conversion |
 | `%d = call @f(%a, ...)`         | parameter types of `@f` | return type of `@f` | call |
@@ -342,16 +343,28 @@ runtime error and native code traps.
 | `%d = elem %a, %i`                  | `[N x T], i64`        | `T`    | read an element |
 | `%d = setelem %a, %i, %v`           | `[N x T], i64, T`     | `[N x T]` | copy of `%a` with element `%i` replaced |
 
-### Strings (hosted only)
+### Lists and strings (hosted only)
 
-A `str` is a sequence of bytes, usually UTF-8.
+A list `[T]` is an array whose length is known only when the program runs.
+`array` builds one when `%d` is a list (of as many elements as it lists), and
+`elem`, `setelem`, `getpath`, `setpath`, `cellget` and `cellset` work on lists
+as on arrays, bounds-checked against the current length. `len` and `slice`
+also take a `str`, which is a sequence of bytes.
 
 | syntax                              | operands              | result | meaning |
 |-------------------------------------|-----------------------|--------|---------|
-| `%d = len %s`                       | `str`                 | `i64`  | the number of bytes |
-| `%d = slice %s, %lo, %hi`           | `str, i64, i64`       | `str`  | bytes `%lo` up to `%hi`; an error unless `0 <= lo <= hi <= len` |
+| `%d = len %a`                       | `str` or `[T]`        | `i64`  | the number of bytes or elements |
+| `%d = slice %a, %lo, %hi`           | `str` or `[T]`, `i64, i64` | the type of `%a` | bytes or elements `%lo` up to `%hi`; an error unless `0 <= lo <= hi <= len` |
 | `%d = strbyte %s, %i`               | `str, i64`            | `u8`   | byte `%i`; bounds-checked |
+| `%d = frombytes %b`                 | `[u8]`                | `str`  | the string of those bytes |
+| `%d = repeat %v, %n`                | `T, i64`              | `[T]`  | `%n` copies of `%v`; an error if `%n` is negative |
+| `push %r, (step, ...), %v`          | a register, a path to a `[T]` in it (may be empty), `T` | | append `%v` to the list at the path in `%r`, or in what `%r` holds if it is a cell |
+| `%d = pop %r, (step, ...)`          | as `push`             | `T`    | remove the last element of that list and give it; an error if the list is empty |
 | `%d = readline`                     |                       | `str`  | the next line of standard input, with its `\n`; `""` at the end of the input |
+
+`push` and `pop` change register `%r` (or the cell): as for `setpath %r, %r`,
+the list is changed in place unless something else refers to it, so a loop of
+`push`es takes time in proportion to the number of elements.
 
 ### Memory (native and freestanding only)
 

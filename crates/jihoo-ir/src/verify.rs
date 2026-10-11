@@ -177,16 +177,30 @@ impl Cx<'_> {
         for step in path {
             t = match (step, &t) {
                 (PathStep::Field(i), _) => self.field(&t, *i)?.clone(),
-                (PathStep::Elem(r), Type::Array(elem, _)) => {
+                (PathStep::Elem(r), Type::Array(elem, _) | Type::List(elem)) => {
                     if regs.get(r.0 as usize) != Some(&Type::I64) {
                         return Err(format!("index {r} is not an i64 register"));
                     }
                     (**elem).clone()
                 }
-                (PathStep::Elem(_), t) => return Err(format!("{} is not an array", t.jir())),
+                (PathStep::Elem(_), t) => return Err(format!("{} is not an array or list", t.jir())),
             };
         }
         Ok(t)
+    }
+
+    /// The type at `path` in a register of type `root` for `push` and `pop`:
+    /// what a cell holds, if `root` is one.
+    fn list_at(&self, root: &Type, path: &[PathStep], regs: &[Type]) -> Result<Type, String> {
+        let t = match root {
+            Type::Cell(t) => t,
+            t => t,
+        };
+        if path.is_empty() {
+            Ok(t.clone())
+        } else {
+            self.walk(t, path, regs)
+        }
     }
 
     fn variant<'a>(&'a self, t: &Type, index: u32) -> Result<&'a [Type], String> {
@@ -460,8 +474,11 @@ impl Cx<'_> {
                         expect(dst, ty(src)?)
                     }
                     Inst::Array { dst, items } => {
-                        let Type::Array(elem, n) = ty(dst)? else {
-                            return Err(at(format!("{dst} is not an array")));
+                        let (elem, n) = match ty(dst)? {
+                            Type::Array(elem, n) => (elem, n),
+                            // A list literal has as many elements as it lists.
+                            Type::List(elem) => (elem, &(items.len() as u64)),
+                            _ => return Err(at(format!("{dst} is not an array or list"))),
                         };
                         if *n != items.len() as u64 {
                             Err(format!("{} needs {n} elements, {} given", ty(dst)?.jir(), items.len()))
@@ -474,11 +491,11 @@ impl Cx<'_> {
                         t => Err(format!("`splat` cannot produce {}", t.jir())),
                     },
                     Inst::Elem { dst, src, index } => match ty(src)? {
-                        Type::Array(elem, _) => expect(index, &Type::I64).and(expect(dst, elem)),
-                        t => Err(format!("{} is not an array", t.jir())),
+                        Type::Array(elem, _) | Type::List(elem) => expect(index, &Type::I64).and(expect(dst, elem)),
+                        t => Err(format!("{} is not an array or list", t.jir())),
                     },
                     Inst::SetElem { dst, src, index, value } => match ty(src)? {
-                        Type::Array(elem, _) => {
+                        Type::Array(elem, _) | Type::List(elem) => {
                             expect(index, &Type::I64)?;
                             expect(value, elem)?;
                             expect(dst, ty(src)?)
@@ -540,14 +557,35 @@ impl Cx<'_> {
                         }
                     }
                     // `str` is a hosted type, so these never pass in other profiles.
-                    Inst::Len { dst, src } => expect(src, &Type::Str).and(expect(dst, &Type::I64)),
+                    Inst::Len { dst, src } => match ty(src)? {
+                        Type::Str | Type::List(_) => expect(dst, &Type::I64),
+                        t => Err(format!("`len` needs a str or list, found {}", t.jir())),
+                    },
                     Inst::StrByte { dst, src, index } => {
                         expect(src, &Type::Str).and(expect(index, &Type::I64)).and(expect(dst, &Type::Int(IntTy::U8)))
                     }
-                    Inst::Slice { dst, src, lo, hi } => expect(src, &Type::Str)
-                        .and(expect(lo, &Type::I64))
-                        .and(expect(hi, &Type::I64))
-                        .and(expect(dst, &Type::Str)),
+                    Inst::Slice { dst, src, lo, hi } => match ty(src)? {
+                        t @ (Type::Str | Type::List(_)) => {
+                            expect(lo, &Type::I64).and(expect(hi, &Type::I64)).and(expect(dst, t))
+                        }
+                        t => Err(format!("`slice` needs a str or list, found {}", t.jir())),
+                    },
+                    Inst::Repeat { dst, value, count } => {
+                        expect(count, &Type::I64).and(expect(dst, &Type::List(Box::new(ty(value)?.clone()))))
+                    }
+                    Inst::Push { root, path, value } => {
+                        match self.list_at(ty(root)?, path, &f.regs)? {
+                            Type::List(elem) => expect(value, &elem),
+                            t => Err(format!("`push` needs a list, found {}", t.jir())),
+                        }
+                    }
+                    Inst::Pop { dst, root, path } => match self.list_at(ty(root)?, path, &f.regs)? {
+                        Type::List(elem) => expect(dst, &elem),
+                        t => Err(format!("`pop` needs a list, found {}", t.jir())),
+                    },
+                    Inst::FromBytes { dst, src } => {
+                        expect(src, &Type::List(Box::new(Type::U8))).and(expect(dst, &Type::Str))
+                    }
                     Inst::ReadLine { dst } => expect(dst, &Type::Str),
                     Inst::Unique { .. } => Err("`unique` only exists at compile time".into()),
                     Inst::Stringify { .. } => Err("`stringify` only exists at compile time".into()),

@@ -312,6 +312,12 @@ impl<'p> Env<'p> {
             TypeExprKind::Array(elem, n) => {
                 Ok(Type::array(self.resolve_in(elem, b, in_macro)?, self.array_len(n, b)?))
             }
+            TypeExprKind::List(inner) => {
+                if self.profile != Profile::Hosted && !in_macro {
+                    return Err(Error::new(t.pos, "lists are garbage collected and only available in hosted mode; use an array (`[T; N]`)"));
+                }
+                Ok(Type::List(Box::new(self.resolve_in(inner, b, in_macro)?)))
+            }
             TypeExprKind::Chan(inner) => {
                 if self.profile != Profile::Hosted && !in_macro {
                     return Err(Error::new(t.pos, "channels need the VM's scheduler and are only available in hosted mode"));

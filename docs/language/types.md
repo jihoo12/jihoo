@@ -21,6 +21,7 @@ fn area(w: i64, h: i64) -> i64 {   // signatures are written out
 | `f32` `f64` | IEEE 754 floats | all | [below](#floats) |
 | `str` | immutable text | hosted | [below](#strings) |
 | `[T; N]` | `N` values of type `T` | all | [Arrays](arrays.md) |
+| `[T]` | any number of values of type `T` | hosted | [Lists](lists.md) |
 | `Name`, `Name(args)` | a struct or enum | all | [Structs](structs.md), [Enums](enums.md) |
 | `fn(A, B) -> R` | a function value | all | [Function values](function-values.md) |
 | `*T` | a raw pointer | native, freestanding | [Pointers](pointers.md) |
@@ -104,7 +105,8 @@ print(line[:5] + line[12:])          // hello 2026
   as they are.
 - `<`, `<=`, `>` and `>=` compare byte by byte, a prefix first:
   `"app" < "apple" < "banana"`.
-- `read_line()` reads a line from standard input
+- `from_bytes(b)` makes a string from a list of bytes `b: [u8]`
+  ([Lists](lists.md)), and `read_line()` reads one from standard input
   ([Builtins](../reference/builtins.md#hosted)).
 
 In native and freestanding programs there is no `str`: a string literal is a

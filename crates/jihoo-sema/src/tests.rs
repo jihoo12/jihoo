@@ -1456,20 +1456,39 @@ fn structs_cross_into_c_by_value() {
     assert!(e.contains("`puts` is exported here and declared as an extern C function the program calls"), "{e}");
 }
 
-// ---- strings ----
+// ---- strings and lists ----
 
 #[test]
 fn string_operations() {
     check("fn main() { let s = \"abc\"\n let b: u8 = s[0]\n print(len(s) + len(s[1:]) + len(s[:2]))\n print(s < \"b\") }").unwrap();
     assert!(err("fn main() { let s = \"abc\"\n s[0] = 1 }").contains("cannot assign to a byte of a str"));
-    assert!(err("fn main() { let a = [1, 2]\n print(len(a[1:])) }").contains("only a str can be sliced"));
+    assert!(err("fn main() { let a = [1, 2]\n print(len(a[1:])) }").contains("only a str or list can be sliced"));
     assert!(err("fn main() { print(\"a\"[true:]) }").contains("slice bound must be i64"));
     assert!(err("fn main() { print(read_line(1)) }").contains("`read_line` takes no arguments"));
     assert!(err(&fs("fn f() { let x = read_line() }")).contains("only available in hosted programs"));
 }
 
 #[test]
-fn read_line_can_be_taken() {
-    // A module's own `read_line` wins over the builtin.
+fn list_operations() {
+    check(
+        "struct S { xs: [i64] }\nfn main() {\n let xs: [i64] = [1, 2]\n push(xs, 3)\n let s = S { xs: xs }\n\
+         push(s.xs, pop(xs))\n let ys: [[str]] = [[]; 2]\n push(ys[0], \"a\")\n print(len(ys[0]) + len(xs + s.xs))\n\
+         print(xs == s.xs) }",
+    )
+    .unwrap();
+    assert!(err("fn main() { let xs = [] }").contains("cannot infer the element type"));
+    assert!(err("fn main() { let xs: [i64] = [1]\n push(xs, true) }").contains("value pushed must be i64, found bool"));
+    assert!(err("fn main() { let a = [1, 2]\n push(a, 3) }").contains("`push` needs a list, found [i64; 2]"));
+    assert!(err("fn f() -> [i64] { return [] }\nfn main() { push(f(), 1) }").contains("cannot `push` on a temporary value"));
+    assert!(err("fn main() { let xs: [i64] = [1]\n let r = ref xs\n print(pop(*r)) }").contains("cannot `pop` on a value behind a `ref`"));
+    assert!(err(&fs("fn f(xs: [i64]) {}")).contains("lists are garbage collected and only available in hosted mode"));
+    assert!(err("fn main() { let xs: [i64] = [1]\n print(xs < xs) }").contains("cannot apply `<`"));
+    assert!(err("fn main() { let xs: [fn()] = []\n print(xs == xs) }").contains("function values"));
+}
+
+#[test]
+fn builtin_names_can_be_taken() {
+    // A module's own `push` (as `alloc.push` is) wins over the builtin.
+    check("fn push(a: i64, b: i64) -> i64 { return a + b }\nfn main() { print(push(1, 2)) }").unwrap();
     check("fn read_line() -> i64 { return 1 }\nfn main() { print(read_line()) }").unwrap();
 }

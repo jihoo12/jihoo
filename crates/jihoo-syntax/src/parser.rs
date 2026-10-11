@@ -497,7 +497,10 @@ impl Parser {
         }
         if self.eat(&Tok::LBracket) {
             let elem = self.type_expr()?;
-            self.expect(&Tok::Semi, "`;` and an array length")?;
+            if self.eat(&Tok::RBracket) {
+                return Ok(TypeExpr { pos, kind: TypeExprKind::List(Box::new(elem)) });
+            }
+            self.expect(&Tok::Semi, "`;` and an array length, or `]` for a list")?;
             let len = self.with_struct_lit(true, |p| p.expr())?;
             self.expect(&Tok::RBracket, "`]`")?;
             return Ok(TypeExpr { pos, kind: TypeExprKind::Array(Box::new(elem), Box::new(len)) });

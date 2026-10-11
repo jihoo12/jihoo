@@ -404,13 +404,25 @@ pub enum Inst {
     Print { src: Reg },
     /// Hosted (and macros): a number or bool as text.
     ToStr { dst: Reg, src: Reg },
-    /// Hosted only: the length of `str` `src` in bytes, an `i64`.
+    /// Hosted only: the length of `src`, an `i64`: bytes of a `str`, elements
+    /// of a list.
     Len { dst: Reg, src: Reg },
     /// Hosted only: byte `index` (an `i64`) of `str` `src`, a `u8`. Bounds-checked.
     StrByte { dst: Reg, src: Reg, index: Reg },
-    /// Hosted only: bytes `lo` up to `hi` (`i64`s) of `str` `src`, as a new
-    /// `str`. Checked: `0 <= lo <= hi <= len`.
+    /// Hosted only: bytes or elements `lo` up to `hi` (`i64`s) of a `str` or
+    /// list, as a new one. Checked: `0 <= lo <= hi <= len`.
     Slice { dst: Reg, src: Reg, lo: Reg, hi: Reg },
+    /// Hosted only: a list of `count` (an `i64`, at least 0) copies of `value`.
+    Repeat { dst: Reg, value: Reg, count: Reg },
+    /// Hosted only: appends `value` to the list at `path` in `root`, a
+    /// register or, if it is a cell, what the cell holds. The register is
+    /// changed: it is both source and destination, as in `setpath %r, %r`.
+    Push { root: Reg, path: Vec<PathStep>, value: Reg },
+    /// Hosted only: removes the last element of the list at `path` in `root`
+    /// (as for `Push`) and puts it in `dst`. The list must not be empty.
+    Pop { dst: Reg, root: Reg, path: Vec<PathStep> },
+    /// Hosted only: the `str` made of the bytes in `[u8]` `src`.
+    FromBytes { dst: Reg, src: Reg },
     /// Hosted only: the next line of standard input with its `\n`, or `""` at
     /// the end of the input.
     ReadLine { dst: Reg },
@@ -528,6 +540,7 @@ impl Inst {
             | Recv { dst, chan: src }
             | ToStr { dst, src }
             | Len { dst, src }
+            | FromBytes { dst, src }
             | Addr { dst, src }
             | Unique { dst, prefix: src }
             | Stringify { dst, code: src }
@@ -537,6 +550,7 @@ impl Inst {
             Binary { dst, lhs, rhs, .. }
             | Elem { dst, src: lhs, index: rhs }
             | StrByte { dst, src: lhs, index: rhs }
+            | Repeat { dst, value: lhs, count: rhs }
             | SetField { dst, src: lhs, value: rhs, .. }
             | ElemPtr { dst, ptr: lhs, index: rhs } => vec![dst, lhs, rhs],
             SetElem { dst, src, index, value } => vec![dst, src, index, value],
@@ -547,6 +561,8 @@ impl Inst {
                 [dst, src].into_iter().chain(path_regs(path)).collect()
             }
             NewCell { dst, value } => vec![dst, value],
+            Push { root, path, value } => [root, value].into_iter().chain(path_regs(path)).collect(),
+            Pop { dst, root, path } => [dst, root].into_iter().chain(path_regs(path)).collect(),
             CellSet { cell, path, value } => [cell, value].into_iter().chain(path_regs(path)).collect(),
             SetPath { dst, src, path, value } => [dst, src, value].into_iter().chain(path_regs(path)).collect(),
             Select { dst, cases, .. } => std::iter::once(dst)

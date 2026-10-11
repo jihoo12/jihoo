@@ -9,7 +9,7 @@ function value. A local variable of a non-function type does not hide them, so
 
 | builtin | result | description |
 |---------|--------|-------------|
-| `len(a)` | `i64` | the length of an array `a: [T; N]`, or of the array `a: *[T; N]` points to, a constant; in hosted programs also the number of bytes of a `str` |
+| `len(a)` | `i64` | the length of an array `a: [T; N]`, or of the array `a: *[T; N]` points to, a constant; in hosted programs also the bytes of a `str` or the elements of a list `[T]` |
 | `size_of(T)` | `i64` | the size of type `T` in bytes, by C layout rules for 64-bit targets; a constant |
 | `align_of(T)` | `i64` | the alignment of type `T` in bytes; a constant |
 
@@ -66,15 +66,19 @@ traps loses what is still buffered. Freestanding programs have no `print`; the
 | builtin | result | description |
 |---------|--------|-------------|
 | `to_str(x)` | `str` | a number or `bool` as text, as `print` would write it (also in macros) |
+| `from_bytes(b)` | `str` | the string of the bytes in `b: [u8]` |
 | `read_line()` | `str` | the next line of standard input with its `\n` (or without, for a last line that has none), or `""` at the end of the input; not at compile time |
+| `push(xs, v)` | `unit` | appends `v` to the [list](../language/lists.md) `xs`, which must be assignable |
+| `pop(xs)` | `T` | removes the last element of the list `xs: [T]` and gives it; the program stops if it is empty |
 | `ref e` | `ref T` | a new [reference](../language/references.md) to a copy of `e` |
 | `cell(v)` | `cell T` | a new [cell](../language/cells.md) holding a copy of `v` |
 | `chan(T)`, `chan(T, n)` | `chan T` | a new [channel](../language/tasks-and-channels.md), unbuffered or buffering `n` values |
 | `send(c, v)` | `unit` | sends `v`, waiting while the channel is full |
 | `recv(c)` | `T` | receives a value, waiting until there is one |
 
-As with the float builtins, a module may take the name `read_line`: one that
-defines a function of that name calls its own.
+As with the float builtins, a module may take the names `from_bytes`,
+`read_line`, `push` and `pop`: one that defines a function of that name calls
+its own (`alloc.push` is one).
 
 ## Native and freestanding
 

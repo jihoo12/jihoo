@@ -29,6 +29,7 @@ type = "unit" | "bool" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "
      | "f32" | "f64" | "str" | "type" | "expr" | "stmts" | "items"
      | path ("(" exprs ")")?                              ; struct or enum, maybe generic
      | "[" type ";" expr "]"                              ; array
+     | "[" type "]"                                       ; list (hosted)
      | "fn" "(" types ")" ("->" type)?                    ; function, `->` on the same line
      | "*" type | "ref" type | "cell" type | "chan" type
 ```
@@ -68,13 +69,13 @@ expr    = expr binop expr
         | ("-" | "!" | "*" | "&" | "ref" | "comptime") expr
         | expr "(" exprs ")"                              ; call
         | expr "[" expr "]" | expr "." NAME               ; index, field
-        | expr "[" expr? ":" expr? "]"                    ; slice of a str
+        | expr "[" expr? ":" expr? "]"                    ; slice of a str or list
         | primary
 primary = INT | FLOAT | STRING | "true" | "false"
         | NAME | path                                     ; variable, constant, module item
         | path ("(" exprs ")")? "{" (NAME ":" expr) sep* "}"   ; struct literal
         | path "." NAME ("(" exprs ")")?                  ; enum variant: `Shape.Rect(1, 2)`
-        | "[" exprs "]" | "[" expr ";" expr "]"           ; array literals
+        | "[" exprs "]" | "[" expr ";" expr "]"           ; array (or list) literals
         | "(" expr ")"
         | "fn" "(" (NAME (":" type)?),* ")" ("->" type)? block   ; anonymous function
         | "match" expr "{" (pattern ("if" expr)? "=>" expr) sep* "}"

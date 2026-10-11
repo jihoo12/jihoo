@@ -301,6 +301,12 @@ impl Line<'_> {
     fn ty(&mut self) -> Result<Type> {
         match self.next("a type")? {
             Tok::Punct("*") => Ok(Type::ptr(self.ty()?)),
+            // `[T]`, a list.
+            Tok::Punct("[") if !matches!(self.peek(), Some(Tok::Int(_))) => {
+                let elem = self.ty()?;
+                self.punct("]")?;
+                Ok(Type::List(Box::new(elem)))
+            }
             Tok::Punct("[") => {
                 let n = self.int()?;
                 let n = u64::try_from(n).or_else(|_| self.err("an array length must not be negative"))?;
@@ -528,6 +534,16 @@ fn assign(l: &mut Line, dst: Reg) -> Result<Inst> {
             Inst::Slice { dst, src, lo, hi }
         }
         "readline" => Inst::ReadLine { dst },
+        "repeat" => {
+            let (value, count) = l.two()?;
+            Inst::Repeat { dst, value, count }
+        }
+        "pop" => {
+            let root = l.reg()?;
+            l.punct(",")?;
+            Inst::Pop { dst, root, path: l.path()? }
+        }
+        "frombytes" => Inst::FromBytes { dst, src: l.reg()? },
         "unique" => Inst::Unique { dst, prefix: l.reg()? },
         "stringify" => Inst::Stringify { dst, code: l.reg()? },
         "asm" => {
@@ -608,6 +624,13 @@ fn statement(l: &mut Line) -> Result<Stmt> {
             let path = l.path()?;
             l.punct(",")?;
             Stmt::Inst(Inst::CellSet { cell, path, value: l.reg()? })
+        }
+        "push" => {
+            let root = l.reg()?;
+            l.punct(",")?;
+            let path = l.path()?;
+            l.punct(",")?;
+            Stmt::Inst(Inst::Push { root, path, value: l.reg()? })
         }
         "print" => Stmt::Inst(Inst::Print { src: l.reg()? }),
         "jmp" => Stmt::Term(Terminator::Jump(l.block()?)),

@@ -1,4 +1,4 @@
-//! `==` and `!=` on structs, enums, arrays and refs: structural equality.
+//! `==` and `!=` on structs, enums, arrays, lists and refs: structural equality.
 //!
 //! Two values are equal when they have the same shape and equal parts: the same
 //! fields, the same variant with equal payloads, equal elements. A `ref` is
@@ -24,7 +24,7 @@ use crate::FnCx;
 
 /// Whether `==` compares values of type `t` with a helper function.
 pub(crate) fn is_structural(t: &Type) -> bool {
-    matches!(t, Type::Struct(_) | Type::Enum(_) | Type::Array(..) | Type::Ref(_))
+    matches!(t, Type::Struct(_) | Type::Enum(_) | Type::Array(..) | Type::List(_) | Type::Ref(_))
 }
 
 impl Env<'_> {
@@ -35,7 +35,7 @@ impl Env<'_> {
             Type::Chan(_) => return Some(format!("channels ({t}) cannot be compared")),
             Type::Cell(_) => return Some(format!("cells ({t}) cannot be compared; compare what they hold, `*a == *b`")),
             Type::Expr | Type::Stmts | Type::Items => return Some(format!("{t} values cannot be compared")),
-            Type::Array(elem, _) | Type::Ref(elem) => vec![(**elem).clone()],
+            Type::Array(elem, _) | Type::List(elem) | Type::Ref(elem) => vec![(**elem).clone()],
             Type::Struct(s) => self.struct_fields(Pos::default(), s).ok()?.iter().map(|(_, t)| t.clone()).collect(),
             Type::Enum(e) => self.enum_variants(Pos::default(), e).ok()?.iter().flat_map(|(_, ts)| ts.clone()).collect(),
             _ => return None,
@@ -116,10 +116,19 @@ impl FnCx<'_> {
                 let db = self.emit_to((**inner).clone(), |dst| Inst::Deref { dst, src: b });
                 self.require(inner, da, db, unequal)?;
             }
-            Type::Array(elem, n) => {
-                // for i in 0..n: a[i] == b[i]
+            Type::Array(elem, _) | Type::List(elem) => {
+                // for i in 0..n: a[i] == b[i], after the lengths of lists.
                 let i = self.konst(Type::I64, 0);
-                let len = self.konst(Type::I64, *n as i64);
+                let len = match t {
+                    Type::Array(_, n) => self.konst(Type::I64, *n as i64),
+                    _ => {
+                        let la = self.emit_to(Type::I64, |dst| Inst::Len { dst, src: a });
+                        let lb = self.emit_to(Type::I64, |dst| Inst::Len { dst, src: b });
+                        let same = self.emit_to(Type::Bool, |dst| Inst::Binary { dst, op: BinOp::Eq, lhs: la, rhs: lb });
+                        self.go_on_if(same, unequal);
+                        la
+                    }
+                };
                 let (head, body, done) = (self.new_block(), self.new_block(), self.new_block());
                 self.terminate(Terminator::Jump(head));
                 self.switch_to(head);

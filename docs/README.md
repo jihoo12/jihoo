@@ -22,6 +22,7 @@ same on GitHub.
 
 - [Structs](language/structs.md)
 - [Arrays](language/arrays.md)
+- [Lists](language/lists.md)
 - [Enums](language/enums.md)
 - [Pattern matching](language/patterns.md)
 - [Equality](language/equality.md)

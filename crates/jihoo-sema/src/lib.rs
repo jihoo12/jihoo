@@ -322,9 +322,10 @@ fn is_builtin(name: &str) -> bool {
 }
 
 /// Builtins whose names a module may take: a module that defines a function
-/// of that name calls its own. Floats, and `read_line`.
+/// of that name calls its own (as `alloc.push` is). Floats, and the hosted
+/// builtins for lists and input.
 pub(crate) fn is_takeable_builtin(name: &str) -> bool {
-    floats::is_float_builtin(name) || name == "read_line"
+    floats::is_float_builtin(name) || matches!(name, "read_line" | "push" | "pop" | "from_bytes")
 }
 
 struct BlockBuf {
@@ -976,6 +977,15 @@ impl<'a> FnCx<'a> {
                 self.struct_literal(e.pos, &name, inits)?
             }
             ExprKind::ArrayLit(items) => self.array_literal(e.pos, items, expected)?,
+            // `[v; n]` where a list is expected: `n` copies, `n` known when it runs.
+            ExprKind::ArrayRepeat(value, n) if matches!(expected, Some(Type::List(_))) => {
+                let Some(Type::List(elem)) = expected else { unreachable!() };
+                let value = self.expr(value, Some(elem))?;
+                let count = self.expr(n, Some(&Type::I64))?;
+                self.expect(n.pos, count, &Type::I64, "the length of a list")?;
+                let ty = Type::List(Box::new(self.ty(value).clone()));
+                self.emit_to(ty, |dst| Inst::Repeat { dst, value, count })
+            }
             ExprKind::ArrayRepeat(value, n) => {
                 let hint = match expected {
                     Some(Type::Array(elem, _)) => Some(&**elem),
@@ -1115,8 +1125,8 @@ impl<'a> FnCx<'a> {
     /// `hi` to the length.
     fn slice(&mut self, pos: Pos, base: &Expr, lo: Option<&Expr>, hi: Option<&Expr>) -> Result<Reg, Error> {
         let src = self.expr(base, None)?;
-        if self.ty(src) != &Type::Str {
-            return Err(Error::new(pos, format!("cannot slice {}; only a str can be sliced", self.ty(src))));
+        if !matches!(self.ty(src), Type::Str | Type::List(_)) {
+            return Err(Error::new(pos, format!("cannot slice {}; only a str or list can be sliced", self.ty(src))));
         }
         let bound = |cx: &mut Self, e: Option<&Expr>, default: &dyn Fn(&mut Self) -> Reg| match e {
             Some(e) => {
@@ -1128,7 +1138,7 @@ impl<'a> FnCx<'a> {
         };
         let lo = bound(self, lo, &|cx| cx.konst(Type::I64, 0))?;
         let hi = bound(self, hi, &|cx| cx.emit_to(Type::I64, |dst| Inst::Len { dst, src }))?;
-        Ok(self.emit_to(Type::Str, |dst| Inst::Slice { dst, src, lo, hi }))
+        Ok(self.emit_to(self.ty(src).clone(), |dst| Inst::Slice { dst, src, lo, hi }))
     }
 
     /// `read_line()`: the next line of standard input with its `\n`, or `""`
@@ -1141,6 +1151,17 @@ impl<'a> FnCx<'a> {
             return Err(Error::new(pos, "`read_line` takes no arguments"));
         }
         Ok(self.emit_to(Type::Str, |dst| Inst::ReadLine { dst }))
+    }
+
+    /// `from_bytes(b)`: the `str` made of the bytes in the `[u8]` `b`.
+    fn str_from_bytes(&mut self, pos: Pos, args: &[Expr]) -> Result<Reg, Error> {
+        let [arg] = args else {
+            return Err(Error::new(pos, "`from_bytes` takes exactly 1 argument, a `[u8]`"));
+        };
+        let bytes = Type::List(Box::new(Type::U8));
+        let src = self.expr(arg, Some(&bytes))?;
+        self.expect(arg.pos, src, &bytes, "the argument of `from_bytes`")?;
+        Ok(self.emit_to(Type::Str, |dst| Inst::FromBytes { dst, src }))
     }
 
     /// `a && b` / `a || b` on bools, evaluating `b` only when needed.
@@ -1168,8 +1189,10 @@ impl<'a> FnCx<'a> {
     /// `[a, b, c]`: the element type comes from the expected type if there is one,
     /// otherwise from the first element.
     fn array_literal(&mut self, pos: Pos, items: &[Expr], expected: Option<&Type>) -> Result<Reg, Error> {
+        // Where a list is expected, `[a, b]` is one; otherwise it is an array.
+        let list = matches!(expected, Some(Type::List(_)));
         let mut elem = match expected {
-            Some(Type::Array(elem, _)) => Some((**elem).clone()),
+            Some(Type::Array(elem, _) | Type::List(elem)) => Some((**elem).clone()),
             _ => None,
         };
         let mut regs = Vec::with_capacity(items.len());
@@ -1184,7 +1207,7 @@ impl<'a> FnCx<'a> {
         let Some(elem) = elem else {
             return Err(Error::new(pos, "cannot infer the element type of `[]`; give the variable a type"));
         };
-        let ty = Type::array(elem, regs.len() as u64);
+        let ty = if list { Type::List(Box::new(elem)) } else { Type::array(elem, regs.len() as u64) };
         Ok(self.emit_to(ty, |dst| Inst::Array { dst, items: regs }))
     }
 
@@ -1312,13 +1335,13 @@ impl<'a> FnCx<'a> {
                 };
                 let r = self.expr(arg, None)?;
                 let n = match self.ty(r) {
-                    Type::Str => return Ok(self.emit_to(Type::I64, |dst| Inst::Len { dst, src: r })),
+                    Type::Str | Type::List(_) => return Ok(self.emit_to(Type::I64, |dst| Inst::Len { dst, src: r })),
                     Type::Array(_, n) => *n,
                     Type::Ptr(inner) if matches!(**inner, Type::Array(..)) => {
                         let Type::Array(_, n) = **inner else { unreachable!() };
                         n
                     }
-                    t => return Err(Error::new(arg.pos, format!("`len` needs an array or a str, found {t}"))),
+                    t => return Err(Error::new(arg.pos, format!("`len` needs an array, list or str, found {t}"))),
                 };
                 let n = i64::try_from(n).map_err(|_| Error::new(arg.pos, "array is too long"))?;
                 Ok(self.konst(Type::I64, n))
@@ -1374,6 +1397,9 @@ impl<'a> FnCx<'a> {
                 if is_takeable_builtin(base) && !self.env.has_function(module, base) {
                     return match base {
                         "read_line" => self.read_line(pos, args),
+                        "push" => self.list_push(pos, args),
+                        "pop" => self.list_pop(pos, args),
+                        "from_bytes" => self.str_from_bytes(pos, args),
                         _ => self.float_builtin(pos, base, args, expected),
                     };
                 }

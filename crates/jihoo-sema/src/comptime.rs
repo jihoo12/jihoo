@@ -210,7 +210,7 @@ impl Env<'_> {
                 let items = fields.into_iter().zip(&tys).map(|(v, t)| self.to_const(pos, v, t, vm));
                 ConstValue::Agg(items.collect::<Result<_, _>>()?)
             }
-            (Value::Agg(r), Type::Array(elem, _)) => {
+            (Value::Agg(r), Type::Array(elem, _) | Type::List(elem)) => {
                 let items = heap.items(r).to_vec().into_iter().map(|v| self.to_const(pos, v, elem, vm));
                 ConstValue::Agg(items.collect::<Result<_, _>>()?)
             }
@@ -301,6 +301,10 @@ impl FnCx<'_> {
                     let value = self.splice(elem, &items[0]);
                     return self.emit_to(ty.clone(), |dst| Inst::Splat { dst, value });
                 }
+                let items = items.iter().map(|x| self.splice(elem, x)).collect();
+                self.emit_to(ty.clone(), |dst| Inst::Array { dst, items })
+            }
+            (Type::List(elem), ConstValue::Agg(items)) => {
                 let items = items.iter().map(|x| self.splice(elem, x)).collect();
                 self.emit_to(ty.clone(), |dst| Inst::Array { dst, items })
             }

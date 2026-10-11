@@ -75,7 +75,7 @@ impl FnCx<'_> {
     fn step_type(&self, t: &Type, step: Step) -> Type {
         match (step, t) {
             (Step::Field(i), _) => self.env.field_type(t, i),
-            (Step::Elem(_), Type::Array(elem, _)) => (**elem).clone(),
+            (Step::Elem(_), Type::Array(elem, _) | Type::List(elem)) => (**elem).clone(),
             _ => unreachable!("cannot step into {t}"),
         }
     }
@@ -151,7 +151,7 @@ impl FnCx<'_> {
             ExprKind::Index(base_expr, index) => {
                 let base = self.place(base_expr)?;
                 match base.ty().clone() {
-                    Type::Array(elem, _) => {
+                    Type::Array(elem, _) | Type::List(elem) => {
                         let i = self.index(index)?;
                         Ok(self.step(base, Step::Elem(i), *elem))
                     }
@@ -162,16 +162,16 @@ impl FnCx<'_> {
                         let i = self.index(index)?;
                         Ok(self.step_ptr(ptr, Step::Elem(i), *elem))
                     }
-                    // `c[i]` with `c: cell [T; N]` is a part of what the cell holds.
-                    Type::Cell(inner) if matches!(*inner, Type::Array(..)) => {
-                        let Type::Array(elem, _) = *inner else { unreachable!() };
+                    // `c[i]` with `c: cell [T; N]` or `cell [T]` is a part of what the cell holds.
+                    Type::Cell(inner) if matches!(*inner, Type::Array(..) | Type::List(_)) => {
+                        let (Type::Array(elem, _) | Type::List(elem)) = *inner else { unreachable!() };
                         let cell = self.read(base);
                         let i = self.index(index)?;
                         Ok(Place::Cell { cell, path: vec![Step::Elem(i)], ty: *elem })
                     }
                     // `r[i]` with `r: ref [T; N]` reads through the ref.
-                    Type::Ref(inner) if matches!(*inner, Type::Array(..)) => {
-                        let Type::Array(elem, _) = *inner else { unreachable!() };
+                    Type::Ref(inner) if matches!(*inner, Type::Array(..) | Type::List(_)) => {
+                        let (Type::Array(elem, _) | Type::List(elem)) = *inner else { unreachable!() };
                         let target = self.deref(base);
                         let i = self.index(index)?;
                         Ok(self.step(target, Step::Elem(i), *elem))
@@ -305,6 +305,42 @@ impl FnCx<'_> {
                 Ok(())
             }
         }
+    }
+
+    /// The list a `push` or `pop` changes, as the register and path to it.
+    fn list_place(&mut self, what: &str, e: &Expr) -> Result<(Reg, Vec<PathStep>, Type), Error> {
+        let place = self.place(e)?;
+        let Type::List(elem) = place.ty().clone() else {
+            return Err(Error::new(e.pos, format!("`{what}` needs a list, found {}", place.ty())));
+        };
+        match place {
+            Place::Reg { readonly: Some(r), .. } => Err(Error::new(e.pos, format!("cannot `{what}` on {r}"))),
+            Place::Reg { root, path, .. } => Ok((root, path.into_iter().map(path_step).collect(), *elem)),
+            Place::Cell { cell, path, .. } => Ok((cell, path.into_iter().map(path_step).collect(), *elem)),
+            Place::Mem { .. } => unreachable!("lists are never in memory"),
+        }
+    }
+
+    /// `push(list, value)`: appends `value` to the list, a variable or a part
+    /// of one (`s.items`), or what a cell holds.
+    pub(crate) fn list_push(&mut self, pos: Pos, args: &[Expr]) -> Result<Reg, Error> {
+        let [list, value] = args else {
+            return Err(Error::new(pos, "`push` takes 2 arguments: a list and a value"));
+        };
+        let (root, path, elem) = self.list_place("push", list)?;
+        let value_reg = self.expr(value, Some(&elem))?;
+        self.expect(value.pos, value_reg, &elem, "the value pushed")?;
+        self.emit(Inst::Push { root, path, value: value_reg });
+        Ok(self.unit())
+    }
+
+    /// `pop(list)`: removes the last element of the list and gives it.
+    pub(crate) fn list_pop(&mut self, pos: Pos, args: &[Expr]) -> Result<Reg, Error> {
+        let [list] = args else {
+            return Err(Error::new(pos, "`pop` takes 1 argument: a list"));
+        };
+        let (root, path, elem) = self.list_place("pop", list)?;
+        Ok(self.emit_to(elem, |dst| Inst::Pop { dst, root, path }))
     }
 
     pub(crate) fn addr_of(&mut self, pos: Pos, place: Place) -> Result<Reg, Error> {

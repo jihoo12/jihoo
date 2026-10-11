@@ -1,6 +1,7 @@
 # Arrays
 
-`[T; N]` is a fixed number `N` of values of type `T`.
+`[T; N]` is a fixed number `N` of values of type `T`. For a number of values
+that changes as the program runs, hosted programs have [lists](lists.md), `[T]`.
 
 ```jihoo
 let xs = [5, 3, 9]            // [i64; 3]

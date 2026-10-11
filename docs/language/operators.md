@@ -40,6 +40,7 @@ is `(comptime a) * b`, so write `comptime (a * b)` for a whole product.
 | `/` `%` | integers, floats | integers truncate; floats per IEEE (`%` is `fmod`) |
 | `-x` | signed integers, floats | negation |
 | `+` | `str`, `str` | concatenation (hosted) |
+| `+` | `[T]`, `[T]` | a new list of both lists' elements (hosted) |
 | `+` `-` | `*T` and `i64` | a pointer moved by whole elements ([Pointers](pointers.md)) |
 
 See [Types](types.md#integers) for overflow and division by zero.
@@ -52,8 +53,8 @@ See [Types](types.md#integers) for overflow and division by zero.
 | `<` `<=` `>` `>=` | integers, floats, pointers of the same type; `str` | `bool` |
 
 Integers compare signed or unsigned according to their type, and pointers by
-address; strings compare byte by byte, a prefix first. Structs, enums and arrays
-have equality but no ordering.
+address; strings compare byte by byte, a prefix first. Structs, enums, arrays and
+lists have equality but no ordering.
 
 ## Bitwise
 

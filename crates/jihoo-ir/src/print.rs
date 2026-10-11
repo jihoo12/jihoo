@@ -158,6 +158,10 @@ impl Display for Inst {
             Inst::StrByte { dst, src, index } => write!(f, "{dst} = strbyte {src}, {index}"),
             Inst::Slice { dst, src, lo, hi } => write!(f, "{dst} = slice {src}, {lo}, {hi}"),
             Inst::ReadLine { dst } => write!(f, "{dst} = readline"),
+            Inst::Repeat { dst, value, count } => write!(f, "{dst} = repeat {value}, {count}"),
+            Inst::Push { root, path, value } => write!(f, "push {root}, ({}), {value}", steps(path)),
+            Inst::Pop { dst, root, path } => write!(f, "{dst} = pop {root}, ({})", steps(path)),
+            Inst::FromBytes { dst, src } => write!(f, "{dst} = frombytes {src}"),
             Inst::Unique { dst, prefix } => write!(f, "{dst} = unique {prefix}"),
             Inst::Stringify { dst, code } => write!(f, "{dst} = stringify {code}"),
             Inst::Quote { dst, pieces, holes, kinds } => {

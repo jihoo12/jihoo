@@ -145,6 +145,9 @@ pub enum Type {
     Enum(String),
     /// `[T; N]`, a fixed-size array. Also a value type.
     Array(Box<Type>, u64),
+    /// `[T]`: a list of any length, which grows with `push`. A value type,
+    /// like an array. Hosted only.
+    List(Box<Type>),
     /// `fn(A, B) -> R`: a function value. Natively a code pointer.
     Fn(Vec<Type>, Box<Type>),
     /// `ref T`: an immutable reference to a `T` on the GC heap. Hosted only.
@@ -208,7 +211,7 @@ impl Type {
             Type::Ptr(inner) => profile.is_compiled() && inner.available_in(profile),
             Type::Array(elem, _) => elem.available_in(profile),
             Type::Fn(params, ret) => params.iter().chain([&**ret]).all(|t| t.available_in(profile)),
-            Type::Ref(inner) | Type::Chan(inner) | Type::Cell(inner) => {
+            Type::List(inner) | Type::Ref(inner) | Type::Chan(inner) | Type::Cell(inner) => {
                 profile == Profile::Hosted && inner.available_in(profile)
             }
             Type::Expr | Type::Stmts | Type::Items => false,
@@ -248,6 +251,7 @@ impl Type {
             Type::Ptr(t) => format!("*{}", t.jir()),
             Type::Struct(name) | Type::Enum(name) => format!("${}", struct_name_jir(name)),
             Type::Array(elem, n) => format!("[{n} x {}]", elem.jir()),
+            Type::List(elem) => format!("[{}]", elem.jir()),
             Type::Fn(params, ret) => {
                 let params: Vec<String> = params.iter().map(Type::jir).collect();
                 format!("fn({}) -> {}", params.join(", "), ret.jir())
@@ -272,6 +276,7 @@ impl fmt::Display for Type {
             Type::Ptr(t) => write!(f, "*{t}"),
             Type::Struct(name) | Type::Enum(name) => f.write_str(name),
             Type::Array(elem, n) => write!(f, "[{elem}; {n}]"),
+            Type::List(elem) => write!(f, "[{elem}]"),
             Type::Ref(t) => write!(f, "ref {t}"),
             Type::Chan(t) => write!(f, "chan {t}"),
             Type::Cell(t) => write!(f, "cell {t}"),
@@ -420,6 +425,8 @@ pub fn binary(op: BinOp, l: &Type, r: &Type) -> Option<Type> {
         // `&`, `|` and `^` on bools evaluate both sides, unlike `&&` and `||`.
         (And | Or | Xor, Bool, Bool) => Bool,
         (Add, Str, Str) => Str,
+        // Lists concatenate.
+        (Add, List(a), List(b)) if a == b => l.clone(),
         // Pointer arithmetic counts in elements, like C.
         (Add | Sub, Ptr(_), Int(IntTy::I64)) => l.clone(),
         // Floats compare as IEEE 754 says: NaN is unequal to everything, itself too.

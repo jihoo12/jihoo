@@ -130,6 +130,8 @@ pub enum TypeExprKind {
     Named(String),
     /// `*T`
     Ptr(Box<TypeExpr>),
+    /// `[T]`: a list of any length.
+    List(Box<TypeExpr>),
     /// `[T; N]`, where `N` is evaluated at compile time.
     Array(Box<TypeExpr>, Box<Expr>),
     /// `Pair(i64)`: an instance of a generic struct. Arguments are written as
@@ -526,7 +528,11 @@ fn set_type_pos(t: &mut TypeExpr, pos: Pos) {
     t.pos = pos;
     match &mut t.kind {
         TypeExprKind::Named(_) => {}
-        TypeExprKind::Ptr(inner) | TypeExprKind::Ref(inner) | TypeExprKind::Chan(inner) | TypeExprKind::Cell(inner) => {
+        TypeExprKind::Ptr(inner)
+        | TypeExprKind::List(inner)
+        | TypeExprKind::Ref(inner)
+        | TypeExprKind::Chan(inner)
+        | TypeExprKind::Cell(inner) => {
             set_type_pos(inner, pos)
         }
         TypeExprKind::Array(elem, n) => {
@@ -789,7 +795,11 @@ fn names_in_type(t: &mut TypeExpr, f: &mut dyn FnMut(&mut String, NameRole)) {
             f(n, NameRole::Uses);
             args.iter_mut().for_each(|a| names_in_expr(a, f));
         }
-        TypeExprKind::Ptr(inner) | TypeExprKind::Ref(inner) | TypeExprKind::Chan(inner) | TypeExprKind::Cell(inner) => {
+        TypeExprKind::Ptr(inner)
+        | TypeExprKind::List(inner)
+        | TypeExprKind::Ref(inner)
+        | TypeExprKind::Chan(inner)
+        | TypeExprKind::Cell(inner) => {
             names_in_type(inner, f)
         }
         TypeExprKind::Array(elem, n) => {

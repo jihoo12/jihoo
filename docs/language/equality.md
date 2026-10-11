@@ -20,6 +20,7 @@ list(50) == list(50)          // enum List { Cons(i64, ref List), Nil }
 | structs | field by field |
 | enums | by variant, then payload |
 | arrays | element by element (same type, so same length) |
+| lists `[T]` | by length, then element by element |
 | `ref T` | by the value it refers to |
 | pointers | by address |
 | function values, closures | cannot be compared |
@@ -37,7 +38,7 @@ either, and the error says which part is to blame.
 
 Both sides must have the same type. Strings are also ordered: `<`, `<=`, `>`
 and `>=` compare them byte by byte, a prefix first (`"app" < "apple"`). There
-is no ordering on structs, enums or arrays.
+is no ordering on structs, enums, arrays or lists.
 
 ## How it works
 

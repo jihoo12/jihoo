@@ -35,7 +35,7 @@ enum Obj {
     /// Text, as bytes: usually UTF-8, but slicing may cut a character.
     Str(Box<[u8]>),
     /// Fields of a struct or elements of an array.
-    Agg(Box<[Value]>),
+    Agg(Vec<Value>),
     Chan(Box<Channel>),
 }
 
@@ -150,7 +150,7 @@ impl Heap {
     }
 
     pub fn alloc_agg(&mut self, fields: Vec<Value>) -> GcRef {
-        self.alloc(Obj::Agg(fields.into()))
+        self.alloc(Obj::Agg(fields))
     }
 
     pub fn alloc_chan(&mut self, cap: usize) -> GcRef {
@@ -209,6 +209,29 @@ impl Heap {
     /// The parts of aggregate `r`, to update in place. Only for an unshared
     /// object, whose one reference is about to be replaced by itself.
     pub fn items_mut(&mut self, r: GcRef) -> &mut [Value] {
+        let slot = &mut self.slots[r.index as usize];
+        match &mut slot.obj {
+            Some(Obj::Agg(f)) if slot.gen == r.gen => f,
+            _ => panic!("{r:?} is not a live aggregate"),
+        }
+    }
+
+    /// Appends `v` to list `r` in place; as for `items_mut`, only for an
+    /// unshared object.
+    pub fn push_item(&mut self, r: GcRef, v: Value) {
+        self.list_mut(r).push(v);
+        self.live_bytes += std::mem::size_of::<Value>();
+    }
+
+    /// Removes the last element of list `r` in place, if there is one; only
+    /// for an unshared object.
+    pub fn pop_item(&mut self, r: GcRef) -> Option<Value> {
+        let v = self.list_mut(r).pop()?;
+        self.live_bytes -= std::mem::size_of::<Value>();
+        Some(v)
+    }
+
+    fn list_mut(&mut self, r: GcRef) -> &mut Vec<Value> {
         let slot = &mut self.slots[r.index as usize];
         match &mut slot.obj {
             Some(Obj::Agg(f)) if slot.gen == r.gen => f,

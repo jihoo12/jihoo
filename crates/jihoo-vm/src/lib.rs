@@ -786,9 +786,12 @@ impl<'m> Vm<'m> {
                 self.set(*dst, Value::Str(r));
             }
             Inst::Len { dst, src } => {
-                let s = self.str_ref(*src)?;
-                let n = self.heap.bytes(s).len() as i64;
-                self.set(*dst, Value::Int(n));
+                let n = match self.get(*src) {
+                    Value::Str(s) => self.heap.bytes(s).len(),
+                    Value::Agg(l) => self.heap.items(l).len(),
+                    v => return Err(self.type_error("a str or list", v)),
+                };
+                self.set(*dst, Value::Int(n as i64));
             }
             Inst::StrByte { dst, src, index } => {
                 let s = self.str_ref(*src)?;
@@ -800,14 +803,58 @@ impl<'m> Vm<'m> {
                 self.set(*dst, Value::Int(b as i64));
             }
             Inst::Slice { dst, src, lo, hi } => {
-                let s = self.str_ref(*src)?;
+                let v = self.get(*src);
+                let (what, len) = match v {
+                    Value::Str(s) => ("str", self.heap.bytes(s).len()),
+                    Value::Agg(l) => ("list", self.heap.items(l).len()),
+                    v => return Err(self.type_error("a str or list", v)),
+                };
                 let (lo, hi) = (self.int(*lo)?, self.int(*hi)?);
-                let len = self.heap.bytes(s).len();
                 if lo < 0 || lo > hi || hi as usize > len {
-                    return Err(self.error(&format!("slice {lo}:{hi} out of bounds for a str of length {len}")));
+                    return Err(self.error(&format!("slice {lo}:{hi} out of bounds for a {what} of length {len}")));
                 }
-                let part: Box<[u8]> = self.heap.bytes(s)[lo as usize..hi as usize].into();
-                let r = self.alloc_bytes(part);
+                let range = lo as usize..hi as usize;
+                let new = match v {
+                    Value::Str(s) => {
+                        let part: Box<[u8]> = self.heap.bytes(s)[range].into();
+                        Value::Str(self.alloc_bytes(part))
+                    }
+                    Value::Agg(l) => {
+                        // The slice and `l` share the elements.
+                        let part = self.heap.items(l)[range].to_vec();
+                        part.iter().for_each(|v| _ = self.share(*v));
+                        Value::Agg(self.alloc_agg(part))
+                    }
+                    _ => unreachable!(),
+                };
+                self.set(*dst, new);
+            }
+            Inst::Repeat { dst, value, count } => {
+                let n = self.int(*count)?;
+                if n < 0 {
+                    return Err(self.error(&format!("cannot make a list of {n} elements")));
+                }
+                // Each copy is another reference to the value.
+                let v = self.share(self.get(*value));
+                let r = self.alloc_agg(vec![v; n as usize]);
+                self.set(*dst, Value::Agg(r));
+            }
+            Inst::Push { root, path, value } => {
+                let v = self.shared(*value);
+                self.list_op(f, *root, path, Some(v))?;
+            }
+            Inst::Pop { dst, root, path } => {
+                let v = self.list_op(f, *root, path, None)?;
+                self.set(*dst, v);
+            }
+            Inst::FromBytes { dst, src } => {
+                let l = self.agg_ref(*src)?;
+                let mut bytes = Vec::with_capacity(self.heap.items(l).len());
+                for &v in self.heap.items(l) {
+                    let Value::Int(b) = v else { return Err(self.type_error("a u8", v)) };
+                    bytes.push(b as u8);
+                }
+                let r = self.alloc_bytes(bytes.into());
                 self.set(*dst, Value::Str(r));
             }
             Inst::ReadLine { dst } => {
@@ -955,6 +1002,12 @@ impl<'m> Vm<'m> {
                     BinOp::Gt => ord.is_gt(),
                     _ => ord.is_ge(),
                 })
+            }
+            // Lists: a new list sharing the elements of both.
+            (BinOp::Add, Agg(x), Agg(y)) => {
+                let items = [self.heap.items(x), self.heap.items(y)].concat();
+                items.iter().for_each(|v| _ = self.share(*v));
+                Agg(self.alloc_agg(items))
             }
             (BinOp::Eq | BinOp::Ne, Bool(x), Bool(y)) => Bool((x == y) == (op == BinOp::Eq)),
             (BinOp::And, Bool(x), Bool(y)) => Bool(x & y),
@@ -1128,6 +1181,56 @@ impl<'m> Vm<'m> {
         }
         self.temp_roots.clear();
         Ok(new)
+    }
+
+    /// `push` (with `Some(v)`) or `pop` (with `None`, giving the element) on
+    /// the list at `path` in register `root`, or in what `root` holds if it is
+    /// a cell. The list and everything on the way to it are changed in place
+    /// when nothing else refers to them, as `setpath %r, %r` does; otherwise the
+    /// list is copied and put back in place of the old one.
+    fn list_op(&mut self, f: &Function, root: Reg, path: &[PathStep], push: Option<Value>) -> Result<Value, VmError> {
+        let cell = matches!(f.reg_type(root), Type::Cell(_));
+        let base = if cell { self.heap.items(self.agg_ref(root)?)[0] } else { self.get(root) };
+        // The objects on the way to the list, which must all be unshared too.
+        let mut in_place = true;
+        let mut cur = base;
+        for step in path {
+            let r = self.agg_of(cur)?;
+            in_place = in_place && !self.heap.is_shared(r);
+            cur = self.heap.items(r)[self.step_index(r, *step)?];
+        }
+        let list = self.agg_of(cur)?;
+        in_place = in_place && !self.heap.is_shared(list);
+        if push.is_none() && self.heap.items(list).is_empty() {
+            return Err(self.error("pop from an empty list"));
+        }
+        if in_place {
+            self.check_in_place(list);
+            return Ok(match push {
+                Some(v) => {
+                    self.heap.push_item(list, v);
+                    Value::Unit
+                }
+                None => self.heap.pop_item(list).expect("the list is not empty"),
+            });
+        }
+        let mut items = self.copy_items(list);
+        let out = match push {
+            Some(v) => {
+                items.push(v);
+                Value::Unit
+            }
+            None => items.pop().expect("the list is not empty"),
+        };
+        let new = Value::Agg(self.alloc_agg(items));
+        let new = if path.is_empty() { new } else { self.set_in(base, path, new, true)? };
+        if cell {
+            let c = self.agg_ref(root)?;
+            self.heap.items_mut(c)[0] = new;
+        } else {
+            self.set(root, new);
+        }
+        Ok(out)
     }
 
     /// The parts of aggregate `obj`, for a copy of it. The copy and `obj` both
@@ -1906,5 +2009,85 @@ fn main() {
         Vm::new(&m).with_input(input).run_main(&mut out).unwrap();
         // "ab\n", "\n", and "last" without a newline.
         assert_eq!(String::from_utf8(out).unwrap(), "3\n1\n4\n");
+    }
+
+    #[test]
+    fn lists_are_values() {
+        let src = "
+fn total(xs: [i64]) -> i64 {
+    let t = 0
+    let i = 0
+    while i < len(xs) {
+        t += xs[i]
+        i += 1
+    }
+    push(xs, 1000)             // the callee's own copy
+    return t
+}
+fn main() {
+    let xs: [i64] = [1, 2]
+    push(xs, 3)
+    let ys = xs
+    push(ys, 4)
+    ys[0] = 10
+    print(total(xs))           // 6: `ys` is a copy
+    print(total(ys))           // 19
+    print(len(xs))             // 3: `total` did not change it
+    print(pop(ys))             // 4
+    print(ys == [10, 2, 3] && xs != ys)
+    print(total(xs + ys[1:]))  // 11
+    let e: [str] = []
+    print(len(e) == 0 && e == [])
+    let zs: [i64] = [7; len(xs)]
+    print(total(zs))           // 21
+    print(from_bytes([104 as u8, 105]))
+}";
+        assert_eq!(run_src(src).1, "6\n19\n3\n4\ntrue\n11\ntrue\n21\nhi\n");
+    }
+
+    #[test]
+    fn pushes_change_nested_lists_in_place() {
+        // `run_src` checks every in-place update against the heap.
+        let src = "
+struct Bag { items: [i64], name: str }
+fn main() {
+    let b = Bag { items: [], name: \"b\" }
+    let grid: [[i64]] = [[]; 3]
+    let lists: [[i64]] = [[0]]
+    let c = cell(lists)
+    let i = 0
+    while i < 1000 {
+        push(b.items, i)
+        push(grid[i % 3], i)
+        push((*c)[0], i)
+        i += 1
+    }
+    let copy = b
+    push(b.items, -1)
+    print(len(copy.items))     // 1000: the copy is not changed
+    print(pop(b.items))        // -1
+    print(len(b.items) + len(grid[0]) + len((*c)[0]))
+    print(pop(grid[2]))        // 998
+}";
+        assert_eq!(run_src(src).1, "1000\n-1\n2335\n998\n");
+
+        // A loop of pushes allocates nothing per push.
+        let m = compile("fn main() {\n let xs: [i64] = []\n let i = 0\n while i < 100000 {\n push(xs, i)\n i += 1\n }\n print(len(xs)) }");
+        let mut vm = Vm::new(&m);
+        vm.heap_mut().set_stress(false);
+        vm.run_main(&mut Vec::new()).unwrap();
+        // The list, and no garbage beyond one more object.
+        assert!(vm.heap().stats().live_objects <= 2, "{:?}", vm.heap().stats());
+        assert!(vm.heap().stats().collections <= 1, "{:?}", vm.heap().stats());
+    }
+
+    #[test]
+    fn list_errors() {
+        let m = compile("fn main() {\n let xs: [i64] = []\n print(pop(xs)) }");
+        assert!(run(&m, &mut Vec::new()).unwrap_err().msg.contains("pop from an empty list"));
+        let m = compile("fn main() {\n let xs: [i64] = [1]\n print(xs[1]) }");
+        assert!(run(&m, &mut Vec::new()).unwrap_err().msg.contains("index 1 out of bounds for length 1"));
+        let m = compile("fn main() {\n let n = 0 - 1\n let xs: [i64] = [0; n] }");
+        assert!(run(&m, &mut Vec::new()).unwrap_err().msg.contains("cannot make a list of -1 elements"));
     }
 }

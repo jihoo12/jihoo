@@ -72,8 +72,13 @@ updates them in place when it can.
   one `getpath`, so the objects on the way never get shared by being read.
 - Cells are updated in place by `cellset`, since sharing them is their point;
   channels are mutable too, since tasks share them to communicate.
-- A string is an immutable byte slice. `slice` and `+` make new strings;
-  nothing changes one in place.
+- A list is an aggregate whose elements are a growable `Vec`. `push` and `pop`
+  name the list as a register (or cell) and a path, like `setpath`, so they
+  change it in place when it and every object on the way to it are unshared,
+  and otherwise copy the list once and put the copy back along the path. A
+  loop of pushes to `s.items` is amortized O(1) per push.
+- A string is an immutable byte slice. `slice`, `+` and `frombytes` make new
+  strings; nothing changes one in place.
 
 Filling and sorting a 20000-element array went from 9.9 s to 0.6 s with this.
 
