@@ -164,7 +164,10 @@ impl Env<'_> {
             let ct = self.comptime.borrow();
             (ct.module.clone(), ct.program.clone())
         };
-        let mut vm = Vm::with_program(&module, program).with_fuel(FUEL).with_uniques(self.uniques.get());
+        let mut vm = Vm::with_program(&module, program)
+            .with_fuel(FUEL)
+            .with_uniques(self.uniques.get())
+            .with_input(jihoo_vm::Input::Closed);
         let mut values = Vec::new();
         for a in args {
             values.push(match a {
@@ -196,7 +199,11 @@ impl Env<'_> {
             (Value::Int(n), Type::Int(_)) => ConstValue::Int(n),
             (Value::Float(x), Type::Float(_)) => ConstValue::Float(x),
             (Value::Bool(b), Type::Bool) => ConstValue::Bool(b),
-            (Value::Str(r), t) if *t == Type::Str || t.is_code() => ConstValue::Str(heap.str(r).to_string()),
+            (Value::Str(r), t) if *t == Type::Str || t.is_code() => match std::str::from_utf8(heap.bytes(r)) {
+                Ok(s) => ConstValue::Str(s.to_string()),
+                // String literals are UTF-8, so a computed one has to be too.
+                Err(_) => return Err(Error::new(pos, "a str computed at compile time must be valid UTF-8 (a slice cut a character)")),
+            },
             (Value::Agg(r), Type::Struct(_)) => {
                 let fields = heap.items(r).to_vec();
                 let tys: Vec<Type> = (0..fields.len() as u32).map(|i| self.field_type(ty, i)).collect();

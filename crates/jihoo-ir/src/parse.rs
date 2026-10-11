@@ -518,6 +518,16 @@ fn assign(l: &mut Line, dst: Reg) -> Result<Inst> {
         }
         "syscall" => Inst::Syscall { dst, args: l.regs()? },
         "to_str" => Inst::ToStr { dst, src: l.reg()? },
+        "len" => Inst::Len { dst, src: l.reg()? },
+        "strbyte" => {
+            let (src, index) = l.two()?;
+            Inst::StrByte { dst, src, index }
+        }
+        "slice" => {
+            let (src, lo, hi) = l.three()?;
+            Inst::Slice { dst, src, lo, hi }
+        }
+        "readline" => Inst::ReadLine { dst },
         "unique" => Inst::Unique { dst, prefix: l.reg()? },
         "stringify" => Inst::Stringify { dst, code: l.reg()? },
         "asm" => {

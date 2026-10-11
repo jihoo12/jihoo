@@ -80,17 +80,32 @@ pointers. `b as i64` gives 0 or 1.
 
 ## Strings
 
-`str` is the type of text in hosted programs. Strings are immutable and garbage
-collected; `+` concatenates them, `==` and `!=` compare contents, `print`
-writes one, and `to_str` makes one from a number or bool:
+`str` is the type of text in hosted programs. A string is an immutable,
+garbage-collected sequence of bytes, usually UTF-8. `+` concatenates strings,
+`==` and `<` compare them, `print` writes one, and `to_str` makes one from a
+number or bool:
 
 ```jihoo
 let name = "jihoo"
 let line = "hello, " + name + " " + to_str(2026)
 print(line == "hello, jihoo 2026")   // true
+print(len(line))                     // 17: the length in bytes
+print(line[0])                       // 104: a byte, `u8`
+print(line[7:12])                    // jihoo: bytes 7 up to 12
+print(line[:5] + line[12:])          // hello 2026
 ```
 
-Strings cannot be indexed, have no length, and have no ordering yet.
+- `len(s)` is the number of bytes. `"세계"` is 6 bytes long.
+- `s[i]` is byte `i`, a `u8`, bounds-checked. It cannot be assigned:
+  strings are immutable.
+- `s[lo:hi]` is a new string of bytes `lo` up to `hi`; `s[lo:]` goes to the
+  end and `s[:hi]` starts at 0. The program stops unless `0 <= lo <= hi <=
+  len(s)`. A slice may cut a multi-byte character in two; its bytes are kept
+  as they are.
+- `<`, `<=`, `>` and `>=` compare byte by byte, a prefix first:
+  `"app" < "apple" < "banana"`.
+- `read_line()` reads a line from standard input
+  ([Builtins](../reference/builtins.md#hosted)).
 
 In native and freestanding programs there is no `str`: a string literal is a
 `*u8` pointing to constant NUL-terminated bytes, ready to pass to C or to a

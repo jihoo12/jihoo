@@ -539,6 +539,16 @@ impl Cx<'_> {
                             expect(dst, &Type::Str)
                         }
                     }
+                    // `str` is a hosted type, so these never pass in other profiles.
+                    Inst::Len { dst, src } => expect(src, &Type::Str).and(expect(dst, &Type::I64)),
+                    Inst::StrByte { dst, src, index } => {
+                        expect(src, &Type::Str).and(expect(index, &Type::I64)).and(expect(dst, &Type::Int(IntTy::U8)))
+                    }
+                    Inst::Slice { dst, src, lo, hi } => expect(src, &Type::Str)
+                        .and(expect(lo, &Type::I64))
+                        .and(expect(hi, &Type::I64))
+                        .and(expect(dst, &Type::Str)),
+                    Inst::ReadLine { dst } => expect(dst, &Type::Str),
                     Inst::Unique { .. } => Err("`unique` only exists at compile time".into()),
                     Inst::Stringify { .. } => Err("`stringify` only exists at compile time".into()),
                     Inst::Print { src } => {

@@ -920,9 +920,17 @@ impl Parser {
                 e = Expr { pos, kind: ExprKind::Field(Box::new(e), field) };
             } else if self.same_line(&Tok::LBracket) {
                 let pos = self.bump().pos;
-                let index = self.with_struct_lit(true, |p| p.expr())?;
-                self.expect(&Tok::RBracket, "`]`")?;
-                e = Expr { pos, kind: ExprKind::Index(Box::new(e), Box::new(index)) };
+                // `e[i]`, or a slice `e[lo:hi]` where either bound may be left out.
+                let lo = if self.peek() == &Tok::Colon { None } else { Some(self.with_struct_lit(true, |p| p.expr())?) };
+                if self.eat(&Tok::Colon) {
+                    let hi = if self.peek() == &Tok::RBracket { None } else { Some(self.with_struct_lit(true, |p| p.expr())?) };
+                    self.expect(&Tok::RBracket, "`]`")?;
+                    e = Expr { pos, kind: ExprKind::Slice(Box::new(e), lo.map(Box::new), hi.map(Box::new)) };
+                } else {
+                    self.expect(&Tok::RBracket, "`]`")?;
+                    let index = lo.expect("an index is parsed unless a `:` follows");
+                    e = Expr { pos, kind: ExprKind::Index(Box::new(e), Box::new(index)) };
+                }
             } else {
                 let pos = self.pos();
                 let args = self.call_args()?;

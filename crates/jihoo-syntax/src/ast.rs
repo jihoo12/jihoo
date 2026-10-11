@@ -312,6 +312,8 @@ pub enum ExprKind {
     Field(Box<Expr>, String),
     /// `array[index]` or `ptr[index]`
     Index(Box<Expr>, Box<Expr>),
+    /// `text[lo:hi]`, `text[lo:]`, `text[:hi]`: part of a string.
+    Slice(Box<Expr>, Option<Box<Expr>>, Option<Box<Expr>>),
     /// `*ptr`
     Deref(Box<Expr>),
     /// `&place`
@@ -457,6 +459,10 @@ pub fn set_pos(e: &mut Expr, pos: Pos) {
         ExprKind::Binary(_, l, r) | ExprKind::Index(l, r) | ExprKind::ArrayRepeat(l, r) => {
             set_pos(l, pos);
             set_pos(r, pos);
+        }
+        ExprKind::Slice(x, lo, hi) => {
+            set_pos(x, pos);
+            lo.iter_mut().chain(hi).for_each(|b| set_pos(b, pos));
         }
         ExprKind::Call(_, args) | ExprKind::ArrayLit(args) => args.iter_mut().for_each(|a| set_pos(a, pos)),
         ExprKind::CallExpr(f, args) => {
@@ -705,6 +711,10 @@ pub fn names_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut String, NameRole)) {
         ExprKind::Binary(_, l, r) | ExprKind::Index(l, r) | ExprKind::ArrayRepeat(l, r) => {
             names_in_expr(l, f);
             names_in_expr(r, f);
+        }
+        ExprKind::Slice(x, lo, hi) => {
+            names_in_expr(x, f);
+            lo.iter_mut().chain(hi).for_each(|b| names_in_expr(b, f));
         }
         ExprKind::Call(n, args) => {
             f(n, NameRole::Uses);

@@ -508,8 +508,8 @@ fn generic_recursion_and_comptime() {
 #[test]
 fn generic_errors() {
     // The body is checked per instance, and errors say which one.
-    let e = err(&format!("{MAX}fn main() {{ print(max(str, \"a\", \"b\")) }}"));
-    assert!(e.contains("cannot apply `>` to str and str (in `max` with T = str)"), "{e}");
+    let e = err(&format!("{MAX}fn main() {{ print(max(bool, true, false)) }}"));
+    assert!(e.contains("cannot apply `>` to bool and bool (in `max` with T = bool)"), "{e}");
     assert!(err(&format!("{MAX}fn main() {{ print(max(i64, 1)) }}")).contains("takes 3 arguments, 2 given"));
     assert!(err(&format!("{MAX}fn main() {{ print(max(5, 1, 2)) }}")).contains("expected a type"));
     assert!(err(&format!("{MAX}fn main() {{ print(max(u8, 1, true)) }}")).contains("argument `b` of `max` must be u8"));
@@ -1454,4 +1454,22 @@ fn structs_cross_into_c_by_value() {
     ])
     .unwrap_err();
     assert!(e.contains("`puts` is exported here and declared as an extern C function the program calls"), "{e}");
+}
+
+// ---- strings ----
+
+#[test]
+fn string_operations() {
+    check("fn main() { let s = \"abc\"\n let b: u8 = s[0]\n print(len(s) + len(s[1:]) + len(s[:2]))\n print(s < \"b\") }").unwrap();
+    assert!(err("fn main() { let s = \"abc\"\n s[0] = 1 }").contains("cannot assign to a byte of a str"));
+    assert!(err("fn main() { let a = [1, 2]\n print(len(a[1:])) }").contains("only a str can be sliced"));
+    assert!(err("fn main() { print(\"a\"[true:]) }").contains("slice bound must be i64"));
+    assert!(err("fn main() { print(read_line(1)) }").contains("`read_line` takes no arguments"));
+    assert!(err(&fs("fn f() { let x = read_line() }")).contains("only available in hosted programs"));
+}
+
+#[test]
+fn read_line_can_be_taken() {
+    // A module's own `read_line` wins over the builtin.
+    check("fn read_line() -> i64 { return 1 }\nfn main() { print(read_line()) }").unwrap();
 }

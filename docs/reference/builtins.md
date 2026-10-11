@@ -9,7 +9,7 @@ function value. A local variable of a non-function type does not hide them, so
 
 | builtin | result | description |
 |---------|--------|-------------|
-| `len(a)` | `i64` | the length of an array `a: [T; N]`, or of the array `a: *[T; N]` points to; a constant |
+| `len(a)` | `i64` | the length of an array `a: [T; N]`, or of the array `a: *[T; N]` points to, a constant; in hosted programs also the number of bytes of a `str` |
 | `size_of(T)` | `i64` | the size of type `T` in bytes, by C layout rules for 64-bit targets; a constant |
 | `align_of(T)` | `i64` | the alignment of type `T` in bytes; a constant |
 
@@ -66,11 +66,15 @@ traps loses what is still buffered. Freestanding programs have no `print`; the
 | builtin | result | description |
 |---------|--------|-------------|
 | `to_str(x)` | `str` | a number or `bool` as text, as `print` would write it (also in macros) |
+| `read_line()` | `str` | the next line of standard input with its `\n` (or without, for a last line that has none), or `""` at the end of the input; not at compile time |
 | `ref e` | `ref T` | a new [reference](../language/references.md) to a copy of `e` |
 | `cell(v)` | `cell T` | a new [cell](../language/cells.md) holding a copy of `v` |
 | `chan(T)`, `chan(T, n)` | `chan T` | a new [channel](../language/tasks-and-channels.md), unbuffered or buffering `n` values |
 | `send(c, v)` | `unit` | sends `v`, waiting while the channel is full |
 | `recv(c)` | `T` | receives a value, waiting until there is one |
+
+As with the float builtins, a module may take the name `read_line`: one that
+defines a function of that name calls its own.
 
 ## Native and freestanding
 

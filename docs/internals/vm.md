@@ -72,6 +72,8 @@ updates them in place when it can.
   one `getpath`, so the objects on the way never get shared by being read.
 - Cells are updated in place by `cellset`, since sharing them is their point;
   channels are mutable too, since tasks share them to communicate.
+- A string is an immutable byte slice. `slice` and `+` make new strings;
+  nothing changes one in place.
 
 Filling and sorting a 20000-element array went from 9.9 s to 0.6 s with this.
 

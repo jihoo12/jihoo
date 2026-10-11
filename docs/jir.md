@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 4)
+# JIR — jihoo IR text format (version 5)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -34,6 +34,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 2 | the `target` header |
 | 3 | `stringify`, and hygiene marks in the code `quote` builds |
 | 4 | float operations (`sqrt`, `floor`, `ceil`, `trunc`, `round`, `abs`, `copysign`) and `bitcast`; `print` in native modules; structs to and from C by value, and `export`; `select` cases separated by `\|` |
+| 5 | strings as bytes: `len`, `strbyte`, `slice` and ordering on `str`; `readline` |
 
 ## Example
 
@@ -86,7 +87,7 @@ bb3:
 ## Module
 
 ```
-jir 4                                ; format version, must come first
+jir 5                                ; format version, must come first
 profile hosted|native|freestanding   ; language profile
 target x86_64|aarch64                ; the machine, 64-bit Linux
 struct ...                           ; zero or more structs
@@ -262,7 +263,7 @@ The result type is what the destination register must be declared as.
 | `%d = add %a, %b`               | `str, str`            | `str`  | concatenation |
 | `%d = add\|sub %a, %b`          | `*T, i64`             | `*T`   | pointer offset in elements of `T` |
 | `%d = eq\|ne %a, %b`            | `T, T`: `bool`, int, float, `str`, `*U` | `bool` | equality (`str` compares contents; floats as IEEE: NaN is unequal to itself, `0.0 == -0.0`); the frontend compares structs, enums, arrays and refs with helper functions `@fn.eq.N` |
-| `%d = lt\|le\|gt\|ge %a, %b`    | `T, T`: int, float or `*U` | `bool` | ordered comparison, signed or unsigned by type; pointers unsigned; false if either float is NaN |
+| `%d = lt\|le\|gt\|ge %a, %b`    | `T, T`: int, float, `str` or `*U` | `bool` | ordered comparison, signed or unsigned by type; pointers unsigned; `str` byte by byte, a prefix first; false if either float is NaN |
 | `%d = cast %a`                  | see below             | dst type | conversion |
 | `%d = call @f(%a, ...)`         | parameter types of `@f` | return type of `@f` | call |
 | `%d = funcref @f`               |                       | `fn(P...) -> R` of `@f` | function `@f` as a value |
@@ -340,6 +341,17 @@ runtime error and native code traps.
 | `%d = splat %v`                     | `T`                   | `[N x T]` | an array with every element `%v` |
 | `%d = elem %a, %i`                  | `[N x T], i64`        | `T`    | read an element |
 | `%d = setelem %a, %i, %v`           | `[N x T], i64, T`     | `[N x T]` | copy of `%a` with element `%i` replaced |
+
+### Strings (hosted only)
+
+A `str` is a sequence of bytes, usually UTF-8.
+
+| syntax                              | operands              | result | meaning |
+|-------------------------------------|-----------------------|--------|---------|
+| `%d = len %s`                       | `str`                 | `i64`  | the number of bytes |
+| `%d = slice %s, %lo, %hi`           | `str, i64, i64`       | `str`  | bytes `%lo` up to `%hi`; an error unless `0 <= lo <= hi <= len` |
+| `%d = strbyte %s, %i`               | `str, i64`            | `u8`   | byte `%i`; bounds-checked |
+| `%d = readline`                     |                       | `str`  | the next line of standard input, with its `\n`; `""` at the end of the input |
 
 ### Memory (native and freestanding only)
 

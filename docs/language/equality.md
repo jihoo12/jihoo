@@ -35,8 +35,9 @@ cells — so cells cannot be compared; compare what they hold, `*a == *b`.
 A type that holds a function value, a channel or a cell cannot be compared
 either, and the error says which part is to blame.
 
-Both sides must have the same type, and there is no ordering (`<`) on structs,
-enums, arrays or strings.
+Both sides must have the same type. Strings are also ordered: `<`, `<=`, `>`
+and `>=` compare them byte by byte, a prefix first (`"app" < "apple"`). There
+is no ordering on structs, enums or arrays.
 
 ## How it works
 

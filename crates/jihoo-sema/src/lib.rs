@@ -321,6 +321,12 @@ fn is_builtin(name: &str) -> bool {
     )
 }
 
+/// Builtins whose names a module may take: a module that defines a function
+/// of that name calls its own. Floats, and `read_line`.
+pub(crate) fn is_takeable_builtin(name: &str) -> bool {
+    floats::is_float_builtin(name) || name == "read_line"
+}
+
 struct BlockBuf {
     insts: Vec<Inst>,
     term: Option<Terminator>,
@@ -987,6 +993,7 @@ impl<'a> FnCx<'a> {
                 let n = i64::try_from(n).map_err(|_| Error::new(e.pos, format!("{ty} is too large")))?;
                 self.konst(Type::I64, n)
             }
+            ExprKind::Slice(base, lo, hi) => self.slice(e.pos, base, lo.as_deref(), hi.as_deref())?,
             ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Deref(_) => {
                 // `Shape.Empty`: a variant without a payload.
                 if let ExprKind::Field(base, variant) = &e.kind {
@@ -1102,6 +1109,38 @@ impl<'a> FnCx<'a> {
         let ty = types::binary(op, &lt, &rt)
             .ok_or_else(|| Error::new(pos, format!("cannot apply `{sym}` to {lt} and {rt}")))?;
         Ok(self.emit_to(ty, |dst| Inst::Binary { dst, op, lhs, rhs }))
+    }
+
+    /// `s[lo:hi]`: bytes `lo` up to `hi` of a `str`; `lo` defaults to 0 and
+    /// `hi` to the length.
+    fn slice(&mut self, pos: Pos, base: &Expr, lo: Option<&Expr>, hi: Option<&Expr>) -> Result<Reg, Error> {
+        let src = self.expr(base, None)?;
+        if self.ty(src) != &Type::Str {
+            return Err(Error::new(pos, format!("cannot slice {}; only a str can be sliced", self.ty(src))));
+        }
+        let bound = |cx: &mut Self, e: Option<&Expr>, default: &dyn Fn(&mut Self) -> Reg| match e {
+            Some(e) => {
+                let r = cx.expr(e, Some(&Type::I64))?;
+                cx.expect(e.pos, r, &Type::I64, "a slice bound")?;
+                Ok(r)
+            }
+            None => Ok(default(cx)),
+        };
+        let lo = bound(self, lo, &|cx| cx.konst(Type::I64, 0))?;
+        let hi = bound(self, hi, &|cx| cx.emit_to(Type::I64, |dst| Inst::Len { dst, src }))?;
+        Ok(self.emit_to(Type::Str, |dst| Inst::Slice { dst, src, lo, hi }))
+    }
+
+    /// `read_line()`: the next line of standard input with its `\n`, or `""`
+    /// at the end.
+    fn read_line(&mut self, pos: Pos, args: &[Expr]) -> Result<Reg, Error> {
+        if self.profile() != Profile::Hosted {
+            return Err(Error::new(pos, "`read_line` makes a `str`, so it is only available in hosted programs"));
+        }
+        if !args.is_empty() {
+            return Err(Error::new(pos, "`read_line` takes no arguments"));
+        }
+        Ok(self.emit_to(Type::Str, |dst| Inst::ReadLine { dst }))
     }
 
     /// `a && b` / `a || b` on bools, evaluating `b` only when needed.
@@ -1273,12 +1312,13 @@ impl<'a> FnCx<'a> {
                 };
                 let r = self.expr(arg, None)?;
                 let n = match self.ty(r) {
+                    Type::Str => return Ok(self.emit_to(Type::I64, |dst| Inst::Len { dst, src: r })),
                     Type::Array(_, n) => *n,
                     Type::Ptr(inner) if matches!(**inner, Type::Array(..)) => {
                         let Type::Array(_, n) = **inner else { unreachable!() };
                         n
                     }
-                    t => return Err(Error::new(arg.pos, format!("`len` needs an array, found {t}"))),
+                    t => return Err(Error::new(arg.pos, format!("`len` needs an array or a str, found {t}"))),
                 };
                 let n = i64::try_from(n).map_err(|_| Error::new(arg.pos, "array is too long"))?;
                 Ok(self.konst(Type::I64, n))
@@ -1329,10 +1369,13 @@ impl<'a> FnCx<'a> {
                         return Ok(self.emit_to(ret, |dst| Inst::Call { dst, func, args: first }));
                     }
                 }
-                // A float builtin, unless the module has a function of that name.
+                // A takeable builtin, unless the module has a function of that name.
                 let (module, base) = hygiene::qualified(name).unwrap_or((self.bindings.module, name));
-                if floats::is_float_builtin(base) && !self.env.has_function(module, base) {
-                    return self.float_builtin(pos, base, args, expected);
+                if is_takeable_builtin(base) && !self.env.has_function(module, base) {
+                    return match base {
+                        "read_line" => self.read_line(pos, args),
+                        _ => self.float_builtin(pos, base, args, expected),
+                    };
                 }
                 let key = self.env.key_or_err(pos, &self.bindings, name)?;
                 self.env.check_visible(pos, self.env.viewer(self.bindings.module, name), &key)?;

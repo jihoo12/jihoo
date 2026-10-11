@@ -27,6 +27,8 @@ fn path_step(s: Step) -> PathStep {
 
 const BEHIND_REF: &str = "a value behind a `ref` (refs are immutable; build a new value and a new ref instead)";
 
+const IN_STR: &str = "a byte of a str (strings are immutable; build a new one instead)";
+
 const CAPTURED: &str =
     "a captured variable (a closure keeps its own copy, taken when it was made; pass the value as an argument or return it instead)";
 
@@ -181,6 +183,13 @@ impl FnCx<'_> {
                         let i = self.index(index)?;
                         let ptr = self.emit_to(p, |dst| Inst::Binary { dst, op: BinOp::Add, lhs: b, rhs: i });
                         Ok(Place::Mem { ptr, ty: elem })
+                    }
+                    // `s[i]` with `s: str` is a byte, which cannot be assigned.
+                    Type::Str => {
+                        let src = self.read(base);
+                        let index = self.index(index)?;
+                        let root = self.emit_to(Type::Int(jihoo_ir::IntTy::U8), |dst| Inst::StrByte { dst, src, index });
+                        Ok(Place::Reg { root, path: vec![], ty: self.ty(root).clone(), readonly: Some(IN_STR) })
                     }
                     t => Err(Error::new(base_expr.pos, format!("cannot index into {t}"))),
                 }

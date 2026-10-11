@@ -154,6 +154,10 @@ impl Display for Inst {
             Inst::Syscall { dst, args } => write!(f, "{dst} = syscall({})", list(args)),
             Inst::Print { src } => write!(f, "print {src}"),
             Inst::ToStr { dst, src } => write!(f, "{dst} = to_str {src}"),
+            Inst::Len { dst, src } => write!(f, "{dst} = len {src}"),
+            Inst::StrByte { dst, src, index } => write!(f, "{dst} = strbyte {src}, {index}"),
+            Inst::Slice { dst, src, lo, hi } => write!(f, "{dst} = slice {src}, {lo}, {hi}"),
+            Inst::ReadLine { dst } => write!(f, "{dst} = readline"),
             Inst::Unique { dst, prefix } => write!(f, "{dst} = unique {prefix}"),
             Inst::Stringify { dst, code } => write!(f, "{dst} = stringify {code}"),
             Inst::Quote { dst, pieces, holes, kinds } => {

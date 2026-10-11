@@ -427,6 +427,8 @@ pub fn binary(op: BinOp, l: &Type, r: &Type) -> Option<Type> {
         (Lt | Le | Gt | Ge, Int(a), Int(b)) if a == b => Bool,
         (Lt | Le | Gt | Ge, Float(a), Float(b)) if a == b => Bool,
         (Lt | Le | Gt | Ge, Ptr(a), Ptr(b)) if a == b => Bool,
+        // Strings order byte by byte, a prefix first.
+        (Lt | Le | Gt | Ge, Str, Str) => Bool,
         _ => return None,
     })
 }

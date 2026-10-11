@@ -15,7 +15,7 @@ mod program;
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::rc::Rc;
 
 use gc::{GcRef, Heap, Waiter};
@@ -130,6 +130,17 @@ pub struct Vm<'m> {
     fuel: Option<u64>,
     /// The next number `unique` hands out.
     uniques: u64,
+    /// Where `read_line` reads from.
+    input: Input,
+}
+
+/// Where `read_line` reads lines from.
+pub enum Input {
+    /// The process's standard input (the default).
+    Stdin,
+    Reader(Box<dyn BufRead>),
+    /// No input: `read_line` is an error, as during compile-time evaluation.
+    Closed,
 }
 
 /// Runs `main` of a hosted module and returns its result.
@@ -164,7 +175,14 @@ impl<'m> Vm<'m> {
             check: std::env::var_os("JIHOO_VM_CHECK").is_some_and(|v| !v.is_empty() && v != "0"),
             fuel: None,
             uniques: 0,
+            input: Input::Stdin,
         }
+    }
+
+    /// Makes `read_line` read from `input` instead of standard input.
+    pub fn with_input(mut self, input: Input) -> Self {
+        self.input = input;
+        self
     }
 
     /// Starts `unique` at `next`, so that several runs never repeat a name.
@@ -767,11 +785,47 @@ impl<'m> Vm<'m> {
                 let r = self.alloc_str(&text);
                 self.set(*dst, Value::Str(r));
             }
+            Inst::Len { dst, src } => {
+                let s = self.str_ref(*src)?;
+                let n = self.heap.bytes(s).len() as i64;
+                self.set(*dst, Value::Int(n));
+            }
+            Inst::StrByte { dst, src, index } => {
+                let s = self.str_ref(*src)?;
+                let i = self.int(*index)?;
+                let bytes = self.heap.bytes(s);
+                let Some(&b) = usize::try_from(i).ok().and_then(|i| bytes.get(i)) else {
+                    return Err(self.error(&format!("index {i} out of bounds for a str of length {}", bytes.len())));
+                };
+                self.set(*dst, Value::Int(b as i64));
+            }
+            Inst::Slice { dst, src, lo, hi } => {
+                let s = self.str_ref(*src)?;
+                let (lo, hi) = (self.int(*lo)?, self.int(*hi)?);
+                let len = self.heap.bytes(s).len();
+                if lo < 0 || lo > hi || hi as usize > len {
+                    return Err(self.error(&format!("slice {lo}:{hi} out of bounds for a str of length {len}")));
+                }
+                let part: Box<[u8]> = self.heap.bytes(s)[lo as usize..hi as usize].into();
+                let r = self.alloc_bytes(part);
+                self.set(*dst, Value::Str(r));
+            }
+            Inst::ReadLine { dst } => {
+                let mut line = Vec::new();
+                let read = match &mut self.input {
+                    Input::Stdin => std::io::stdin().lock().read_until(b'\n', &mut line),
+                    Input::Reader(r) => r.read_until(b'\n', &mut line),
+                    Input::Closed => return Err(self.error("`read_line` has no input here (it cannot run at compile time)")),
+                };
+                read.map_err(|e| self.error(&format!("read_line failed: {e}")))?;
+                let r = self.alloc_bytes(line.into());
+                self.set(*dst, Value::Str(r));
+            }
             Inst::Stringify { dst, code } => {
                 let Value::Str(c) = self.get(*code) else {
                     return Err(self.error("`stringify` needs code"));
                 };
-                let text = jihoo_ir::plain_names(self.heap.str(c));
+                let text = jihoo_ir::plain_names(&self.heap.str(c));
                 let r = self.alloc_str(&text);
                 self.set(*dst, Value::Str(r));
             }
@@ -793,7 +847,12 @@ impl<'m> Vm<'m> {
                         t => return Err(self.error(&format!("a float in a {t} register"))),
                     },
                     Value::Bool(b) => b.to_string(),
-                    Value::Str(r) => self.heap.str(r).to_string(),
+                    // Bytes as they are, even if a slice cut a character.
+                    Value::Str(r) => {
+                        let mut line = self.heap.bytes(r).to_vec();
+                        line.push(b'\n');
+                        return out.write_all(&line).map_err(|e| self.error(&format!("print failed: {e}")));
+                    }
                     v @ (Value::Unit | Value::Agg(_) | Value::Func(_) | Value::Chan(_)) => {
                         return Err(self.error(&format!("cannot print {}", type_name(v))))
                     }
@@ -810,7 +869,7 @@ impl<'m> Vm<'m> {
                     let text = match (kind, ty, self.get(*hole)) {
                         // Parenthesized, so `$x * 2` keeps its meaning whatever `x` is.
                         (HoleKind::Expr, Type::Expr, Value::Str(r)) => format!("({})", self.heap.str(r)),
-                        (HoleKind::Expr, Type::Str, Value::Str(r)) => string_literal(self.heap.str(r)),
+                        (HoleKind::Expr, Type::Str, Value::Str(r)) => string_literal(&self.heap.str(r)),
                         (HoleKind::Expr, Type::Int(jihoo_ir::IntTy::U64), Value::Int(n)) => (n as u64).to_string(),
                         // Parenthesized so that a negative number stays one operand.
                         (HoleKind::Expr, _, Value::Int(n)) if n < 0 => format!("({n})"),
@@ -883,11 +942,19 @@ impl<'m> Vm<'m> {
         }
         Ok(match (op, a, b) {
             (BinOp::Add, Str(x), Str(y)) => {
-                let s = format!("{}{}", self.heap.str(x), self.heap.str(y));
-                Str(self.alloc_str(&s))
+                let s = [self.heap.bytes(x), self.heap.bytes(y)].concat();
+                Str(self.alloc_bytes(s.into()))
             }
-            (BinOp::Eq | BinOp::Ne, Str(x), Str(y)) => {
-                Bool((self.heap.str(x) == self.heap.str(y)) == (op == BinOp::Eq))
+            (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, Str(x), Str(y)) => {
+                let ord = self.heap.bytes(x).cmp(self.heap.bytes(y));
+                Bool(match op {
+                    BinOp::Eq => ord.is_eq(),
+                    BinOp::Ne => ord.is_ne(),
+                    BinOp::Lt => ord.is_lt(),
+                    BinOp::Le => ord.is_le(),
+                    BinOp::Gt => ord.is_gt(),
+                    _ => ord.is_ge(),
+                })
             }
             (BinOp::Eq | BinOp::Ne, Bool(x), Bool(y)) => Bool((x == y) == (op == BinOp::Eq)),
             (BinOp::And, Bool(x), Bool(y)) => Bool(x & y),
@@ -909,8 +976,20 @@ impl<'m> Vm<'m> {
     /// [`Vm::roots`]: values read from registers are, values only held in Rust
     /// locals are not.
     fn alloc_str(&mut self, s: &str) -> GcRef {
+        self.alloc_bytes(s.as_bytes().into())
+    }
+
+    fn alloc_bytes(&mut self, b: Box<[u8]>) -> GcRef {
         self.maybe_collect();
-        self.heap.alloc_str(s)
+        self.heap.alloc_bytes(b)
+    }
+
+    #[inline(always)]
+    fn str_ref(&self, r: Reg) -> Result<GcRef, VmError> {
+        match self.get(r) {
+            Value::Str(s) => Ok(s),
+            v => Err(self.type_error("a str", v)),
+        }
     }
 
     fn alloc_agg(&mut self, fields: Vec<Value>) -> GcRef {
@@ -1784,5 +1863,48 @@ fn main() {
         vm.run_main(&mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), format!("{}y\n", "x".repeat(50)));
         assert!(vm.heap().stats().collections > 100);
+    }
+
+    #[test]
+    fn strings_have_bytes_slices_and_order() {
+        let src = "
+fn main() {
+    let s = \"hello, 세계\"
+    print(len(s))
+    print(s[1])
+    print(s[:5] + s[5:7] + s[7:])
+    print(s[7:10])
+    print(\"apple\" < \"banana\" && \"app\" < \"apple\" && !(\"b\" < \"a\") && \"a\" <= \"a\")
+}";
+        assert_eq!(run_src(src).1, "13\n101\nhello, 세계\n세\ntrue\n");
+        // A slice may cut a character; its bytes print as they are.
+        let (_, out) = {
+            let m = compile("fn main() { print(\"세\"[:1]) }");
+            let mut out = Vec::new();
+            (Vm::new(&m).run_main(&mut out).unwrap(), out)
+        };
+        assert_eq!(out, [0xec, b'\n']);
+        let m = compile("fn main() { print(\"abc\"[2:4]) }");
+        assert!(run(&m, &mut Vec::new()).unwrap_err().msg.contains("slice 2:4 out of bounds for a str of length 3"));
+        let m = compile("fn main() { print(\"abc\"[3]) }");
+        assert!(run(&m, &mut Vec::new()).unwrap_err().msg.contains("index 3 out of bounds for a str of length 3"));
+    }
+
+    #[test]
+    fn read_line_reads_lines_until_the_end() {
+        let src = "
+fn main() {
+    let line = read_line()
+    while len(line) > 0 {
+        print(len(line))
+        line = read_line()
+    }
+}";
+        let m = compile(src);
+        let input = Input::Reader(Box::new(std::io::Cursor::new(b"ab\n\nlast".to_vec())));
+        let mut out = Vec::new();
+        Vm::new(&m).with_input(input).run_main(&mut out).unwrap();
+        // "ab\n", "\n", and "last" without a newline.
+        assert_eq!(String::from_utf8(out).unwrap(), "3\n1\n4\n");
     }
 }

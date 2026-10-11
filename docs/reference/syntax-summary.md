@@ -68,6 +68,7 @@ expr    = expr binop expr
         | ("-" | "!" | "*" | "&" | "ref" | "comptime") expr
         | expr "(" exprs ")"                              ; call
         | expr "[" expr "]" | expr "." NAME               ; index, field
+        | expr "[" expr? ":" expr? "]"                    ; slice of a str
         | primary
 primary = INT | FLOAT | STRING | "true" | "false"
         | NAME | path                                     ; variable, constant, module item

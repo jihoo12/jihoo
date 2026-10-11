@@ -23,7 +23,7 @@ pub use verify::verify;
 /// module instead of compiling it with other rules. Bump it whenever the
 /// format or the meaning of anything in it changes (see "Versions" in
 /// `docs/jir.md`); the `version` tests check that both sides and the spec agree.
-pub const JIR_VERSION: u32 = 4;
+pub const JIR_VERSION: u32 = 5;
 
 /// Language profile, selected with `#![native]` or `#![freestanding]` at the
 /// top of a source file.
@@ -404,6 +404,16 @@ pub enum Inst {
     Print { src: Reg },
     /// Hosted (and macros): a number or bool as text.
     ToStr { dst: Reg, src: Reg },
+    /// Hosted only: the length of `str` `src` in bytes, an `i64`.
+    Len { dst: Reg, src: Reg },
+    /// Hosted only: byte `index` (an `i64`) of `str` `src`, a `u8`. Bounds-checked.
+    StrByte { dst: Reg, src: Reg, index: Reg },
+    /// Hosted only: bytes `lo` up to `hi` (`i64`s) of `str` `src`, as a new
+    /// `str`. Checked: `0 <= lo <= hi <= len`.
+    Slice { dst: Reg, src: Reg, lo: Reg, hi: Reg },
+    /// Hosted only: the next line of standard input with its `\n`, or `""` at
+    /// the end of the input.
+    ReadLine { dst: Reg },
     /// Compile time only (macros): `prefix` plus a number never handed out before
     /// in this compilation, for names that cannot clash.
     Unique { dst: Reg, prefix: Reg },
@@ -502,7 +512,9 @@ impl Inst {
     pub fn regs_mut(&mut self) -> Vec<&mut Reg> {
         use Inst::*;
         match self {
-            Const { dst, .. } | FConst { dst, .. } | Unit { dst } | Str { dst, .. } | FuncRef { dst, .. } => vec![dst],
+            Const { dst, .. } | FConst { dst, .. } | Unit { dst } | Str { dst, .. } | FuncRef { dst, .. } | ReadLine { dst } => {
+                vec![dst]
+            }
             Copy { dst, src }
             | Unary { dst, src, .. }
             | Cast { dst, src }
@@ -515,6 +527,7 @@ impl Inst {
             | NewChan { dst, cap: src }
             | Recv { dst, chan: src }
             | ToStr { dst, src }
+            | Len { dst, src }
             | Addr { dst, src }
             | Unique { dst, prefix: src }
             | Stringify { dst, code: src }
@@ -523,9 +536,11 @@ impl Inst {
             | Splat { dst, value: src } => vec![dst, src],
             Binary { dst, lhs, rhs, .. }
             | Elem { dst, src: lhs, index: rhs }
+            | StrByte { dst, src: lhs, index: rhs }
             | SetField { dst, src: lhs, value: rhs, .. }
             | ElemPtr { dst, ptr: lhs, index: rhs } => vec![dst, lhs, rhs],
             SetElem { dst, src, index, value } => vec![dst, src, index, value],
+            Slice { dst, src, lo, hi } => vec![dst, src, lo, hi],
             Store { ptr, value } | Send { chan: ptr, value } => vec![ptr, value],
             Spawn { callee, args } => std::iter::once(callee).chain(args).collect(),
             GetPath { dst, src, path } | CellGet { dst, cell: src, path } => {

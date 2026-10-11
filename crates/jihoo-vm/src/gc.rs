@@ -32,7 +32,8 @@ pub struct GcRef {
 
 #[derive(Debug)]
 enum Obj {
-    Str(Box<str>),
+    /// Text, as bytes: usually UTF-8, but slicing may cut a character.
+    Str(Box<[u8]>),
     /// Fields of a struct or elements of an array.
     Agg(Box<[Value]>),
     Chan(Box<Channel>),
@@ -141,7 +142,11 @@ impl Heap {
     }
 
     pub fn alloc_str(&mut self, s: &str) -> GcRef {
-        self.alloc(Obj::Str(s.into()))
+        self.alloc_bytes(s.as_bytes().into())
+    }
+
+    pub fn alloc_bytes(&mut self, b: Box<[u8]>) -> GcRef {
+        self.alloc(Obj::Str(b))
     }
 
     pub fn alloc_agg(&mut self, fields: Vec<Value>) -> GcRef {
@@ -178,11 +183,18 @@ impl Heap {
         }
     }
 
-    pub fn str(&self, r: GcRef) -> &str {
+    /// The bytes of string `r`.
+    pub fn bytes(&self, r: GcRef) -> &[u8] {
         match self.obj(r) {
             Obj::Str(s) => s,
             _ => panic!("{r:?} is not a string"),
         }
+    }
+
+    /// String `r` as text, with any bytes that are not UTF-8 replaced by `�`.
+    /// For code and names, which only ever hold whole characters.
+    pub fn str(&self, r: GcRef) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(self.bytes(r))
     }
 
     /// Notes that another reference to `r` may now exist.

@@ -49,10 +49,11 @@ See [Types](types.md#integers) for overflow and division by zero.
 | operator | operands | result |
 |----------|----------|--------|
 | `==` `!=` | any type made of comparable parts | `bool` ([Equality](equality.md)) |
-| `<` `<=` `>` `>=` | integers, floats, pointers of the same type | `bool` |
+| `<` `<=` `>` `>=` | integers, floats, pointers of the same type; `str` | `bool` |
 
 Integers compare signed or unsigned according to their type, and pointers by
-address. Strings, structs, enums and arrays have equality but no ordering.
+address; strings compare byte by byte, a prefix first. Structs, enums and arrays
+have equality but no ordering.
 
 ## Bitwise
 
