@@ -84,6 +84,8 @@ struct ModInfo {
 pub(crate) struct Env<'p> {
     pub profile: Profile,
     modules: Vec<ModInfo>,
+    /// The prelude module, whose items every module can name without an import.
+    prelude: Option<usize>,
     /// Declarations by key: the module-qualified name, such as `alloc.push`
     /// (root-module items keep their plain names). Values are (module, decl).
     struct_decls: HashMap<String, (usize, &'p StructDecl)>,
@@ -139,6 +141,7 @@ impl<'p> Env<'p> {
         let mut env = Env {
             profile,
             modules,
+            prelude: mods.iter().position(|m| m.name == jihoo_syntax::loader::PRELUDE),
             struct_decls: HashMap::new(),
             fn_decls: HashMap::new(),
             const_decls: HashMap::new(),
@@ -227,7 +230,13 @@ impl<'p> Env<'p> {
                 let target = *self.modules[module].imports.get(alias)?;
                 Some(self.item_key(target, item))
             }
-            None => Some(self.item_key(module, name)),
+            // A name the module does not define may be one of the prelude's.
+            None => match self.prelude {
+                Some(p) if p != module && !self.defines(module, name) && self.defines(p, name) => {
+                    Some(self.item_key(p, name))
+                }
+                _ => Some(self.item_key(module, name)),
+            },
         }
     }
 

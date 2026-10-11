@@ -59,6 +59,11 @@ expected type (a typed `let`, an argument, a return value), or else from payload
 values declared with exactly a type parameter (`Some(T)`). `let x = Option.None`
 gives no clue and is an error that says so.
 
+Programs need not declare `Option` themselves: it and `Result(T, E)` (`Ok(T)`,
+`Err(E)`) are in the prelude, which every module sees
+([Standard library](../reference/standard-library.md#prelude)). A module's own
+`Option`, as above, comes first.
+
 ## Using enums
 
 - [`match`](patterns.md) is how a program asks which variant it has and gets

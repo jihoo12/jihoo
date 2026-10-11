@@ -43,7 +43,7 @@ use generic::{Binding, Bindings};
 /// Checks and lowers a single-file program.
 pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
     let root = Module { name: String::new(), file: 0, program: prog.clone(), imports: HashMap::new() };
-    analyze_modules(std::slice::from_ref(&root))
+    analyze_modules(&[root, jihoo_syntax::loader::prelude(1)])
 }
 
 /// Checks and lowers a program made of modules (see `jihoo_syntax::loader`);

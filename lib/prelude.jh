@@ -1,0 +1,26 @@
+// The prelude: types every program can use without an import, in every
+// profile. A module's own item of the same name comes first.
+//
+//   fn find(xs: [i64; 3], x: i64) -> Option(i64) {
+//       ...
+//       return Option.Some(i)
+//   }
+//   match parse("42") {
+//       Ok(n) => print(n)
+//       Err(msg) => print(msg)
+//   }
+//
+// The compiler carries this file in itself, so it is always the one it was
+// built with.
+
+// A value that may be missing.
+pub enum Option(T: type) {
+    Some(T)
+    None
+}
+
+// The value of something that worked, or why it did not.
+pub enum Result(T: type, E: type) {
+    Ok(T)
+    Err(E)
+}

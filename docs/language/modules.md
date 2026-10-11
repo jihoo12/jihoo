@@ -25,6 +25,11 @@ Items of another module are always written `alias.item`: functions
 (`geo.Shape.Empty`) and constants (`alloc.PROT_WRITE`). There is no way to
 import names unqualified.
 
+The one exception is the prelude, `lib/prelude.jh`: every module can name its
+public items, `Option` and `Result`, as if it declared them, unless it declares
+an item of the same name itself
+([Standard library](../reference/standard-library.md#prelude)).
+
 ## Visibility
 
 Items are private to their module unless marked `pub`: `pub fn`, `pub struct`,

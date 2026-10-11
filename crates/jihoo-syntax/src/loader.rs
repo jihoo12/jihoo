@@ -22,8 +22,23 @@ pub struct Module {
     pub imports: HashMap<String, usize>,
 }
 
+/// The name of the prelude module, whose public items every module can name
+/// without an import.
+pub const PRELUDE: &str = "prelude";
+
+/// Where the prelude's source lives in the repository, for error messages.
+const PRELUDE_PATH: &str = "lib/prelude.jh";
+
+/// The prelude as module `prelude`, read from `file` number `file`. The
+/// compiler carries its source, so it never depends on the search path.
+pub fn prelude(file: u16) -> Module {
+    let src = include_str!("../../../lib/prelude.jh");
+    let program = parse_file(src, file).expect("the prelude parses");
+    Module { name: PRELUDE.to_string(), file, program, imports: HashMap::new() }
+}
+
 pub struct Loaded {
-    /// The root module comes first.
+    /// The root module comes first, then the prelude.
     pub modules: Vec<Module>,
     /// Paths by file number, for error messages.
     pub files: Vec<PathBuf>,
@@ -73,6 +88,12 @@ impl Loader<'_> {
         self.by_path.insert(path.clone(), index);
         let imports = program.imports.clone();
         self.modules.push(Module { name, file, program, imports: HashMap::new() });
+        if index == 0 {
+            // Before any import, so that it is always module 1 and has its name.
+            let p = prelude(self.files.len() as u16);
+            self.files.push(PathBuf::from(PRELUDE_PATH));
+            self.modules.push(p);
+        }
 
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         for imp in imports {
@@ -140,17 +161,18 @@ mod tests {
             ("std/util.jh", "fn other() {}"),
         ];
         let l = load_with(Path::new("app/main.jh"), &[PathBuf::from("std")], "x86_64", &fs(&files)).map_err(|e| e.0).unwrap();
+        // The prelude always comes right after the root.
         // main -> app/util.jh (next to it) and std/lib/alloc.jh (search path).
         // util -> std/lib/alloc.jh again: the same module, loaded once.
         // alloc -> util: not next to it, so std/util.jh, a different file whose
         // name is already taken, hence `util_2`.
         let names: Vec<&str> = l.modules.iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(names, ["", "util", "lib.alloc", "util_2"]);
+        assert_eq!(names, ["", "prelude", "util", "lib.alloc", "util_2"]);
         let root = &l.modules[0];
-        assert_eq!(root.imports["alloc"], 2);
-        assert_eq!(l.modules[root.imports["util"]].imports["mem"], 2);
-        assert_eq!(l.modules[2].imports["util"], 3);
-        assert_eq!(l.files[3], Path::new("std/util.jh"));
+        assert_eq!(root.imports["alloc"], 3);
+        assert_eq!(l.modules[root.imports["util"]].imports["mem"], 3);
+        assert_eq!(l.modules[3].imports["util"], 4);
+        assert_eq!(l.files[4], Path::new("std/util.jh"));
     }
 
     #[test]

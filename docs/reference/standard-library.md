@@ -2,10 +2,11 @@
 
 The standard library is a handful of jihoo modules in `lib/`, found by `import`
 after the program's own directories ([Modules](../language/modules.md#finding-modules)).
-Hosted programs need none of it: `print`, `str` and the GC are built in.
+One of them, the prelude, needs no import.
 
 | module | profiles | what |
 |--------|----------|------|
+| [prelude](#prelude) | all | `Option(T)` and `Result(T, E)`, without an import |
 | [`libc`](#libc) | native | declarations of C library functions |
 | [`sys`](#sys) | native, freestanding | Linux syscall numbers of the target |
 | [`alloc`](#alloc) | native, freestanding | an arena allocator over `mmap`, and `Vec(T)` |
@@ -16,6 +17,49 @@ Hosted programs need none of it: `print`, `str` and the GC are built in.
 libc, only `syscall`, so native programs can import them too. `coro` is marked
 `#![native]`: it uses the C library to switch stacks. All of them work on both
 targets, x86_64 and aarch64 Linux.
+
+## prelude
+
+`lib/prelude.jh` declares the types every program can name without an import,
+in every profile:
+
+```jihoo
+pub enum Option(T: type) {      // a value that may be missing
+    Some(T)
+    None
+}
+
+pub enum Result(T: type, E: type) {   // a value, or why there is none
+    Ok(T)
+    Err(E)
+}
+```
+
+```jihoo
+fn find(xs: [i64], x: i64) -> Option(i64) {
+    let i = 0
+    while i < len(xs) {
+        if xs[i] == x {
+            return Option.Some(i)
+        }
+        i += 1
+    }
+    return Option.None
+}
+
+fn main() {
+    let xs: [i64] = [4, 5, 6]
+    match find(xs, 5) {
+        Some(i) => print(i)        // 1
+        None => print("missing")
+    }
+}
+```
+
+A module's own item of the same name comes first, so a program that declares
+its own `Option` uses that one. The compiler carries the prelude in itself, so
+it is the one it was built with whatever the search path holds; in JIR its
+types are named `prelude.Option(i64)` and so on.
 
 ## libc
 

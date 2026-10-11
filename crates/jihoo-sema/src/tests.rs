@@ -1456,7 +1456,7 @@ fn structs_cross_into_c_by_value() {
     assert!(e.contains("`puts` is exported here and declared as an extern C function the program calls"), "{e}");
 }
 
-// ---- strings and lists ----
+// ---- strings, lists and the prelude ----
 
 #[test]
 fn string_operations() {
@@ -1491,4 +1491,20 @@ fn builtin_names_can_be_taken() {
     // A module's own `push` (as `alloc.push` is) wins over the builtin.
     check("fn push(a: i64, b: i64) -> i64 { return a + b }\nfn main() { print(push(1, 2)) }").unwrap();
     check("fn read_line() -> i64 { return 1 }\nfn main() { print(read_line()) }").unwrap();
+}
+
+#[test]
+fn the_prelude_is_everywhere() {
+    check("fn f() -> Option(i64) { return Option.Some(1) }\nfn main() {\n match f() {\n Some(x) => print(x)\n None => {}\n }\n\
+           let r: Result(i64, str) = Result.Err(\"no\")\n print(r == Result.Ok(1)) }")
+    .unwrap();
+    check(&fs("fn f() -> Option(u8) { return Option.None }")).unwrap();
+    // A module's own item of the same name comes first.
+    check("enum Option { A, B }\nfn main() { let o = Option.A\n print(o == Option.B) }").unwrap();
+    // Imported modules see the prelude too.
+    check_files(&[
+        ("main.jh", "import m\nfn main() { print(m.f() == Option.Some(2)) }"),
+        ("m.jh", "pub fn f() -> Option(i64) { return Option.Some(2) }"),
+    ])
+    .unwrap();
 }
