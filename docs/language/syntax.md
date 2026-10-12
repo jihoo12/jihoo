@@ -22,8 +22,10 @@ fn main() {
 ## Files and attributes
 
 A file is UTF-8 text with the extension `.jh`. It may start with *attributes*
-of the form `#![name]`, before any item; the only ones are `#![native]` and
-`#![freestanding]`, which choose the [profile](profiles.md).
+of the form `#![name]`, before any item: `#![hosted]`, `#![native]` and
+`#![freestanding]`, which choose the [profile](profiles.md), and, for a
+library, `#![comptime]`, which keeps it to macros
+([Modules](modules.md#modules-and-profiles)).
 
 ## Comments
 

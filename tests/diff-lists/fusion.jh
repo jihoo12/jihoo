@@ -1,64 +1,8 @@
-// Pipelines fused by a macro that reads its stages with `meta.node` must give
-// what the same pipelines give with `lists`, and `meta.node` must see the
-// shape of code as the parser does.
+// Pipelines fused by `lists.fuse!` must give what the same pipelines give
+// with `lists.map`, `lists.filter` and `lists.fold`, and `meta.node` must see
+// the shape of code as the parser does.
 import lists
 import meta
-
-fn stage(kind: str, call: expr, body: stmts) -> stmts {
-    if kind == "map" {
-        return quote {
-            $body
-            let v = $call
-        }
-    }
-    return quote {
-        $body
-        if !$call { continue }
-    }
-}
-
-macro fuse(xs: expr, stages: [expr]) -> expr {
-    let binds = quote {}
-    let body = quote { let v = x }
-    // An expression of the type each stage gives, to ask `type_of` about the
-    // last: it is only typed, never run.
-    let sample = quote($xs[0])
-    for s in stages {
-        match meta.node(s) {
-            Call(kind, args) => {
-                if kind == "map" || kind == "filter" {
-                    let g = unique("stage")
-                    binds = quote {
-                        $binds
-                        let $g = $(args[0])
-                    }
-                    body = stage(kind, quote($(ident(g))(v)), body)
-                    if kind == "map" {
-                        sample = quote(($(args[0]))($sample))
-                    }
-                } else if kind != "sum" {
-                    trap()      // not a stage: the compiler reports where
-                }
-            }
-            _ => trap()
-        }
-    }
-    // The sum starts at zero of the type the stages end with.
-    let t = type_of(sample)
-    let zero = quote(0)
-    if t == "f64" || t == "f32" {
-        zero = quote(0.0)
-    }
-    return quote({
-        $binds
-        let acc: $t = $zero
-        for x in $xs {
-            $body
-            acc += v
-        }
-        acc
-    })
-}
 
 fn total(xs: [i64]) -> i64 {
     return lists.fold(i64, i64, xs, 0, fn(a: i64, x: i64) -> i64 { return a + x })
@@ -88,30 +32,40 @@ fn entry() -> i64 {
     }
     let k = 3
 
-    let a = fuse!(xs, map(fn(x: i64) -> i64 { return x * k }))
+    let a = lists.fuse!(xs, map(fn(x: i64) -> i64 { return x * k }))
     out(a - total(lists.map(i64, i64, xs, fn(x: i64) -> i64 { return x * k })))
 
-    let b = fuse!(xs, filter(fn(x: i64) -> bool { return x > 0 }), map(fn(x: i64) -> i64 { return x + 1 }), sum())
+    let b = lists.fuse!(xs, filter(fn(x: i64) -> bool { return x > 0 }), map(fn(x: i64) -> i64 { return x + 1 }), sum())
     out(b - total(lists.map(i64, i64, lists.filter(i64, xs, fn(x: i64) -> bool { return x > 0 }), fn(x: i64) -> i64 { return x + 1 })))
 
-    let c = fuse!(xs)
+    let c = lists.fuse!(xs)
     out(c - total(xs))
 
     // Captured values, and a filter that keeps nothing.
     let limit = 1000
-    let d = fuse!(xs, filter(fn(x: i64) -> bool { return x > limit }))
+    let d = lists.fuse!(xs, filter(fn(x: i64) -> bool { return x > limit }))
     out(d)
     // Other number types: the sum starts at the zero of the last stage's type.
     let small: [u8] = [200, 100, 7]
-    let bytes = fuse!(small, map(fn(b: u8) -> u8 { return b / 2 }))
+    let bytes = lists.fuse!(small, map(fn(b: u8) -> u8 { return b / 2 }))
     out(bytes as i64)                // 100 + 50 + 3, as a u8: 153
-    let halves = fuse!(xs, map(fn(x: i64) -> f64 { return x as f64 / 2.0 }), filter(fn(h: f64) -> bool { return h > 0.0 }))
+    let halves = lists.fuse!(xs, map(fn(x: i64) -> f64 { return x as f64 / 2.0 }), filter(fn(h: f64) -> bool { return h > 0.0 }))
     out((halves * 2.0) as i64 - total(lists.filter(i64, xs, fn(x: i64) -> bool { return x > 0 })))
-    let wide = fuse!(small, map(fn(b: u8) -> i64 { return b as i64 * 1000 }))
+    let wide = lists.fuse!(small, map(fn(b: u8) -> i64 { return b as i64 * 1000 }))
     out(wide)                        // 307000
 
+    // `count()` and `collect()` end a pipeline too.
+    let pos = fn(x: i64) -> bool { return x > 0 }
+    out(lists.fuse!(xs, filter(pos), count()) - len(lists.filter(i64, xs, pos)))
+    let kept = lists.fuse!(xs, filter(pos), map(fn(x: i64) -> i64 { return x * k }), collect())
+    let same = lists.map(i64, i64, lists.filter(i64, xs, pos), fn(x: i64) -> i64 { return x * k })
+    out(len(kept))
+    if kept == same { out(1) } else { out(0) }
+    let none = lists.fuse!(xs, filter(fn(x: i64) -> bool { return x > limit }), collect())
+    out(len(none))
+
     // A fused pipeline is an expression like any other.
-    out(fuse!(xs, map(fn(x: i64) -> i64 { return x % 4 })) * 2 - fuse!(xs, map(fn(x: i64) -> i64 { return 2 * (x % 4) })))
+    out(lists.fuse!(xs, map(fn(x: i64) -> i64 { return x % 4 })) * 2 - lists.fuse!(xs, map(fn(x: i64) -> i64 { return 2 * (x % 4) })))
 
     out(shape!(add(1, 2)))
     out(shape!(xs))

@@ -106,3 +106,17 @@ fn jihoo_ir_version() -> String {
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.lines().find_map(|l| l.strip_prefix("jir ")).unwrap().to_string()
 }
+
+/// Modules only macros use (`#![comptime]`, and what only they import) are
+/// not part of the program: `examples/pipe.jh` uses `lists.fuse!`, which
+/// reads code with `meta`, which uses `strings`.
+#[test]
+fn compile_time_modules_stay_out_of_programs() {
+    let out = Command::new(JIHOO).arg("emit-ir").arg(repo_root().join("examples/pipe.jh")).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("fn @lists.map"), "{text}");
+    for module in ["meta", "strings"] {
+        assert!(!text.contains(&format!("fn @{module}.")), "`{module}` is in the program:\n{text}");
+    }
+}

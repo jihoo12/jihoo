@@ -61,6 +61,10 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
             "hosted" => Profile::Hosted,
             "native" => Profile::Native,
             "freestanding" => Profile::Freestanding,
+            "comptime" => {
+                errors.push(Error::new(*pos, "`#![comptime]` is for libraries that macros use; a program runs"));
+                continue;
+            }
             other => {
                 errors.push(Error::new(*pos, format!("unknown attribute `#![{other}]`")));
                 continue;
@@ -79,6 +83,8 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
     for m in &mods[1..] {
         for (pos, attr) in &m.program.attrs {
             let ok = match attr.as_str() {
+                // Only used while compiling, in any program.
+                "comptime" => true,
                 "hosted" => profile == Profile::Hosted,
                 "freestanding" => profile.is_compiled(),
                 "native" => profile == Profile::Native,
@@ -483,7 +489,8 @@ impl<'a> FnCx<'a> {
     /// Lowers `f` as the JIR function `name` (an instance name for generics).
     fn lower_fn(mut self, f: &FnDecl, name: &str) -> Result<ir::Function, Error> {
         let sig = self.sig.clone();
-        self.in_macro = f.is_compile_time() || self.env.sig_holds_code(&sig);
+        self.in_macro =
+            f.is_compile_time() || self.env.sig_holds_code(&sig) || self.env.module_is_comptime(self.bindings.module);
         // Comptime parameters are bindings, not registers.
         for (p, ty) in f.params.iter().filter(|p| !p.comptime).zip(&sig.params) {
             let r = self.new_reg(ty.clone());

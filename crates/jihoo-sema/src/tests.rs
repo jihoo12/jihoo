@@ -133,6 +133,7 @@ fn for_loops() {
 
 #[test]
 fn profile_rules() {
+    assert!(err("#![comptime]\nfn main() {}").contains("`#![comptime]` is for libraries"));
     assert!(err("#![freestanding]\nfn _start() { print(1) }").contains("not available in freestanding"));
     assert!(err("fn main() { syscall(60, 0) }").contains("only available in native and freestanding"));
     assert!(err(&fs("fn f(s: str) {}")).contains("type `str` needs an allocator"));

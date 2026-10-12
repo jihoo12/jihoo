@@ -1,12 +1,20 @@
-// Functions on lists (`[T]`) for hosted programs. Each takes the element type
-// first, as generic functions do, and returns a new list: lists are values,
-// so the one passed in is never changed.
+// Functions on lists (`[T]`) for hosted and native programs. Each takes the
+// element type first, as generic functions do, and returns a new list: lists
+// are values, so the one passed in is never changed.
 //
 //   import lists
 //   let xs: [i64] = [3, 1, 2]
 //   let sorted = lists.sort(i64, xs, fn(a: i64, b: i64) -> bool { return a < b })
 //   let doubled = lists.map(i64, i64, sorted, fn(x: i64) -> i64 { return x * 2 })
 //   print(lists.index_of(i64, doubled, 4))      // 1
+//
+// `fuse!` runs a pipeline of `map` and `filter` stages as one loop, building
+// no list between them:
+//
+//   let total = lists.fuse!(xs, map(fn(x: i64) -> i64 { return x * x }),
+//                               filter(fn(x: i64) -> bool { return x > 2 }),
+//                               sum())
+import meta
 
 // Where `x` first is in `xs`, or -1.
 pub fn index_of(comptime T: type, xs: [T], x: T) -> i64 {
@@ -108,4 +116,106 @@ fn min(a: i64, b: i64) -> i64 {
         return a
     }
     return b
+}
+
+// ---- fused pipelines ----
+
+// `fuse!(xs, stage...)`: the stages run on each element of `xs` in turn, in
+// one loop, with no list between them; it is as fast as the loop written out.
+// The stages are `map(f)`, which replaces the value with `f(value)`, and
+// `filter(keep)`, which drops it unless `keep(value)`. The last may end the
+// pipeline and give its result:
+//
+// - `sum()`, the default: the sum of what is left, of the type the stages
+//   end with (any number type);
+// - `count()`: how many values are left, an `i64`;
+// - `collect()`: a list of what is left.
+//
+// The functions are evaluated once, before the loop. `fuse!` reads its stages
+// with `meta.node` and asks `type_of` for the type the last stage gives.
+pub macro fuse(xs: expr, stages: [expr]) -> expr {
+    let binds = quote {}
+    let body = quote { let v = x }
+    // An expression of the type each stage gives, only typed, never run.
+    let sample = quote($xs[0])
+    let end = "sum"
+    for i, s in stages {
+        match meta.node(s) {
+            Call(kind, args) => {
+                if (kind == "map" || kind == "filter") && len(args) == 1 {
+                    let g = unique("stage")
+                    binds = quote {
+                        $binds
+                        let $g = $(args[0])
+                    }
+                    body = fuse_stage(kind, quote($(ident(g))(v)), body)
+                    if kind == "map" {
+                        sample = quote(($(args[0]))($sample))
+                    }
+                } else if (kind == "sum" || kind == "count" || kind == "collect") && len(args) == 0 && i == len(stages) - 1 {
+                    end = kind
+                } else {
+                    not_a_stage(s)
+                }
+            }
+            _ => not_a_stage(s)
+        }
+    }
+    if end == "count" {
+        return quote({
+            $binds
+            let acc = 0
+            for x in $xs {
+                $body
+                acc += 1
+            }
+            acc
+        })
+    }
+    let t = type_of(sample)
+    if end == "collect" {
+        return quote({
+            $binds
+            let acc: [$t] = []
+            for x in $xs {
+                $body
+                push(acc, v)
+            }
+            acc
+        })
+    }
+    let zero = quote(0)
+    if t == "f64" || t == "f32" {
+        zero = quote(0.0)
+    }
+    return quote({
+        $binds
+        let acc: $t = $zero
+        for x in $xs {
+            $body
+            acc += v
+        }
+        acc
+    })
+}
+
+// Stops the expansion, saying why; the compiler adds where.
+fn not_a_stage(s: expr) {
+    print("fuse!: `" + stringify(s) + "` is not a stage: write map(f) or filter(f), and end with sum(), count() or collect()")
+    trap()
+}
+
+// The code of one stage, after the stages before it in `body`. `v` is the
+// value so far, the same `v` in every piece of code one expansion builds.
+fn fuse_stage(kind: str, call: expr, body: stmts) -> stmts {
+    if kind == "map" {
+        return quote {
+            $body
+            let v = $call
+        }
+    }
+    return quote {
+        $body
+        if !$call { continue }
+    }
 }

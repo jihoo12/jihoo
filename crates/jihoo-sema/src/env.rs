@@ -79,6 +79,37 @@ struct ModInfo {
     imports: HashMap<String, usize>,
     /// The scope of code at the top level of the module.
     root: Rc<Bindings>,
+    /// Only used while compiling (see `comptime_modules`).
+    comptime: bool,
+}
+
+/// The modules only used while compiling: those marked `#![comptime]` (such
+/// as `lib/meta.jh`), and those that only such modules import, as
+/// `lib/strings.jh` is when a program imports `meta` but not `strings`. Their
+/// functions and types run only in macros, and never become part of the
+/// program. A module nothing imports (the program, the prelude, modules the
+/// loader adds) is used by the program.
+fn comptime_modules(mods: &[Module]) -> Vec<bool> {
+    let mut comptime: Vec<bool> = mods.iter().map(|m| m.program.attrs.iter().any(|(_, a)| a == "comptime")).collect();
+    let mut importers: Vec<Vec<usize>> = vec![Vec::new(); mods.len()];
+    for (i, m) in mods.iter().enumerate() {
+        for &target in m.imports.values() {
+            if target != i && !importers[target].contains(&i) {
+                importers[target].push(i);
+            }
+        }
+    }
+    loop {
+        let more: Vec<usize> = (0..mods.len())
+            .filter(|&m| !comptime[m] && !importers[m].is_empty() && importers[m].iter().all(|&i| comptime[i]))
+            .collect();
+        if more.is_empty() {
+            return comptime;
+        }
+        for m in more {
+            comptime[m] = true;
+        }
+    }
 }
 
 pub(crate) struct Env<'p> {
@@ -133,6 +164,7 @@ impl<'p> Env<'p> {
     /// Indexes every module's items, reporting duplicate and reserved names.
     pub fn new(profile: Profile, mods: &'p [Module]) -> (Self, Vec<Error>) {
         let mut errors = Vec::new();
+        let comptime = comptime_modules(mods);
         let modules = mods
             .iter()
             .enumerate()
@@ -140,6 +172,7 @@ impl<'p> Env<'p> {
                 name: m.name.clone(),
                 imports: m.imports.clone(),
                 root: Rc::new(Bindings::in_module(i)),
+                comptime: comptime[i],
             })
             .collect();
         let mut env = Env {
@@ -540,7 +573,8 @@ impl<'p> Env<'p> {
                         return Err(Error::new(f.pos, format!("field `{}` is declared twice", f.name)));
                     }
                     // A field may hold code, which makes the struct compile-time only.
-                    let ty = self.resolve_in(&f.ty, &bindings, f.ty.mentions_code()).map_err(|mut e| {
+                    let code_ok = f.ty.mentions_code() || self.modules[bindings.module].comptime;
+                    let ty = self.resolve_in(&f.ty, &bindings, code_ok).map_err(|mut e| {
                         if !bindings.is_empty() {
                             e.msg = format!("{} (in `{name}`)", e.msg);
                         }
@@ -571,7 +605,8 @@ impl<'p> Env<'p> {
                     if variants.iter().any(|(n, _)| *n == v.name) {
                         return Err(Error::new(v.pos, format!("variant `{}` is declared twice", v.name)));
                     }
-                    let tys = v.fields.iter().map(|t| self.resolve_in(t, &bindings, t.mentions_code())).collect::<Result<_, _>>();
+                    let comptime = self.modules[bindings.module].comptime;
+                    let tys = v.fields.iter().map(|t| self.resolve_in(t, &bindings, comptime || t.mentions_code())).collect::<Result<_, _>>();
                     let tys = tys.map_err(|mut e| {
                         if !bindings.is_empty() {
                             e.msg = format!("{} (in `{name}`)", e.msg);
@@ -755,11 +790,11 @@ impl<'p> Env<'p> {
     /// Whether `key` is a function, not a macro, that works on code and so
     /// only runs while compiling.
     pub fn is_code_fn(&self, key: &str) -> bool {
-        let Some(&(_, d)) = self.fn_decls.get(key) else { return false };
+        let Some(&(m, d)) = self.fn_decls.get(key) else { return false };
         if d.is_macro || d.is_extern {
             return false;
         }
-        d.is_compile_time() || matches!(self.signature(key), Some(Ok(sig)) if self.sig_holds_code(&sig))
+        self.modules[m].comptime || d.is_compile_time() || matches!(self.signature(key), Some(Ok(sig)) if self.sig_holds_code(&sig))
     }
 
     /// The text of type `t`, for `type_of`, such that it means `t` again in
@@ -799,7 +834,8 @@ impl<'p> Env<'p> {
         sig.params.iter().chain([&sig.ret]).any(|t| self.holds_code(t))
     }
 
-    /// Whether values of `t` hold code, which only exists while compiling.
+    /// Whether values of `t` only exist while compiling: they hold code, or a
+    /// struct or enum of a module only used while compiling.
     pub fn holds_code(&self, t: &Type) -> bool {
         self.holds_code_in(t, &mut HashSet::new())
     }
@@ -812,6 +848,9 @@ impl<'p> Env<'p> {
             }
             Type::Fn(params, ret) => params.iter().chain([&**ret]).any(|p| self.holds_code_in(p, seen)),
             Type::Struct(name) | Type::Enum(name) => {
+                if self.type_module(name).is_some_and(|m| self.modules[m].comptime) {
+                    return true;
+                }
                 if !seen.insert(name.clone()) {
                     return false;
                 }
@@ -820,6 +859,17 @@ impl<'p> Env<'p> {
             }
             _ => false,
         }
+    }
+
+    /// The module that declares struct or enum `name`, an instance name too.
+    fn type_module(&self, name: &str) -> Option<usize> {
+        let decl = self.instance_decl(name).unwrap_or_else(|| name.to_string());
+        self.struct_decls.get(decl.as_str()).map(|&(m, _)| m)
+    }
+
+    /// Whether module `m` is only used while compiling (`comptime_modules`).
+    pub fn module_is_comptime(&self, m: usize) -> bool {
+        self.modules[m].comptime
     }
 
     /// The declaration of `key` if it is a macro.
@@ -846,7 +896,7 @@ impl<'p> Env<'p> {
                 }
                 let is_macro = decl.is_macro;
                 // Compile-time functions may use code types, as macros do.
-                let code_ok = decl.is_compile_time();
+                let code_ok = decl.is_compile_time() || self.modules[m].comptime;
                 let params: Vec<Type> = decl
                     .params
                     .iter()

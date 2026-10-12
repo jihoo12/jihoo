@@ -213,7 +213,9 @@ and:
   (`tests/diff-lists/fusion.jh`, done);
 - the fuzzer writes random pipelines (not yet);
 - `fuse!` moves from the example into the library, with more ways to end a
-  pipeline than a sum (not yet).
+  pipeline than a sum (done: `lists.fuse!`, with `sum`, `count` and `collect`;
+  `meta` is `#![comptime]`, so it costs programs nothing and works in every
+  profile).
 
 ## Costs and risks
 

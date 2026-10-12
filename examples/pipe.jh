@@ -1,84 +1,16 @@
-// Fusing a pipeline with a macro: `map`, `filter` and a sum over a list as
-// one loop, with no list in between. Written with `lists`, the same pipeline
-// builds two lists of a million elements on the way; fused, it runs about
-// three times as fast natively, as fast as the loop written out by hand.
+// Fused pipelines: `lists.fuse!` runs `map` and `filter` stages over a list as
+// one loop, with no list in between. Written with `lists.map` and
+// `lists.filter`, the same pipeline builds a new list at every stage; fused,
+// it runs about three times as fast natively, as fast as the loop written
+// out by hand.
 //   jihoo run examples/pipe.jh
 //
-// `fuse!` runs on the VM while compiling. It takes the stages as code, any
-// number of them (`stages: [expr]`), reads each with `meta.node` to see
-// `map(f)` or `filter(g)`, and puts their code together into the body of one
-// `for` loop, with the help of `stage`, a function on code. `type_of` tells it
-// the type the last stage gives, so the sum starts at the right zero for any
-// number type.
-//
-// The fusion itself is ordinary jihoo, on what macros offer: any number of
-// code arguments, functions on code, `meta.node`, block expressions and
-// `type_of`. See the design in `docs/internals/code-as-data.md`.
+// `fuse!` is a macro in `lib/lists.jh`, written in jihoo. It runs on the VM
+// while compiling: it takes the stages as code, any number of them, reads each
+// with `meta.node` to see `map(f)` or `filter(g)`, asks `type_of` what type
+// the last stage gives, and puts it all together into one `for` loop in a
+// block expression. See the design in `docs/internals/code-as-data.md`.
 import lists
-import meta
-
-// The code of one stage, after the stages before it in `body`. `v` is the
-// value so far, the same `v` in every piece of code one expansion builds.
-fn stage(kind: str, call: expr, body: stmts) -> stmts {
-    if kind == "map" {
-        return quote {
-            $body
-            let v = $call
-        }
-    }
-    return quote {
-        $body
-        if !$call { continue }
-    }
-}
-
-// `fuse!(xs, map(f), filter(g), sum())` is the sum of what is left of `xs`
-// after the stages: a block expression with the loop in it. The functions go
-// into variables before the loop, so that a closure is made once, not once
-// per element; their names come from `unique`, as a name from a hole is the
-// caller's.
-macro fuse(xs: expr, stages: [expr]) -> expr {
-    let binds = quote {}
-    let body = quote { let v = x }
-    // An expression of the type each stage gives, to ask `type_of` about the
-    // last: it is only typed, never run.
-    let sample = quote($xs[0])
-    for s in stages {
-        match meta.node(s) {
-            Call(kind, args) => {
-                if kind == "map" || kind == "filter" {
-                    let g = unique("stage")
-                    binds = quote {
-                        $binds
-                        let $g = $(args[0])
-                    }
-                    body = stage(kind, quote($(ident(g))(v)), body)
-                    if kind == "map" {
-                        sample = quote(($(args[0]))($sample))
-                    }
-                } else if kind != "sum" {
-                    trap()      // not a stage: the compiler reports where
-                }
-            }
-            _ => trap()
-        }
-    }
-    // The sum starts at zero of the type the stages end with.
-    let t = type_of(sample)
-    let zero = quote(0)
-    if t == "f64" || t == "f32" {
-        zero = quote(0.0)
-    }
-    return quote({
-        $binds
-        let acc: $t = $zero
-        for x in $xs {
-            $body
-            acc += v
-        }
-        acc
-    })
-}
 
 fn main() {
     let xs: [i64] = []
@@ -87,18 +19,29 @@ fn main() {
     }
     let k = 7
 
-    // With `lists`: a list for `map`, another for `filter`.
+    // With a list for `map` and another for `filter`.
     let ys = lists.map(i64, i64, xs, fn(x: i64) -> i64 { return x * 3 + k })
     let zs = lists.filter(i64, ys, fn(x: i64) -> bool { return x % 2 == 0 })
     print(lists.fold(i64, i64, zs, 0, fn(a: i64, x: i64) -> i64 { return a + x }))
 
     // Fused: one loop, no list in between. Prints the same.
-    let s = fuse!(xs,
+    let s = lists.fuse!(xs,
         map(fn(x: i64) -> i64 { return x * 3 + k }),
         filter(fn(x: i64) -> bool { return x % 2 == 0 }),
         sum())
     print(s)
 
     // Any number type: here the stages end in `f64`.
-    print(fuse!(xs, filter(fn(x: i64) -> bool { return x < 10 }), map(fn(x: i64) -> f64 { return x as f64 / 4.0 })))
+    print(lists.fuse!(xs,
+        filter(fn(x: i64) -> bool { return x < 10 }),
+        map(fn(x: i64) -> f64 { return x as f64 / 4.0 })))
+
+    // Other ends: how many are left, or a list of them.
+    print(lists.fuse!(xs, filter(fn(x: i64) -> bool { return x > 90 }), count()))
+    let big = lists.fuse!(xs,
+        filter(fn(x: i64) -> bool { return x > 97 }),
+        map(fn(x: i64) -> str { return to_str(x) + "!" }),
+        collect())
+    print(len(big))
+    print(big[0])
 }

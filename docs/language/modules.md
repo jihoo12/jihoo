@@ -119,6 +119,13 @@ for the whole program. Other modules may require one: a module marked
 freestanding programs, and one marked `#![native]`, such as `libc`, only by
 native programs. A module without an attribute can be imported by any program.
 
+A module marked `#![comptime]`, such as [`meta`](../reference/standard-library.md#meta),
+is only for [macros](macros.md): its functions and types exist only while
+compiling, never in the program, so any program may import it, freestanding
+ones included, whatever it uses. So does a module that only such modules
+import: `meta` uses `strings`, which is not part of a program that imports
+`meta` unless the program imports `strings` too.
+
 ## Generics across modules
 
 Inside a [generic](generics.md) function or struct, names resolve in the module

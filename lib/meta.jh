@@ -1,3 +1,4 @@
+#![comptime]
 // Looking inside code, for macros. `meta.node(e)` gives the shape of an
 // expression one level deep; the parts are code again, to look into further
 // or to put back with holes as they are.

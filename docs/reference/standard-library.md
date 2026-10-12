@@ -7,9 +7,9 @@ One of them, the prelude, needs no import.
 | module | profiles | what |
 |--------|----------|------|
 | [prelude](#prelude) | all | `Option(T)` and `Result(T, E)`, without an import |
-| [`strings`](#strings) | hosted | searching, splitting, joining, trimming and parsing text |
-| [`lists`](#lists) | hosted | sorting, mapping and searching lists |
-| [`meta`](#meta) | macros | the shape of code, for macros that read the code they are given |
+| [`strings`](#strings) | hosted, native | searching, splitting, joining, trimming and parsing text |
+| [`lists`](#lists) | hosted, native | sorting, mapping and searching lists, and fused pipelines (`fuse!`) |
+| [`meta`](#meta) | all, while compiling | the shape of code, for macros that read the code they are given |
 | [`libc`](#libc) | native | declarations of C library functions |
 | [`sys`](#sys) | native, freestanding | Linux syscall numbers of the target |
 | [`alloc`](#alloc) | native, freestanding | an arena allocator over `mmap`, and a checked `Vec(T)` |
@@ -19,7 +19,7 @@ One of them, the prelude, needs no import.
 | [`thread`](#thread) | native | threads on all cores, with POSIX threads |
 | [`channel`](#channel) | native | channels between threads, with `close` |
 
-`strings` and `lists` work on `str` and lists, which only hosted programs have.
+`strings` and `lists` work on `str` and lists, which hosted and native programs have.
 `sys`, `alloc`, `io` and `sync` are marked `#![freestanding]`: they use neither
 GC nor libc, only `syscall`, so native programs can import them too. `coro`,
 `thread` and `channel` are marked `#![native]`: they use the C library to
@@ -71,7 +71,7 @@ types are named `prelude.Option(i64)` and so on.
 
 ## strings
 
-Text functions for hosted programs, written in jihoo on top of `len`, `s[i]`,
+Text functions for hosted and native programs, written in jihoo on top of `len`, `s[i]`,
 `s[lo:hi]` and `from_bytes` ([Types](../language/types.md#strings)). A `str` is
 bytes; these functions treat only ASCII specially (case, spaces, digits), so
 they never split a multi-byte character they did not find themselves.
@@ -116,7 +116,7 @@ proportion to their input and output.
 
 ## lists
 
-Generic functions on [lists](../language/lists.md) for hosted programs. Each
+Generic functions on [lists](../language/lists.md) for hosted and native programs. Each
 takes the element type first, as generic functions do, and returns a new list:
 the one passed in is never changed.
 
@@ -144,6 +144,34 @@ fn main() {
 
 `examples/words.jh` puts `read_line`, `strings` and `lists` together: it counts
 the words of its input and prints the most common ones.
+
+### fuse!
+
+`lists.fuse!(xs, stage...)` runs a pipeline over `xs` as one loop, building no
+list between the stages, so it is as fast as the loop written out by hand;
+`map`, `filter` and `fold` above build a new list each.
+
+```jihoo
+let total = lists.fuse!(xs,
+    filter(fn(x: i64) -> bool { return x > 0 }),
+    map(fn(x: i64) -> f64 { return x as f64 / 2.0 }),
+    sum())                                       // an f64
+let names = lists.fuse!(people, filter(adult), map(name_of), collect())
+```
+
+| stage | does |
+|-------|------|
+| `map(f)` | replaces each value `v` with `f(v)` |
+| `filter(keep)` | drops `v` unless `keep(v)` |
+| `sum()` | ends the pipeline: the sum of the values, of the type the stages end with; also when no end is given |
+| `count()` | ends the pipeline: how many values are left, an `i64` |
+| `collect()` | ends the pipeline: a list of the values |
+
+The functions are evaluated once, before the loop. `fuse!` is a
+[macro](../language/macros.md) written in jihoo: it reads the stages with
+[`meta`](#meta) and asks `type_of` for the type the last stage gives. A stage
+it does not know stops the compilation with a message that names it.
+`examples/pipe.jh` compares it with `map`, `filter` and `fold`.
 
 ## meta
 
@@ -179,12 +207,12 @@ macro doubled(call: expr) -> expr {
 | `Func(params, f)` | an anonymous function: the names of its parameters, and the whole function |
 | `Other` | anything else: unary operators, fields, indexing, casts, literals of structs, arrays and floats, `match`, macro calls |
 
-`Node` holds code, so it only exists while compiling
-([Functions on code](../language/macros.md#functions-on-code)). `meta` is
-written in jihoo on top of `code_text` and `to_code`
-([Macro builtins](../language/macros.md#macro-builtins)); it uses `str`, so
-freestanding programs cannot import it yet. `examples/pipe.jh` uses it to fuse
-`map`, `filter` and sums into one loop.
+`meta` is marked `#![comptime]`: it only exists while compiling, and none of
+it, nor the `strings` it uses, is part of the program
+([Modules](../language/modules.md#modules-and-profiles)), so any program can
+import it, freestanding ones included. It is written in jihoo on top of
+`code_text` and `to_code` ([Macro builtins](../language/macros.md#macro-builtins)).
+[`lists.fuse!`](#fuse) uses it to read the stages of a pipeline.
 
 ## libc
 

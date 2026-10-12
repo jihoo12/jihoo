@@ -1,0 +1,34 @@
+// `meta`, a `#![comptime]` library, works in every profile, freestanding
+// included: it only runs while compiling, so its `str` never reaches the
+// program.
+import meta
+
+// The number of arguments of a call, or -1 for other code.
+macro arity(e: expr) -> expr {
+    match meta.node(e) {
+        Call(f, args) => return quote($(len(args)))
+        _ => return quote(-1)
+    }
+}
+
+// The left side of a binary operator, or the code itself.
+macro left(e: expr) -> expr {
+    match meta.node(e) {
+        Binary(op, l, r) => return l
+        _ => return e
+    }
+}
+
+fn add(a: i64, b: i64) -> i64 {
+    return a + b
+}
+
+fn entry() -> i64 {
+    out(arity!(add(1, 2)))
+    out(arity!(f()))
+    out(arity!(7))
+    let x = 40
+    out(left!(x + 2 * 1000))
+    out(left!((x - 1) * 3))
+    return left!(add(x, 2) - 99)
+}

@@ -79,9 +79,10 @@
   arguments, and `meta.node` to look inside code (JIR 14: `codetext`), with
   which `examples/pipe.jh` fuses `map`, `filter` and sums into one loop, three
   times as fast as `lists`; blocks as expressions, so that a fused pipeline is
-  a value; `type_of` (JIR 15), so that it works for any element type. Next:
-  `fuse!` in the library with more ends than a sum, random pipelines in the
-  fuzzer, `meta` for freestanding programs.
+  a value; `type_of` (JIR 15), so that it works for any element type;
+  `lists.fuse!` in the library, with `sum`, `count` and `collect`; and
+  `#![comptime]` modules, so `meta` costs programs nothing and works in
+  freestanding ones. Next: random pipelines in the fuzzer.
 - **Memory:** a report of where native code copies lists (`jihoo build
   --cost`), which needs source positions in JIR; moving a field out of a
   value at its last use instead of copying it.
