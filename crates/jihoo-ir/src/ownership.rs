@@ -227,6 +227,7 @@ fn borrowed(inst: &Inst) -> Vec<Reg> {
         | Unique { prefix: src, .. }
         | Stringify { code: src, .. }
         | CodeText { src, .. }
+        | TypeOf { code: src, .. }
         | Load { ptr: src, .. }
         | AtomicLoad { ptr: src, .. }
         | FieldPtr { ptr: src, .. }

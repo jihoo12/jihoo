@@ -553,6 +553,7 @@ fn assign(l: &mut Line, dst: Reg) -> Result<Inst> {
         "unique" => Inst::Unique { dst, prefix: l.reg()? },
         "stringify" => Inst::Stringify { dst, code: l.reg()? },
         "codetext" => Inst::CodeText { dst, src: l.reg()? },
+        "typeof" => Inst::TypeOf { dst, code: l.reg()? },
         "asm" => {
             let template = l.str()?;
             l.punct(",")?;
@@ -578,6 +579,7 @@ fn assign(l: &mut Line, dst: Reg) -> Result<Inst> {
                     "ident" => HoleKind::Ident,
                     "stmts" => HoleKind::Stmts,
                     "items" => HoleKind::Items,
+                    "type" => HoleKind::Type,
                     w => return l.err(format!("unknown hole kind `{w}`")),
                 });
                 holes.push(l.reg()?);

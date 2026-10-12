@@ -460,6 +460,11 @@ impl Parser {
 
     fn type_expr_body(&mut self) -> PResult<TypeExpr> {
         let pos = self.pos();
+        // `$t` in a template: a type the macro fills in, such as from `type_of`.
+        if *self.peek() == Tok::Dollar && self.holes.is_some() {
+            self.hole(HoleKind::Type)?;
+            return Ok(TypeExpr { pos, kind: TypeExprKind::Named("__hole__".into()) });
+        }
         if self.eat(&Tok::Fn) {
             self.expect(&Tok::LParen, "`(` and parameter types")?;
             let mut params = Vec::new();

@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 14)
+# JIR — jihoo IR text format (version 15)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -44,6 +44,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 12 | `ref` and `cell` in native modules, as counted boxes |
 | 13 | `chan`, `send`, `recv` and `select` in native modules, on lib/channel.jh |
 | 14 | `codetext`, code as text and text as code at compile time |
+| 15 | `typeof`, and `type` holes in `quote` |
 
 ## Example
 
@@ -96,7 +97,7 @@ bb3:
 ## Module
 
 ```
-jir 14                               ; format version, must come first
+jir 15                               ; format version, must come first
 profile hosted|native|freestanding   ; language profile
 target x86_64|aarch64                ; the machine, 64-bit Linux
 struct ...                           ; zero or more structs
@@ -486,13 +487,15 @@ there, as `load` is.
 | `%d = unique %p`                | `str`                 | `str`  | compile time only: `p` plus a number unique in this compilation |
 | `%d = stringify %c`             | `expr`, `stmts` or `items` | `str` | compile time only: the source text of code, with the hygiene marks of its names removed |
 | `%d = codetext %a`              | code or `str`         | `str` or code | compile time only: the same text as the other type; code to `str` keeps the hygiene marks, `str` to code takes the text as it is |
+| `%d = typeof %c`                | `expr`                | `str`  | compile time only: the type the code would have where the macro was called, as the text of a type; the compiler supplies it and runs the macro again if it was not known |
 | `%d = asm "tmpl", "cons"(%a, ...)` | int, `bool` or `*T` | int, `*T` or `unit` | native and freestanding only: inline assembly |
 | `%d = quote ["p0", "p1", ...](kind %h, ...)` | see below | `expr`, `stmts` or `items` | compile time only: code from template pieces and holes |
 
 Each `quote` hole has a kind: `expr` (code in parentheses, or an int, bool or
 `str` literal), `ident` (a `str` or `expr` that is an identifier, inserted as
-is), `stmts` (`stmts` or `expr` code on lines of its own) or `items` (`items`
-code on lines of its own).
+is), `stmts` (`stmts` or `expr` code on lines of its own), `items` (`items`
+code on lines of its own) or `type` (a `str` or `expr` with the text of a
+type, inserted as is).
 
 The template pieces carry hygiene marks: a name the template wrote is followed
 by `#` (`let tmp# = $x`). The compiler numbers them per expansion (`tmp#7`) and

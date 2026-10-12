@@ -1032,6 +1032,29 @@ fn types_that_hold_code() {
 }
 
 #[test]
+fn type_of_in_macros() {
+    // The type of code where the macro was called, as text a type hole takes.
+    let src = "struct P { x: i64 }\n\
+               macro name(e: expr) -> expr { return quote($(type_of(e))) }\n\
+               macro copy(e: expr) -> expr {\n  let t = type_of(e)\n  return quote({\n    let c: $t = $e\n    c\n  })\n}\n\
+               fn main() {\n  let b: u8 = 7\n  let xs: [str] = []\n  let f = fn(a: i64) -> bool { return a > 0 }\n  let p = P { x: 4 }\n\
+               print(name!(b + 1))\n  print(name!(xs))\n  print(name!(f))\n  print(name!(1.5))\n  print(copy!(p).x + copy!(b) as i64)\n}";
+    assert_eq!(run(src), "u8\n[str]\nfn(i64) -> bool\nf64\n11\n");
+    // Typing the code adds nothing to the function: no multiplication is left.
+    let m = check("macro name(e: expr) -> expr { return quote($(type_of(e))) }\nfn main() {\n  let b: u8 = 7\n  print(name!(b * 3))\n}").unwrap();
+    assert!(!main_ir(&m).contains("mul "), "{m}");
+    // Each `type_of` runs the macro again; `unique` gives the same names each time.
+    let src = "macro twice(e: expr) -> expr {\n  let a = unique(\"a\")\n  let t = type_of(e)\n  let b = unique(\"b\")\n\
+               return quote({\n    let $a: $t = $e\n    let $b: $t = $(ident(a))\n    $(ident(a)) + $(ident(b))\n  })\n}\n\
+               fn main() { print(twice!(21)) }";
+    assert_eq!(run(src), "42\n");
+    // It sees the caller's names, not the ones the macro's code declares.
+    let e = err("macro m() -> expr { return quote({\n  let tmp = 1\n  \"\" + $(type_of(quote(tmp)))\n}) }\nfn main() { print(m!()) }");
+    assert!(e.contains("which sees the names where the macro is called") && e.contains("`tmp`"), "{e}");
+    assert!(err("fn main() { print(type_of(1)) }").contains("only be used inside a macro"));
+}
+
+#[test]
 fn macros_take_the_rest_of_their_arguments() {
     // `rest: [expr]` takes the remaining arguments as code, none included,
     // and functions on code take such lists too.

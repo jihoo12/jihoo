@@ -7,11 +7,13 @@
 // `fuse!` runs on the VM while compiling. It takes the stages as code, any
 // number of them (`stages: [expr]`), reads each with `meta.node` to see
 // `map(f)` or `filter(g)`, and puts their code together into the body of one
-// `for` loop, with the help of `stage`, a function on code.
+// `for` loop, with the help of `stage`, a function on code. `type_of` tells it
+// the type the last stage gives, so the sum starts at the right zero for any
+// number type.
 //
-// This is an experiment. What macros still lack shows in one place: the sum
-// is an `i64`, since a macro does not know the types of its code. See the
-// design in `docs/internals/code-as-data.md`.
+// The fusion itself is ordinary jihoo, on what macros offer: any number of
+// code arguments, functions on code, `meta.node`, block expressions and
+// `type_of`. See the design in `docs/internals/code-as-data.md`.
 import lists
 import meta
 
@@ -36,8 +38,11 @@ fn stage(kind: str, call: expr, body: stmts) -> stmts {
 // per element; their names come from `unique`, as a name from a hole is the
 // caller's.
 macro fuse(xs: expr, stages: [expr]) -> expr {
-    let binds = quote { let acc = 0 }
+    let binds = quote {}
     let body = quote { let v = x }
+    // An expression of the type each stage gives, to ask `type_of` about the
+    // last: it is only typed, never run.
+    let sample = quote($xs[0])
     for s in stages {
         match meta.node(s) {
             Call(kind, args) => {
@@ -48,6 +53,9 @@ macro fuse(xs: expr, stages: [expr]) -> expr {
                         let $g = $(args[0])
                     }
                     body = stage(kind, quote($(ident(g))(v)), body)
+                    if kind == "map" {
+                        sample = quote(($(args[0]))($sample))
+                    }
                 } else if kind != "sum" {
                     trap()      // not a stage: the compiler reports where
                 }
@@ -55,8 +63,15 @@ macro fuse(xs: expr, stages: [expr]) -> expr {
             _ => trap()
         }
     }
+    // The sum starts at zero of the type the stages end with.
+    let t = type_of(sample)
+    let zero = quote(0)
+    if t == "f64" || t == "f32" {
+        zero = quote(0.0)
+    }
     return quote({
         $binds
+        let acc: $t = $zero
         for x in $xs {
             $body
             acc += v
@@ -83,4 +98,7 @@ fn main() {
         filter(fn(x: i64) -> bool { return x % 2 == 0 }),
         sum())
     print(s)
+
+    // Any number type: here the stages end in `f64`.
+    print(fuse!(xs, filter(fn(x: i64) -> bool { return x < 10 }), map(fn(x: i64) -> f64 { return x as f64 / 4.0 })))
 }

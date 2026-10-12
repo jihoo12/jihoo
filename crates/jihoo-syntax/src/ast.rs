@@ -433,6 +433,8 @@ pub enum HoleKind {
     Stmts,
     /// As an item of its own, in `quote items { ... }`.
     Items,
+    /// In place of a type: `let x: $t = ...`, with any type's text.
+    Type,
 }
 
 /// An argument of a macro call: its source text and its parsed form.

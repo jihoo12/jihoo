@@ -24,7 +24,7 @@ pub use verify::verify;
 /// module instead of compiling it with other rules. Bump it whenever the
 /// format or the meaning of anything in it changes (see "Versions" in
 /// `docs/jir.md`); the `version` tests check that both sides and the spec agree.
-pub const JIR_VERSION: u32 = 14;
+pub const JIR_VERSION: u32 = 15;
 
 /// Language profile, selected with `#![native]` or `#![freestanding]` at the
 /// top of a source file.
@@ -491,6 +491,9 @@ pub enum Inst {
     /// way: code to `str` keeps the hygiene marks of its names, which
     /// `stringify` drops, and `str` to code takes the text as it is.
     CodeText { dst: Reg, src: Reg },
+    /// Compile time only (macros): the type `code` would have where the macro
+    /// was called, as the text of a type (see `type_of` in the frontend).
+    TypeOf { dst: Reg, code: Reg },
     /// Native and freestanding only: inline assembly. `template` uses LLVM operand syntax
     /// (`$0` is the output if there is one, then the inputs) and `constraints` is an
     /// LLVM constraint string with one input entry per register in `args`. `dst`
@@ -538,6 +541,8 @@ pub enum HoleKind {
     Stmts,
     /// An item of its own: `items` code.
     Items,
+    /// A type: a `str` with the text of one, inserted as is.
+    Type,
 }
 
 #[derive(Debug, Clone)]
@@ -605,6 +610,7 @@ impl Inst {
             | Unique { dst, prefix: src }
             | Stringify { dst, code: src }
             | CodeText { dst, src }
+            | TypeOf { dst, code: src }
             | Load { dst, ptr: src }
             | AtomicLoad { dst, ptr: src }
             | FieldPtr { dst, ptr: src, .. }

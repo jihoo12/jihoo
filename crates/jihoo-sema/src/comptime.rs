@@ -13,7 +13,7 @@
 //! Compile-time code cannot use what the VM does not have: pointers and `syscall`.
 //! `print` works and writes to the compiler's stderr.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use jihoo_ir::{Inst, Reg, Terminator, Type};
@@ -120,10 +120,27 @@ impl Env<'_> {
     pub fn run(
         &self,
         pos: Pos,
+        funcs: Vec<jihoo_ir::Function>,
+        entry: &str,
+        args: &[ConstValue],
+        ty: &Type,
+    ) -> Result<ConstValue, Error> {
+        let mut no_types = |_: &str| Err(Error::new(pos, "`type_of` only works in a macro"));
+        self.run_typed(pos, funcs, entry, args, ty, &mut no_types)
+    }
+
+    /// Like `run`, for a macro: when `type_of` asks for the type of some code,
+    /// `type_of` here works it out where the macro was called, and the macro
+    /// runs again from the start with it, until it asks for nothing new. Macros
+    /// are deterministic, and `unique` starts from the same number each time.
+    pub fn run_typed(
+        &self,
+        pos: Pos,
         mut funcs: Vec<jihoo_ir::Function>,
         entry: &str,
         args: &[ConstValue],
         ty: &Type,
+        type_of: &mut dyn FnMut(&str) -> Result<String, Error>,
     ) -> Result<ConstValue, Error> {
         // Only what no earlier run needed: everything a function in the
         // compile-time module calls is in it already. Nothing is added unless
@@ -164,10 +181,6 @@ impl Env<'_> {
             let ct = self.comptime.borrow();
             (ct.module.clone(), ct.program.clone())
         };
-        let mut vm = Vm::with_program(&module, program)
-            .with_fuel(FUEL)
-            .with_uniques(self.uniques.get())
-            .with_input(jihoo_vm::Input::Closed);
         fn arg(vm: &mut Vm, a: &ConstValue) -> Value {
             match a {
                 ConstValue::Unit => Value::Unit,
@@ -183,18 +196,33 @@ impl Env<'_> {
                 ConstValue::Func(_) => unreachable!("macro arguments are code, numbers, bools or str"),
             }
         }
-        let values: Vec<Value> = args.iter().map(|a| arg(&mut vm, a)).collect();
-        let mut out = Vec::new();
-        let result = vm.call_named(entry, &values, &mut out);
-        self.uniques.set(vm.uniques());
-        if !out.is_empty() {
-            eprint!("{}", String::from_utf8_lossy(&out));
+        let uniques = self.uniques.get();
+        let mut types = HashMap::new();
+        loop {
+            let mut vm = Vm::with_program(&module, program.clone())
+                .with_fuel(FUEL)
+                .with_uniques(uniques)
+                .with_input(jihoo_vm::Input::Closed)
+                .with_code_types(types.clone());
+            let values: Vec<Value> = args.iter().map(|a| arg(&mut vm, a)).collect();
+            let mut out = Vec::new();
+            let result = vm.call_named(entry, &values, &mut out);
+            if let (Err(_), Some(code)) = (&result, vm.wanted_type()) {
+                let code = code.to_string();
+                let t = type_of(&code)?;
+                types.insert(code, t);
+                continue;
+            }
+            self.uniques.set(vm.uniques());
+            if !out.is_empty() {
+                eprint!("{}", String::from_utf8_lossy(&out));
+            }
+            let v = result.map_err(|err| {
+                let at = if err.func.starts_with("comptime.") { String::new() } else { format!(" in `{}`", err.func) };
+                Error::new(pos, format!("compile-time evaluation failed{at}: {}", err.msg))
+            })?;
+            return self.to_const(pos, v, ty, &vm);
         }
-        let v = result.map_err(|err| {
-            let at = if err.func.starts_with("comptime.") { String::new() } else { format!(" in `{}`", err.func) };
-            Error::new(pos, format!("compile-time evaluation failed{at}: {}", err.msg))
-        })?;
-        self.to_const(pos, v, ty, &vm)
     }
 
     fn to_const(&self, pos: Pos, v: Value, ty: &Type, vm: &Vm) -> Result<ConstValue, Error> {

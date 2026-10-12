@@ -173,6 +173,7 @@ impl Display for Inst {
             Inst::Unique { dst, prefix } => write!(f, "{dst} = unique {prefix}"),
             Inst::Stringify { dst, code } => write!(f, "{dst} = stringify {code}"),
             Inst::CodeText { dst, src } => write!(f, "{dst} = codetext {src}"),
+            Inst::TypeOf { dst, code } => write!(f, "{dst} = typeof {code}"),
             Inst::Quote { dst, pieces, holes, kinds } => {
                 let pieces: Vec<String> = pieces.iter().map(|p| quote(p)).collect();
                 let holes: Vec<String> = holes.iter().zip(kinds).map(|(h, k)| format!("{k:?} {h}").to_lowercase()).collect();

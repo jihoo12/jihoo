@@ -338,6 +338,7 @@ fn is_builtin(name: &str) -> bool {
             | "stringify"
             | "code_text"
             | "to_code"
+            | "type_of"
             | "to_str"
             | "unique"
             | "ident"
@@ -354,6 +355,20 @@ pub(crate) fn is_takeable_builtin(name: &str) -> bool {
         || matches!(name, "trap" | "read_line" | "push" | "pop" | "from_bytes" | "send" | "recv")
 }
 
+/// What `FnCx::save` keeps.
+struct Saved {
+    blocks: Vec<BlockBuf>,
+    cur: BlockId,
+    regs: usize,
+    scopes: Vec<HashMap<String, Reg>>,
+    const_regs: HashMap<String, Reg>,
+    hoisted: usize,
+    captured: HashSet<Reg>,
+    closure_regs: HashMap<String, Vec<Reg>>,
+    loops: Vec<Loop>,
+}
+
+#[derive(Clone)]
 struct BlockBuf {
     insts: Vec<Inst>,
     term: Option<Terminator>,
@@ -822,6 +837,34 @@ impl<'a> FnCx<'a> {
         let r = b.stmts.iter().try_for_each(|s| self.stmt(s));
         self.scopes.pop();
         r
+    }
+
+    /// The state lowering code changes, to take that code out again (for
+    /// `type_of`, which only wants its type).
+    fn save(&self) -> Saved {
+        Saved {
+            blocks: self.blocks.clone(),
+            cur: self.cur,
+            regs: self.regs.len(),
+            scopes: self.scopes.clone(),
+            const_regs: self.const_regs.clone(),
+            hoisted: self.hoisted,
+            captured: self.captured.clone(),
+            closure_regs: self.closure_regs.clone(),
+            loops: self.loops.clone(),
+        }
+    }
+
+    fn restore(&mut self, s: Saved) {
+        self.blocks = s.blocks;
+        self.cur = s.cur;
+        self.regs.truncate(s.regs);
+        self.scopes = s.scopes;
+        self.const_regs = s.const_regs;
+        self.hoisted = s.hoisted;
+        self.captured = s.captured;
+        self.closure_regs = s.closure_regs;
+        self.loops = s.loops;
     }
 
     /// `{ statements... value }`: the statements in a scope of their own, and
@@ -1357,6 +1400,7 @@ impl<'a> FnCx<'a> {
             }
             "stringify" => self.stringify(pos, args),
             "code_text" | "to_code" => self.code_text(pos, name, args),
+            "type_of" => self.type_of(pos, args),
             "path_index" => self.path_index(pos, args),
             "to_str" => {
                 if self.profile() == Profile::Freestanding && !self.in_macro {

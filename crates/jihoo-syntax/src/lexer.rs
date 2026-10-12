@@ -307,6 +307,18 @@ impl<'a> Lexer<'a> {
             b'"' => Tok::Str(self.string(pos)?),
             // `#3:helper` in macro output: a name as written in module 3, where
             // the macro that wrote it is defined (see `mark_names`).
+            // `#type:3` in macro output: a type `type_of` gave, by its number.
+            b'#' if self.marks && self.src[self.i..].starts_with(b"type:") => {
+                let start = self.i - 1;
+                self.i += 5;
+                if !self.peek().is_ascii_digit() {
+                    return Err(Error::new(pos, "unexpected character `#`"));
+                }
+                while self.peek().is_ascii_digit() {
+                    self.bump();
+                }
+                Tok::Ident(std::str::from_utf8(&self.src[start..self.i]).unwrap().to_string())
+            }
             b'#' if self.marks && self.peek().is_ascii_digit() => {
                 let start = self.i - 1;
                 while self.peek().is_ascii_digit() {

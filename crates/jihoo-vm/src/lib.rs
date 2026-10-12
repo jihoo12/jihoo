@@ -13,7 +13,7 @@
 pub mod gc;
 mod program;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::{BufRead, Write};
 use std::rc::Rc;
@@ -128,6 +128,11 @@ pub struct Vm<'m> {
     check: bool,
     /// Instructions left before execution is stopped, if limited.
     fuel: Option<u64>,
+    /// For `typeof`: the types the compiler worked out, by the code's text.
+    code_types: HashMap<String, String>,
+    /// The code whose type `typeof` asked for and did not find, which stopped
+    /// execution: the compiler works it out and runs the macro again.
+    wanted_type: Option<String>,
     /// The next number `unique` hands out.
     uniques: u64,
     /// Where `read_line` reads from.
@@ -175,6 +180,8 @@ impl<'m> Vm<'m> {
             check: std::env::var_os("JIHOO_VM_CHECK").is_some_and(|v| !v.is_empty() && v != "0"),
             fuel: None,
             uniques: 0,
+            code_types: HashMap::new(),
+            wanted_type: None,
             input: Input::Stdin,
         }
     }
@@ -194,6 +201,18 @@ impl<'m> Vm<'m> {
     /// The next number `unique` would hand out.
     pub fn uniques(&self) -> u64 {
         self.uniques
+    }
+
+    /// The types `typeof` gives, by the text of the code.
+    pub fn with_code_types(mut self, types: HashMap<String, String>) -> Self {
+        self.code_types = types;
+        self
+    }
+
+    /// The code whose type `typeof` needed and was not given, if that is what
+    /// stopped the run.
+    pub fn wanted_type(&self) -> Option<&str> {
+        self.wanted_type.as_deref()
     }
 
     /// Checks every in-place update, whatever `JIHOO_VM_CHECK` says.
@@ -895,6 +914,18 @@ impl<'m> Vm<'m> {
                 let r = self.alloc_str(&text);
                 self.set(*dst, Value::Str(r));
             }
+            Inst::TypeOf { dst, code } => {
+                let Value::Str(c) = self.get(*code) else {
+                    return Err(self.error("`type_of` needs code"));
+                };
+                let text = self.heap.str(c).to_string();
+                let Some(ty) = self.code_types.get(&text).cloned() else {
+                    self.wanted_type = Some(text);
+                    return Err(self.error("`type_of` needs the compiler"));
+                };
+                let r = self.alloc_str(&ty);
+                self.set(*dst, Value::Str(r));
+            }
             // Code is text on the VM: the same string either way.
             Inst::CodeText { dst, src } => {
                 let v = self.get(*src);
@@ -965,6 +996,7 @@ impl<'m> Vm<'m> {
                             }
                             name
                         }
+                        (HoleKind::Type, Type::Str | Type::Expr, Value::Str(r)) => self.heap.str(r).trim().to_string(),
                         // Statements and items on lines of their own.
                         (HoleKind::Stmts, Type::Stmts | Type::Expr, Value::Str(r))
                         | (HoleKind::Items, Type::Items, Value::Str(r)) => format!("\n{}\n", self.heap.str(r)),

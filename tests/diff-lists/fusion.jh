@@ -18,8 +18,11 @@ fn stage(kind: str, call: expr, body: stmts) -> stmts {
 }
 
 macro fuse(xs: expr, stages: [expr]) -> expr {
-    let binds = quote { let acc = 0 }
+    let binds = quote {}
     let body = quote { let v = x }
+    // An expression of the type each stage gives, to ask `type_of` about the
+    // last: it is only typed, never run.
+    let sample = quote($xs[0])
     for s in stages {
         match meta.node(s) {
             Call(kind, args) => {
@@ -30,13 +33,25 @@ macro fuse(xs: expr, stages: [expr]) -> expr {
                         let $g = $(args[0])
                     }
                     body = stage(kind, quote($(ident(g))(v)), body)
+                    if kind == "map" {
+                        sample = quote(($(args[0]))($sample))
+                    }
+                } else if kind != "sum" {
+                    trap()      // not a stage: the compiler reports where
                 }
             }
             _ => trap()
         }
     }
+    // The sum starts at zero of the type the stages end with.
+    let t = type_of(sample)
+    let zero = quote(0)
+    if t == "f64" || t == "f32" {
+        zero = quote(0.0)
+    }
     return quote({
         $binds
+        let acc: $t = $zero
         for x in $xs {
             $body
             acc += v
@@ -86,6 +101,15 @@ fn entry() -> i64 {
     let limit = 1000
     let d = fuse!(xs, filter(fn(x: i64) -> bool { return x > limit }))
     out(d)
+    // Other number types: the sum starts at the zero of the last stage's type.
+    let small: [u8] = [200, 100, 7]
+    let bytes = fuse!(small, map(fn(b: u8) -> u8 { return b / 2 }))
+    out(bytes as i64)                // 100 + 50 + 3, as a u8: 153
+    let halves = fuse!(xs, map(fn(x: i64) -> f64 { return x as f64 / 2.0 }), filter(fn(h: f64) -> bool { return h > 0.0 }))
+    out((halves * 2.0) as i64 - total(lists.filter(i64, xs, fn(x: i64) -> bool { return x > 0 })))
+    let wide = fuse!(small, map(fn(b: u8) -> i64 { return b as i64 * 1000 }))
+    out(wide)                        // 307000
+
     // A fused pipeline is an expression like any other.
     out(fuse!(xs, map(fn(x: i64) -> i64 { return x % 4 })) * 2 - fuse!(xs, map(fn(x: i64) -> i64 { return 2 * (x % 4) })))
 

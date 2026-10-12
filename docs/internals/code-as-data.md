@@ -1,9 +1,6 @@
 # Design: code as data
 
-Status: steps 1 to 4 are done ([Functions on code](../language/macros.md#functions-on-code),
-[`[expr]` parameters](../language/macros.md#declaring-a-macro),
-[`meta`](../reference/standard-library.md#meta),
-[blocks as expressions](../language/control-flow.md#blocks)); step 5 is a proposal.
+Status: the five steps are done; what is left is in [Done when](#done-when).
 
 ## Why
 
@@ -175,24 +172,48 @@ returns `quote({ ... value })`.
 Fixes gap 4. `examples/pipe.jh` is now `let s = fuse!(xs, map(f), filter(g),
 sum())`, and a fused pipeline can stand anywhere an expression can.
 
-### 5. Types at compile time
+### 5. Types at compile time (done)
 
-`type_of(e: expr) -> type` in a macro: the type `e` would have where the macro
-was called. Sema analyzes lazily already, but typing an argument without
-lowering it, in the caller's scope, during expansion, is new. With it, `fuse!`
-works for any element type, as `lists` does with `comptime T: type`.
+`type_of(e)` in a macro: the type `e` would have where the macro was called.
+With it, `fuse!` works for any element type, as `lists` does with
+`comptime T: type`.
 
-Fixes gap 5. Last, as the most invasive.
+Done ([Types of code](../language/macros.md#types-of-code)), in JIR 15:
+
+- The VM cannot ask the compiler anything while a macro runs, so `typeof`
+  looks the code up in a table of types the VM is given, and stops the run
+  when it is not there, naming the code. The compiler types that code in the
+  caller's scope, adds it to the table and runs the macro again from the
+  start (`Env::run_typed`); `unique` restarts at the same number. A macro
+  that asks about three pieces of code runs four times.
+- Typing lowers the code where the macro was called and takes the
+  instructions out again (`FnCx::save` and `restore`), so the code is checked
+  exactly as it would be compiled. An anonymous function in it is lifted
+  once more, and the copy is never called.
+- The type comes back as text, as builtin types are written; a struct or
+  enum as `#type:N`, an index into a table of the compiler's, so that
+  generic instances and other modules' types need no spelling that the
+  caller's module may not have. A hole in a type position (`let x: $t`, the
+  new hole kind `type`) puts it back.
+- The code is typed before the macro's output exists, so it cannot use the
+  names the macro's own templates declare.
+
+Fixes gap 5. `fuse!` builds an expression of the type each stage gives
+(`$xs[0]`, then `(f)(...)` for each `map`) and asks `type_of` about it, to
+start the sum at the right zero.
 
 ## Done when
 
-`examples/pipe.jh` defines `fuse!` in a library as above, generic over the
-element type, and:
+`examples/pipe.jh` defines `fuse!` as above, generic over the element type,
+and:
 
-- it runs as fast as the loop written by hand, natively;
+- it runs as fast as the loop written by hand, natively (done);
 - a differential test checks that fused pipelines print what the same
-  pipelines written with `lists` print, on the VM and natively;
-- the fuzzer writes random pipelines.
+  pipelines written with `lists` print, on the VM and natively
+  (`tests/diff-lists/fusion.jh`, done);
+- the fuzzer writes random pipelines (not yet);
+- `fuse!` moves from the example into the library, with more ways to end a
+  pipeline than a sum (not yet).
 
 ## Costs and risks
 

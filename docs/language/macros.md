@@ -213,6 +213,35 @@ macro quad(x: expr) -> expr {
   is meant for macros in other modules must not name its own module's private
   items.
 
+## Types of code
+
+`type_of(e)` gives the type that code `e` would have where the macro was
+called, as text: `"i64"`, `"[str]"`, `"fn(i64) -> bool"`. A hole in a type
+position, `let x: $t = ...`, takes such text:
+
+```jihoo
+// The sum of `a` and `b`, with an accumulator of their type.
+macro add(a: expr, b: expr) -> expr {
+    let t = type_of(a)
+    return quote({
+        let s: $t = $a
+        s += $b
+        s
+    })
+}
+```
+
+- The macro may compare the text, as `t == "f64"`. A struct or enum comes back
+  as `#type:N`, a name that means that type wherever the code goes.
+- The code is typed in the caller's scope, before the macro's own code runs:
+  `type_of` sees the caller's variables, not the ones the macro's templates
+  declare.
+- Typing the code does not run it, and leaves nothing in the program but an
+  unused copy of any anonymous function in it. The compiler works a type out
+  when a macro first asks for it and then runs the macro again from the
+  start, so a macro should not depend on how many times it runs; `unique`
+  gives the same names each time.
+
 ## Macro builtins
 
 | builtin | gives |
@@ -224,6 +253,7 @@ macro quad(x: expr) -> expr {
 | `to_str(x)` | a number or bool as a `str`, handy for building names |
 | `code_text(e)` | the text of code `e` with the hygiene marks of its names, for code that reads code |
 | `to_code(s)` | text, such as a part of what `code_text` gave, as code again |
+| `type_of(e)` | the type code `e` has where the macro is called, as a `str` for a type hole ([Types of code](#types-of-code)) |
 
 To look inside code, use the [`meta`](../reference/standard-library.md#meta)
 library rather than these two: `meta.node(e)` tells a call from a name, a

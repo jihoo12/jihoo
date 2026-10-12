@@ -112,6 +112,8 @@ pub(crate) struct Env<'p> {
     pub(crate) eq_checking: RefCell<Vec<String>>,
     /// The next number `unique` hands out, across every compile-time run.
     pub uniques: Cell<u64>,
+    /// The structs and enums `type_of` has named, as `#type:N`: an index here.
+    code_types: RefCell<Vec<Type>>,
     /// Generic instances by key, their keys by name, and the ones not compiled yet.
     instances: RefCell<HashMap<String, Instance>>,
     /// Instances of generic structs: names by key, and (name, declaration name,
@@ -159,6 +161,7 @@ impl<'p> Env<'p> {
             eq_helpers: RefCell::new(HashMap::new()),
             eq_checking: RefCell::new(Vec::new()),
             uniques: Cell::new(0),
+            code_types: RefCell::default(),
             instances: RefCell::new(HashMap::new()),
             struct_keys: RefCell::new(HashMap::new()),
             struct_instances: RefCell::new(Vec::new()),
@@ -387,6 +390,11 @@ impl<'p> Env<'p> {
                 Ok(named(decl, self.struct_instance(&key, bindings)))
             }
             TypeExprKind::Named(name) => {
+                // A struct or enum that `type_of` named.
+                if let Some(n) = name.strip_prefix("#type:") {
+                    let named = n.parse::<usize>().ok().and_then(|n| self.code_types.borrow().get(n).cloned());
+                    return named.ok_or_else(|| Error::new(t.pos, format!("unknown type `{name}`")));
+                }
                 match b.get(name) {
                     Some(Binding::Type(t)) => return Ok(t.clone()),
                     Some(Binding::Value(..) | Binding::Closure { .. }) => {
@@ -752,6 +760,37 @@ impl<'p> Env<'p> {
             return false;
         }
         d.is_compile_time() || matches!(self.signature(key), Some(Ok(sig)) if self.sig_holds_code(&sig))
+    }
+
+    /// The text of type `t`, for `type_of`, such that it means `t` again in
+    /// code a macro makes, wherever it goes: builtin types as written, and
+    /// structs and enums as `#type:N`, a number in a table of their own.
+    pub fn spell_type(&self, t: &Type) -> String {
+        match t {
+            Type::Struct(_) | Type::Enum(_) => {
+                let mut table = self.code_types.borrow_mut();
+                let n = match table.iter().position(|x| x == t) {
+                    Some(n) => n,
+                    None => {
+                        table.push(t.clone());
+                        table.len() - 1
+                    }
+                };
+                format!("#type:{n}")
+            }
+            Type::Ptr(e) => format!("*{}", self.spell_type(e)),
+            Type::List(e) => format!("[{}]", self.spell_type(e)),
+            Type::Array(e, n) => format!("[{}; {n}]", self.spell_type(e)),
+            Type::Ref(e) => format!("ref {}", self.spell_type(e)),
+            Type::Chan(e) => format!("chan {}", self.spell_type(e)),
+            Type::Cell(e) => format!("cell {}", self.spell_type(e)),
+            Type::Fn(params, ret) => {
+                let params: Vec<String> = params.iter().map(|p| self.spell_type(p)).collect();
+                let ret = if **ret == Type::Unit { String::new() } else { format!(" -> {}", self.spell_type(ret)) };
+                format!("fn({}){ret}", params.join(", "))
+            }
+            _ => t.to_string(),
+        }
     }
 
     /// Whether a signature's parameters or result hold code, directly or

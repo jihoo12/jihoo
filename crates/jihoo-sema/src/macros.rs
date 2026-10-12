@@ -81,10 +81,12 @@ impl FnCx<'_> {
             values.push(ConstValue::Agg(args[fixed..].iter().map(|a| ConstValue::Str(a.text.clone())).collect()));
         }
 
-        let ConstValue::Str(code) = self.env.run(pos, vec![], &key, &values, &sig.ret)? else {
+        let expansion = Expansion::new(self.env.fn_module(&key), self.bindings.module);
+        let env = self.env;
+        let mut type_of = |text: &str| self.type_here(pos, text, &expansion);
+        let ConstValue::Str(code) = env.run_typed(pos, vec![], &key, &values, &sig.ret, &mut type_of)? else {
             unreachable!("macros return code")
         };
-        let expansion = Expansion::new(self.env.fn_module(&key), self.bindings.module);
         let code = jihoo_syntax::number_marks(&code, expansion.id);
         Ok((sig.ret.clone(), code, expansion))
     }
@@ -163,6 +165,7 @@ impl FnCx<'_> {
                 HoleKind::Ident => (matches!(t, Type::Str | Type::Expr), "a `str` (a name)"),
                 HoleKind::Stmts => (matches!(t, Type::Stmts | Type::Expr), "`stmts` or `expr`"),
                 HoleKind::Items => (t == Type::Items, "`items`"),
+                HoleKind::Type => (matches!(t, Type::Str | Type::Expr), "a `str` (a type, as `type_of` gives)"),
             };
             if !ok {
                 return Err(Error::new(h.pos, format!("this hole needs {want}, not {t}")));
@@ -173,6 +176,7 @@ impl FnCx<'_> {
                 HoleKind::Ident => jihoo_ir::HoleKind::Ident,
                 HoleKind::Stmts => jihoo_ir::HoleKind::Stmts,
                 HoleKind::Items => jihoo_ir::HoleKind::Items,
+                HoleKind::Type => jihoo_ir::HoleKind::Type,
             });
         }
         let ty = match kind {
@@ -198,6 +202,43 @@ impl FnCx<'_> {
         }
         // Code is text on the VM; this drops the hygiene marks of its names.
         Ok(self.emit_to(Type::Str, |dst| Inst::Stringify { dst, code: r }))
+    }
+
+    /// `type_of(e)`: the type code `e` would have where the macro was called,
+    /// as the text of a type, which a type hole (`let x: $t`) takes. The VM
+    /// asks for types it was not given, and the macro runs again with them
+    /// (`expand_code`).
+    pub(crate) fn type_of(&mut self, pos: Pos, args: &[Expr]) -> Result<Reg, Error> {
+        if !self.in_macro {
+            return Err(Error::new(pos, "`type_of` can only be used inside a macro"));
+        }
+        let [arg] = args else {
+            return Err(Error::new(pos, "`type_of` takes exactly 1 argument"));
+        };
+        let r = self.expr(arg, None)?;
+        if *self.ty(r) != Type::Expr {
+            return Err(Error::new(arg.pos, format!("`type_of` needs an `expr`, not {}", self.ty(r))));
+        }
+        Ok(self.emit_to(Type::Str, |dst| Inst::TypeOf { dst, code: r }))
+    }
+
+    /// The type `text`, code from expansion `expansion`, has here, where the
+    /// macro was called: the code is lowered as it would be, and then taken
+    /// out again, so only its type is left.
+    fn type_here(&mut self, pos: Pos, text: &str, expansion: &Expansion) -> Result<String, Error> {
+        let code = jihoo_syntax::number_marks(text, expansion.id);
+        let mut e = jihoo_syntax::parse_expr(&code)
+            .map_err(|err| Error::new(pos, plain_names(&format!("`type_of` got code that does not parse: {} in `{code}`", err.msg))))?;
+        expansion.resolve(self.env, Code::Expr(&mut e), &|n| self.is_local_name(n));
+        set_pos(&mut e, pos);
+        let saved = self.save();
+        let r = self.expr(&e, None).map(|r| self.ty(r).clone());
+        self.restore(saved);
+        let t = r.map_err(|err| {
+            let msg = format!("{} (in `type_of`, which sees the names where the macro is called, not the ones its code declares)", err.msg);
+            Error::new(err.pos, plain_names(&msg))
+        })?;
+        Ok(self.env.spell_type(&t))
     }
 
     /// `code_text(e)`: the text of code with its hygiene marks, for code that
