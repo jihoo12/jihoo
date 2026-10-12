@@ -52,9 +52,12 @@ function called `sqrt` (or declares `extern fn sqrt`) calls its own `sqrt`.
 
 | builtin | result | description |
 |---------|--------|-------------|
-| `print(x)` | `unit` | writes a number, `bool` or text and a newline to stdout: a `str` on the VM, a NUL-terminated `*u8` (such as a string literal) natively |
+| `print(x)` | `unit` | writes a number, `bool` or text and a newline to stdout: a `str`, or natively also a NUL-terminated `*u8` |
 | `push(xs, v)` | `unit` | appends `v` to the [list](../language/lists.md) `xs`, which must be assignable |
 | `pop(xs)` | `T` | removes the last element of the list `xs: [T]` and gives it; the program stops if it is empty |
+| `to_str(x)` | `str` | a number or `bool` as text, as `print` would write it (also in macros) |
+| `from_bytes(b)` | `str` | the string of the bytes in `b: [u8]` |
+| `read_line()` | `str` | the next line of standard input with its `\n` (or without, for a last line that has none), or `""` at the end of the input; not at compile time |
 
 `print` writes integers in decimal, bools as `true`/`false`, and floats as the
 shortest text that reads back as the same value (`0.1`, `1.0`, `1e100`, `inf`,
@@ -69,9 +72,6 @@ traps loses what is still buffered. Freestanding programs have no `print`; the
 
 | builtin | result | description |
 |---------|--------|-------------|
-| `to_str(x)` | `str` | a number or `bool` as text, as `print` would write it (also in macros) |
-| `from_bytes(b)` | `str` | the string of the bytes in `b: [u8]` |
-| `read_line()` | `str` | the next line of standard input with its `\n` (or without, for a last line that has none), or `""` at the end of the input; not at compile time |
 | `ref e` | `ref T` | a new [reference](../language/references.md) to a copy of `e` |
 | `cell(v)` | `cell T` | a new [cell](../language/cells.md) holding a copy of `v` |
 | `chan(T)`, `chan(T, n)` | `chan T` | a new [channel](../language/tasks-and-channels.md), unbuffered or buffering `n` values |

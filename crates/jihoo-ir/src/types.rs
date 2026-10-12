@@ -207,7 +207,8 @@ impl Type {
     /// Struct fields are checked where the struct is defined.
     pub fn available_in(&self, profile: Profile) -> bool {
         match self {
-            Type::Str => profile == Profile::Hosted,
+            // Native strings own their memory, as lists do.
+            Type::Str => profile != Profile::Freestanding,
             Type::Ptr(inner) => profile.is_compiled() && inner.available_in(profile),
             Type::Array(elem, _) => elem.available_in(profile),
             Type::Fn(params, ret) => params.iter().chain([&**ret]).all(|t| t.available_in(profile)),
@@ -227,11 +228,11 @@ impl Type {
     }
 
     /// What `print` takes in `profile`: numbers, bools, and text, which is a
-    /// `str` on the VM and a NUL-terminated `*u8` natively.
+    /// `str`, or natively also a NUL-terminated `*u8`.
     pub fn is_printable(&self, profile: Profile) -> bool {
         match self {
             Type::Int(_) | Type::Float(_) | Type::Bool => true,
-            Type::Str => profile == Profile::Hosted,
+            Type::Str => profile != Profile::Freestanding,
             Type::Ptr(t) => profile == Profile::Native && **t == Type::U8,
             _ => false,
         }
@@ -370,12 +371,19 @@ pub fn is_main_args(params: &[Type]) -> bool {
     params == [Type::Int(IntTy::I32), Type::ptr(Type::ptr(Type::U8))]
 }
 
-/// Type of a string literal in the given profile.
+/// Type of a string literal in the given profile when nothing asks for
+/// another: natively, a literal is a `str` or, where a `*u8` is expected, a
+/// C string.
 pub fn str_literal(profile: Profile) -> Type {
     match profile {
         Profile::Hosted => Type::Str,
         Profile::Native | Profile::Freestanding => Type::ptr(Type::U8),
     }
+}
+
+/// Whether a string literal may have type `t` in `profile`.
+pub fn is_str_literal(profile: Profile, t: &Type) -> bool {
+    *t == str_literal(profile) || (profile == Profile::Native && *t == Type::Str)
 }
 
 pub fn unary(op: UnOp, t: &Type) -> Option<Type> {

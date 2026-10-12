@@ -410,13 +410,10 @@ impl<'p> Env<'p> {
                     };
                 }
                 if let Some(ty) = Type::from_name(name) {
-                    if ty == Type::Str && self.profile.is_compiled() && !in_macro {
+                    if ty == Type::Str && self.profile == Profile::Freestanding && !in_macro {
                         return Err(Error::new(
                             t.pos,
-                            format!(
-                                "type `str` is garbage collected and is not available in {} mode (use `*u8`)",
-                                self.profile.as_str()
-                            ),
+                            "type `str` needs an allocator and is not available in freestanding mode (use `*u8`)",
                         ));
                     }
                     Ok(ty)
@@ -665,7 +662,7 @@ impl<'p> Env<'p> {
     /// in the IR crate).
     pub fn owns(&self, t: &Type) -> bool {
         match t {
-            Type::List(_) => true,
+            Type::List(_) | Type::Str => true,
             Type::Array(elem, _) => self.owns(elem),
             Type::Struct(name) => {
                 self.struct_fields(Pos::default(), name).is_ok_and(|fs| fs.iter().any(|(_, t)| self.owns(t)))

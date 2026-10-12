@@ -16,9 +16,9 @@
 //!   JIHOO_FUZZ_SEED=1234 cargo test --test fuzz             # one, to reproduce
 //!
 //! With lists (`vm_and_native_agree_on_random_list_programs`), programs also
-//! hold lists `[T]` in variables, fields and elements, push to and pop from
-//! them, slice and join them, and pass them to functions that change their
-//! copy. Lists never become empty, so indexes (taken modulo the length) are in
+//! hold lists `[T]` and strings in variables, fields and elements, push to and
+//! pop from lists, slice, join and compare them, make text with `to_str`, and
+//! pass them to functions that change their copy. Lists never become empty, so indexes (taken modulo the length) are in
 //! bounds. Those run on the VM and natively only, where the ownership pass
 //! decides where lists are copied and freed; with `JIHOO_VALGRIND` set to
 //! valgrind's path, any leak or invalid access fails the seed.
@@ -73,6 +73,7 @@ enum Ty {
     Struct(usize),
     /// Never empty.
     List(Box<Ty>),
+    Str,
 }
 
 impl Ty {
@@ -207,6 +208,7 @@ impl Gen {
     fn any_ty(&mut self, depth: u32) -> Ty {
         match self.rng.below(10) {
             0..=2 if depth > 0 && self.lists && self.rng.chance(50) => Ty::List(Box::new(self.any_ty(depth - 1))),
+            4 if self.lists => Ty::Str,
             0..=2 if depth > 0 => Ty::Array(Box::new(self.any_ty(depth - 1)), 1 + self.rng.below(4)),
             3 if !self.structs.is_empty() => Ty::Struct(self.rng.below(self.structs.len())),
             _ => self.scalar_ty(),
@@ -221,6 +223,7 @@ impl Gen {
             Ty::Array(e, n) => format!("[{}; {n}]", self.ty_name(e)),
             Ty::Struct(k) => format!("S{k}"),
             Ty::List(e) => format!("[{}]", self.ty_name(e)),
+            Ty::Str => "str".into(),
         }
     }
 
@@ -317,6 +320,17 @@ impl Gen {
                     self.dump(&format!("{e}.f{i}"), f);
                 }
             }
+            Ty::Str => {
+                self.out(&format!("len({e})"), &Ty::I64);
+                let i = self.fresh("d");
+                self.line(&format!("let {i}: i64 = 0"));
+                self.line(&format!("while {i} < len({e}) {{"));
+                self.indent += 1;
+                self.out(&format!("{e}[{i}]"), &Ty::Int { bits: 8, signed: false });
+                self.line(&format!("{i} = {i} + 1"));
+                self.indent -= 1;
+                self.line("}");
+            }
             Ty::List(el) => {
                 self.out(&format!("len({e})"), &Ty::I64);
                 let i = self.fresh("d");
@@ -385,7 +399,13 @@ impl Gen {
             },
             Ty::Bool => match self.rng.below(6) {
                 0 | 1 => {
-                    let operand = if self.rng.chance(80) { self.int_ty() } else { Ty::F64 };
+                    let operand = if self.lists && self.rng.chance(20) {
+                        Ty::Str
+                    } else if self.rng.chance(80) {
+                        self.int_ty()
+                    } else {
+                        Ty::F64
+                    };
                     let op = *self.rng.pick(&["<", "<=", ">", ">=", "==", "!="]);
                     let (a, b) = (self.expr(&operand, d), self.expr(&operand, d));
                     format!("({a} {op} {b})")
@@ -445,6 +465,22 @@ impl Gen {
                 let xs: Vec<String> = fields.iter().enumerate().map(|(i, f)| format!("f{i}: {}", self.expr(f, d))).collect();
                 format!("S{k} {{ {} }}", xs.join(", "))
             }
+            Ty::Str => match self.rng.below(6) {
+                0 => format!("({} + {})", self.expr(t, d), self.expr(t, d)),
+                1 => {
+                    let from = if self.rng.chance(70) { self.int_ty() } else { self.rng.pick(&[Ty::Bool, Ty::F64]).clone() };
+                    format!("to_str({})", self.expr(&from, d))
+                }
+                2 => match self.projection(t) {
+                    Some(p) => {
+                        let it = self.int_ty();
+                        let i = self.expr(&it, 1);
+                        format!("{p}[(({i}) as u64 % (len({p}) as u64 + 1)) as i64:]")
+                    }
+                    None => self.leaf(t, d),
+                },
+                _ => self.leaf(t, d),
+            },
             // Never empty. Literals only where a list type is expected, which
             // is everywhere `expr` is used for one.
             Ty::List(e) => match self.rng.below(6) {
@@ -522,6 +558,7 @@ impl Gen {
                 let x = *self.rng.pick(&["0.0", "-0.0", "1.0", "-1.5", "0.1", "2.5e-3", "1e10", "-3.75", "1e300", "123456.789"]);
                 format!("({x})")
             }
+            Ty::Str => format!("\"{}\"", *self.rng.pick(&["", "a", "ab", "hello", "a,b", "\\n", "zz", "Ab"])),
             // Aggregates are built from leaves.
             _ => self.expr(t, depth.max(1)),
         }

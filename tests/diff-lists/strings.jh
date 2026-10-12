@@ -1,0 +1,50 @@
+// Strings, and the `strings` library, the same on the VM and natively.
+import strings
+
+fn show(s: str) {
+    out(len(s))
+    let i = 0
+    while i < len(s) {
+        out(s[i] as i64)
+        i = i + 1
+    }
+}
+
+fn shout(s: str) -> str {
+    s = strings.to_upper(s) + "!"      // replaces its own copy
+    return s
+}
+
+fn entry() -> i64 {
+    let greeting = "Hello, " + "world"
+    show(greeting[7:])
+    show(shout(greeting))
+    show(greeting)                      // unchanged
+    let parts = strings.split("a, b,,c", ",")
+    out(len(parts))
+    show(strings.join(parts, "|"))
+    show(strings.trim("  x y  "))
+    show(strings.replace("aXbXc", "X", "--"))
+    out(strings.index_of(greeting, "world"))
+    out(strings.count("banana", "an"))
+    if strings.starts_with(greeting, "Hell") && !strings.ends_with(greeting, "!") {
+        out(1)
+    }
+    match strings.parse_int(" -42 ") {
+        Some(n) => out(n)
+        None => out(0)
+    }
+    show(to_str(-12) + to_str(true) + to_str(0.1) + to_str(1e100) + to_str(2.5 as f32))
+    let words: [str] = []
+    let i = 0
+    while i < 4 {
+        push(words, strings.repeat("ab", i))
+        i = i + 1
+    }
+    show(strings.join(words, "/"))
+    show(from_bytes(strings.bytes("bytes")))
+    if "apple" < "banana" && "b" > "abc" && "same" == "sa" + "me" {
+        out(2)
+    }
+    return len(words)
+}

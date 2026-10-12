@@ -302,6 +302,7 @@ const std::unordered_map<std::string, Op> kUnOps = {
     {"abs", Op::Abs},     {"cast", Op::Cast},   {"bitcast", Op::Bitcast},
     {"load", Op::Load},   {"addr", Op::Addr},   {"splat", Op::Splat}, {"tag", Op::Tag},
     {"atomic_load", Op::AtomicLoad}, {"len", Op::Len}, {"clone", Op::Clone},
+    {"frombytes", Op::FromBytes}, {"to_str", Op::ToStr},
 };
 
 // `%d = <op> ...`
@@ -340,6 +341,13 @@ Inst parse_assign(Line &l) {
     uint32_t a = l.reg();
     l.punct(",");
     inst.args = {a, l.reg()};
+  } else if (w == "readline") {
+    inst.op = Op::ReadLine;
+  } else if (w == "strbyte") {
+    inst.op = Op::StrByte;
+    uint32_t s = l.reg();
+    l.punct(",");
+    inst.args = {s, l.reg()};
   } else if (w == "repeat") {
     inst.op = Op::Repeat;
     uint32_t v = l.reg();

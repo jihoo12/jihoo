@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 9)
+# JIR — jihoo IR text format (version 10)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -39,6 +39,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 7 | atomics: `atomic_load`, `atomic_store`, `atomic_swap`, `atomic_add`, `atomic_sub`, `atomic_and`, `atomic_or`, `atomic_xor`, `atomic_cas`, and `fence` |
 | 8 | `spawn` in native modules, starting a thread |
 | 9 | lists in native modules, and `clone` and `drop` |
+| 10 | `str` in native modules: string literals of type `str`, `strbyte`, `frombytes`, `to_str`, `readline` and comparisons |
 
 ## Example
 
@@ -91,7 +92,7 @@ bb3:
 ## Module
 
 ```
-jir 9                                ; format version, must come first
+jir 10                               ; format version, must come first
 profile hosted|native|freestanding   ; language profile
 target x86_64|aarch64                ; the machine, 64-bit Linux
 struct ...                           ; zero or more structs
@@ -150,7 +151,7 @@ cannot be a `funcref`.
 | `i8` … `i64`      | signed integers                          | `i8` … `i64`  |
 | `u8` … `u64`      | unsigned integers                        | `i8` … `i64`  |
 | `f32`, `f64`      | IEEE 754 binary32 and binary64          | `float`, `double` |
-| `str`             | GC-managed string, hosted only           | —             |
+| `str`             | immutable string of bytes; hosted and native | `{ptr, i64, i64}` |
 | `*T`              | raw pointer to `T`, native and freestanding only | `ptr` |
 | `$Name`           | struct or enum, by value                 | named struct  |
 | `expr`, `stmts`, `items` | code, inside macros; compile time only | —        |
@@ -251,7 +252,7 @@ The result type is what the destination register must be declared as.
 | `%d = const N`                  |                       | int or `bool` | constant; `bool` is 0 or 1 |
 | `%d = fconst X`                 |                       | `f32` or `f64` | float constant; for `f32`, `X` is exactly an `f32` value |
 | `%d = unit`                     |                       | `unit` | the unit value |
-| `%d = str "..."`                |                       | `str` (hosted) / `*u8` (native, freestanding) | string literal; compiled strings are NUL-terminated constant bytes |
+| `%d = str "..."`                |                       | `str` (hosted, native) or `*u8` (native, freestanding) | string literal, of the type of `%d`; compiled ones are NUL-terminated constant bytes |
 | `%d = copy %a`                  | `T`                   | `T`    | copy |
 | `%d = neg %a`                   | signed int or float   | same   | wrapping negation; for floats, flips the sign (also of 0 and NaN) |
 | `%d = not %a`                   | `bool` or int         | same   | logical not, or bitwise not of an integer |
@@ -359,7 +360,9 @@ runtime error and native code traps.
 A list `[T]` is an array whose length is known only when the program runs.
 Natively, it is a header `{ ptr data, i64 len, i64 cap }` held by value, with
 the elements in memory from `malloc`; see [Ownership](#ownership-native-lists)
-for who frees it.
+for who frees it. A native `str` is the same header over bytes; one with
+`cap` 0 is a literal's constant bytes, which are never freed, and copying it
+copies the header only.
 `array` builds one when `%d` is a list (of as many elements as it lists), and
 `elem`, `setelem`, `getpath`, `setpath`, `cellget` and `cellset` work on lists
 as on arrays, bounds-checked against the current length. `len` and `slice`
@@ -382,7 +385,7 @@ the list is changed in place unless something else refers to it, so a loop of
 
 #### Ownership (native lists)
 
-A value *owns memory* if it is a list or holds one by value (in a field, an
+A value *owns memory* if it is a list or a `str`, or holds one by value (in a field, an
 element or a variant's payload). Natively there is no GC, and copying a list
 header copies no elements, so a native module states who frees what with two
 instructions, which the frontend's ownership pass inserts
@@ -453,8 +456,8 @@ there, as `load` is.
 |---------------------------------|-----------------------|--------|---------|
 | `%d = syscall(%n, %a, ...)`     | int or `*T`, 1 to 7 operands | `i64` | native and freestanding only: raw Linux syscall `%n` |
 | `trap`                          |                       |        | stop the program: a runtime error on the VM, `llvm.trap` natively (as a failed bounds or division check); the block ends with `unreachable` after it |
-| `print %a`                      | number, `bool`, and `str` (hosted) or `*u8` (native) |      | hosted and native: print the value and a newline (floats as the shortest text that reads back exactly, ties rounded up: `0.1`, `1.0`, `1e100`, `inf`, `NaN`; a `*u8` is a NUL-terminated string); natively through the C library's `stdout` |
-| `%d = to_str %a`                | number or `bool`      | `str`  | hosted (and macros): the value as text, as `print` writes it |
+| `print %a`                      | number, `bool`, `str` (hosted, native) or `*u8` (native) |      | hosted and native: print the value and a newline (floats as the shortest text that reads back exactly, ties rounded up: `0.1`, `1.0`, `1e100`, `inf`, `NaN`; a `*u8` is a NUL-terminated string); natively through the C library's `stdout` |
+| `%d = to_str %a`                | number or `bool`      | `str`  | hosted, native and macros: the value as text, as `print` writes it |
 | `%d = unique %p`                | `str`                 | `str`  | compile time only: `p` plus a number unique in this compilation |
 | `%d = stringify %c`             | `expr`, `stmts` or `items` | `str` | compile time only: the source text of code, with the hygiene marks of its names removed |
 | `%d = asm "tmpl", "cons"(%a, ...)` | int, `bool` or `*T` | int, `*T` or `unit` | native and freestanding only: inline assembly |

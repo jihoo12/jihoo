@@ -113,8 +113,8 @@ fn cloned_params(f: &Function, owning: &mut Owning) -> Vec<usize> {
         .collect()
 }
 
-/// Whether values of a type own memory: lists, and structs, arrays and enums
-/// that hold one by value.
+/// Whether values of a type own memory: lists and strings, and structs, arrays
+/// and enums that hold one by value.
 pub struct Owning {
     members: HashMap<String, Vec<Type>>,
     memo: HashMap<String, bool>,
@@ -134,7 +134,7 @@ impl Owning {
 
     pub fn owns(&mut self, t: &Type) -> bool {
         match t {
-            Type::List(_) => true,
+            Type::List(_) | Type::Str => true,
             Type::Array(elem, _) => self.owns(elem),
             Type::Struct(name) | Type::Enum(name) => {
                 if let Some(&r) = self.memo.get(name) {

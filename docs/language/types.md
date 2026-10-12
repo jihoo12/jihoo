@@ -19,7 +19,7 @@ fn area(w: i64, h: i64) -> i64 {   // signatures are written out
 | `i8` `i16` `i32` `i64` | signed integers | all | [below](#integers) |
 | `u8` `u16` `u32` `u64` | unsigned integers | all | [below](#integers) |
 | `f32` `f64` | IEEE 754 floats | all | [below](#floats) |
-| `str` | immutable text | hosted | [below](#strings) |
+| `str` | immutable text | hosted, native | [below](#strings) |
 | `[T; N]` | `N` values of type `T` | all | [Arrays](arrays.md) |
 | `[T]` | any number of values of type `T` | hosted | [Lists](lists.md) |
 | `Name`, `Name(args)` | a struct or enum | all | [Structs](structs.md), [Enums](enums.md) |
@@ -81,8 +81,8 @@ pointers. `b as i64` gives 0 or 1.
 
 ## Strings
 
-`str` is the type of text in hosted programs. A string is an immutable,
-garbage-collected sequence of bytes, usually UTF-8. `+` concatenates strings,
+`str` is the type of text in hosted and native programs. A string is an
+immutable sequence of bytes, usually UTF-8. `+` concatenates strings,
 `==` and `<` compare them, `print` writes one, and `to_str` makes one from a
 number or bool:
 
@@ -112,10 +112,13 @@ print(line[:5] + line[12:])          // hello 2026
 The `strings` library has searching, splitting, trimming and parsing on top
 of these ([Standard library](../reference/standard-library.md#strings)).
 
-In native and freestanding programs there is no `str`: a string literal is a
-`*u8` pointing to constant NUL-terminated bytes, ready to pass to C or to a
-syscall. [Macros](macros.md) can use `str` in every profile, since they only run
-at compile time.
+In native programs a string literal is a `str`, except where a `*u8` is
+expected, as for an argument of a C function: there it is a pointer to
+constant NUL-terminated bytes, ready to pass to C. Natively, strings are freed
+like [lists](lists.md#lists-in-native-programs), and a literal costs no
+memory: copying one copies nothing. Freestanding programs have no `str`; a
+literal is always a `*u8`. [Macros](macros.md) can use `str` in every profile,
+since they only run at compile time.
 
 ## Conversions
 

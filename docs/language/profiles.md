@@ -36,8 +36,8 @@ fn _start() -> i64 {
 | runs on         | the jihoo VM            | an OS, as a normal program     | anything: no OS libraries at all  |
 | command         | `jihoo run`             | `jihoo build`                  | `jihoo build`                     |
 | backend         | VM                      | LLVM, linked by `cc` with libc | LLVM, static binary via `ld.lld`  |
-| memory          | GC, managed by the VM   | manual (`malloc`, or `alloc`)  | manual (`alloc` over `mmap`)      |
-| string literals | `str`                   | `*u8`, NUL-terminated          | `*u8`, NUL-terminated             |
+| memory          | GC, managed by the VM   | lists and `str` freed by the compiler; pointers manual (`malloc`, or `alloc`) | manual (`alloc` over `mmap`) |
+| string literals | `str`                   | `str`, or `*u8` where one is expected | `*u8`, NUL-terminated     |
 | output          | `print`                 | `print`, or C (`libc.printf`)  | `syscall` (`io.puts`)             |
 | C functions     | no                      | `extern fn`, `export fn`, C files, `-l` | `export fn`              |
 | pointers        | no                      | `*T`, `&x`, `*p`, `p[i]`       | `*T`, `&x`, `*p`, `p[i]`          |

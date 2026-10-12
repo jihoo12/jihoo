@@ -12,7 +12,7 @@ namespace jir {
 
 // The one JIR version this backend reads, from the `jir N` header. It must
 // equal JIR_VERSION in crates/jihoo-ir/src/lib.rs (a Rust test checks this).
-constexpr int64_t kVersion = 9;
+constexpr int64_t kVersion = 10;
 
 enum class Profile { Hosted, Native, Freestanding };
 
@@ -136,6 +136,8 @@ enum class Op {
   Syscall, Print, Asm, Trap,
   // Native lists, and the ownership pass's deep copy and free.
   Len, Slice, Repeat, Push, Pop, Clone, Drop,
+  // Native strings.
+  StrByte, FromBytes, ToStr, ReadLine,
   Spawn,
   AtomicLoad, AtomicStore, AtomicSwap, AtomicAdd, AtomicSub, AtomicAnd, AtomicOr, AtomicXor, AtomicCas, Fence,
 };

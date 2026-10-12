@@ -112,7 +112,7 @@ fn break_and_continue() {
 fn profile_rules() {
     assert!(err("#![freestanding]\nfn _start() { print(1) }").contains("not available in freestanding"));
     assert!(err("fn main() { syscall(60, 0) }").contains("only available in native and freestanding"));
-    assert!(err(&fs("fn f(s: str) {}")).contains("garbage collected"));
+    assert!(err(&fs("fn f(s: str) {}")).contains("type `str` needs an allocator"));
     assert!(err("fn f(p: *u8) {}\nfn main() {}").contains("only available in native and freestanding"));
     assert!(err("fn main() { let x = 1\n let p = &x }").contains("only available in native and freestanding"));
     assert!(err(&fs("fn f(p: ptr) {}")).contains("written `*u8`"));
@@ -1277,7 +1277,7 @@ fn unique_names_and_to_str() {
     assert!(names.contains(&"f__0") && names.contains(&"f__1"), "{names:?}");
     assert!(err("fn main() { let x = unique(\"a\") }").contains("only be used inside a macro"));
     assert!(err("macro m() -> expr { return ident(\"1x\") }\nfn main() { print(m!()) }").contains("`1x` is not a valid name"));
-    assert!(err(&fs("fn f() { let s = to_str(1) }")).contains("only available in hosted programs and macros"));
+    assert!(err(&fs("fn f() { let s = to_str(1) }")).contains("which freestanding programs do not have"));
     assert!(err("fn main() { print(to_str(\"s\")) }").contains("takes a number or a bool"));
 }
 
@@ -1297,9 +1297,9 @@ fn native_programs_call_c() {
     let text = m.to_string();
     assert!(text.contains("extern @printf(*u8, ...) -> i32"), "{text}");
     assert!(text.contains("call @abs("), "{text}");
-    // Pointers, `&`, syscall and asm work as in freestanding code; GC types do not.
+    // Pointers, `&`, syscall and asm work as in freestanding code, and so do lists and `str`.
     check(&native("fn f() -> i64 { let x = 1\n let p = &x\n return *p + syscall(39) }")).unwrap();
-    assert!(err(&native("fn f(s: str) {}")).contains("not available in native mode"));
+    check(&native("fn f(s: str) -> i64 { return len(s) }")).unwrap();
     // `print` works natively, where text is a C string (`*u8`); not freestanding.
     check(&native("fn f(p: *u8, q: *i32) { print(1)\n print(\"hi\")\n print(p)\n print(1.5)\n print(q != q) }")).unwrap();
     assert!(err(&native("fn f(q: *i32) { print(q) }")).contains("cannot print a value of type *i32"));
@@ -1465,7 +1465,12 @@ fn string_operations() {
     assert!(err("fn main() { let a = [1, 2]\n print(len(a[1:])) }").contains("only a str or list can be sliced"));
     assert!(err("fn main() { print(\"a\"[true:]) }").contains("slice bound must be i64"));
     assert!(err("fn main() { print(read_line(1)) }").contains("`read_line` takes no arguments"));
-    assert!(err(&fs("fn f() { let x = read_line() }")).contains("only available in hosted programs"));
+    assert!(err(&fs("fn f() { let x = read_line() }")).contains("which freestanding programs do not have"));
+    // Natively, a literal is a `str` unless a C string is expected.
+    let m = check(&native("extern fn puts(s: *u8) -> i32\nfn g(s: str) -> i64 { return len(s) }\n\
+                           fn f() -> i64 { puts(\"c\")\n let p: *u8 = \"c\"\n return g(\"abc\" + \"d\") }"))
+    .unwrap();
+    assert!(m.to_string().contains("str \"abc\""), "{m}");
 }
 
 #[test]

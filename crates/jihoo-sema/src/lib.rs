@@ -941,7 +941,13 @@ impl<'a> FnCx<'a> {
             ExprKind::Bool(b) => self.konst(Type::Bool, *b as i64),
             ExprKind::Str(s) => {
                 // Macros run on the VM, where strings are always `str`.
-                let ty = if self.in_macro { Type::Str } else { types::str_literal(self.profile()) };
+                // Natively, a literal is a `str` unless a C string is expected.
+                let ty = match expected {
+                    _ if self.in_macro => Type::Str,
+                    Some(Type::Ptr(_)) => types::str_literal(self.profile()),
+                    _ if self.profile() == Profile::Native => Type::Str,
+                    _ => types::str_literal(self.profile()),
+                };
                 self.emit_to(ty, |dst| Inst::Str { dst, value: s.clone() })
             }
             ExprKind::Var(name) => self.var(e.pos, name)?,
@@ -1173,8 +1179,8 @@ impl<'a> FnCx<'a> {
     /// `read_line()`: the next line of standard input with its `\n`, or `""`
     /// at the end.
     fn read_line(&mut self, pos: Pos, args: &[Expr]) -> Result<Reg, Error> {
-        if self.profile() != Profile::Hosted {
-            return Err(Error::new(pos, "`read_line` makes a `str`, so it is only available in hosted programs"));
+        if self.profile() == Profile::Freestanding {
+            return Err(Error::new(pos, "`read_line` makes a `str`, which freestanding programs do not have"));
         }
         if !args.is_empty() {
             return Err(Error::new(pos, "`read_line` takes no arguments"));
@@ -1295,8 +1301,8 @@ impl<'a> FnCx<'a> {
             "stringify" => self.stringify(pos, args),
             "path_index" => self.path_index(pos, args),
             "to_str" => {
-                if self.profile() != Profile::Hosted && !self.in_macro {
-                    return Err(Error::new(pos, "`to_str` makes a `str`, so it is only available in hosted programs and macros"));
+                if self.profile() == Profile::Freestanding && !self.in_macro {
+                    return Err(Error::new(pos, "`to_str` makes a `str`, which freestanding programs do not have"));
                 }
                 let [arg] = args else {
                     return Err(Error::new(pos, "`to_str` takes exactly 1 argument"));
@@ -1430,8 +1436,11 @@ impl<'a> FnCx<'a> {
                 let regs = if variadic && args.len() >= sig.params.len() {
                     let (fixed, rest) = args.split_at(sig.params.len());
                     let mut regs = self.call_args(pos, &format!("`{name}`"), &sig.params, fixed)?;
+                    // A string literal there is a C string, as for `printf("%s", "x")`.
+                    let c_string = Type::ptr(Type::U8);
                     for a in rest {
-                        let r = self.expr(a, None)?;
+                        let hint = matches!(a.kind, ExprKind::Str(_)).then_some(&c_string);
+                        let r = self.expr(a, hint)?;
                         // Through `...` C takes only what fits a register.
                         if !ir::types::c_compatible(self.ty(r), false, &|_| None) {
                             let msg = format!("{} cannot be passed to C as a variable argument; pass a pointer to it", self.ty(r));

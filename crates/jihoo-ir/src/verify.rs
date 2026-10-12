@@ -268,6 +268,7 @@ impl Cx<'_> {
                         t => Err(format!("`fconst {}` is not a valid {}", types::float_jir(*value), t.jir())),
                     },
                     Inst::Unit { dst } => expect(dst, &Type::Unit),
+                    Inst::Str { dst, .. } if types::is_str_literal(profile, ty(dst)?) => Ok(()),
                     Inst::Str { dst, .. } => expect(dst, &types::str_literal(profile)),
                     Inst::Copy { dst, src } => expect(dst, ty(src)?),
                     Inst::Clone { dst, src } => expect(dst, ty(src)?),

@@ -83,19 +83,21 @@ class Types {
       case jir::Type::Fn: return PointerType::get(ctx_, 0);
       case jir::Type::Struct: return info(t.name).ty;
       case jir::Type::Array: return ArrayType::get(lower(*t.pointee), t.count);
-      // `{ T *data, i64 len, i64 cap }`; see `Glue`.
+      // `{ T *data, i64 len, i64 cap }`; see `Glue`. A `str` is the same
+      // header over bytes.
+      case jir::Type::Str:
       case jir::Type::List: {
         Type *i64 = Type::getInt64Ty(ctx_);
         return StructType::get(ctx_, {PointerType::get(ctx_, 0), i64, i64});
       }
-      case jir::Type::Str: break;
     }
-    throw CodegenError("type `str` is garbage collected and cannot be compiled natively");
+    throw CodegenError("unknown type " + t.str());
   }
 
   // Structs, enums, arrays and list headers.
   static bool is_agg(const jir::Type &t) {
-    return t.kind == jir::Type::Struct || t.kind == jir::Type::Array || t.kind == jir::Type::List;
+    return t.kind == jir::Type::Struct || t.kind == jir::Type::Array || t.kind == jir::Type::List ||
+           t.kind == jir::Type::Str;
   }
 
   // Aggregate parameters become pointers; an aggregate result becomes a leading
@@ -218,6 +220,10 @@ class Types {
 // a view that shares the elements, which the pass clones where it must; the
 // backend drops the old part where it writes one.
 //
+// A `str` is a list of bytes that never changes. One whose `cap` is 0 holds
+// the bytes of a literal, in the program's constant data: freeing it does
+// nothing and copying it copies the header, so literals cost no memory.
+//
 // The glue for a type is a function per type, `jihoo.drop.T(ptr)` and
 // `jihoo.clone.T(ptr dst, ptr src)`, made on first use.
 class Glue {
@@ -230,7 +236,7 @@ class Glue {
   // Whether a value of type `t` owns memory that a drop frees.
   bool owns(const jir::Type &t) {
     switch (t.kind) {
-      case jir::Type::List: return true;
+      case jir::Type::List: case jir::Type::Str: return true;
       case jir::Type::Array: return owns(*t.pointee);
       case jir::Type::Struct: {
         auto memo = owns_.find(t.name);
@@ -403,7 +409,18 @@ class Glue {
   }
 
   void drop_body(IRBuilder<> &b, Function *fn, const jir::Type &t, Value *v) {
-    (void)fn;
+    if (t.kind == jir::Type::Str) {
+      // A literal's bytes are not ours to free.
+      auto *heap = BasicBlock::Create(ctx_, "heap", fn);
+      auto *done = BasicBlock::Create(ctx_, "done", fn);
+      Value *cap = b.CreateLoad(b.getInt64Ty(), b.CreateStructGEP(header(), v, 2));
+      b.CreateCondBr(b.CreateICmpNE(cap, b.getInt64(0)), heap, done);
+      b.SetInsertPoint(heap);
+      b.CreateCall(free_fn(), {b.CreateLoad(ptr(), b.CreateStructGEP(header(), v, 0))});
+      b.CreateBr(done);
+      b.SetInsertPoint(done);
+      return;
+    }
     if (t.kind != jir::Type::List) {
       parts(b, t, v, nullptr, [&](Value *d, Value *, const jir::Type &pt) { b.CreateCall(drop(pt), {d}); });
       return;
@@ -419,8 +436,31 @@ class Glue {
   }
 
   void clone_body(IRBuilder<> &b, Function *fn, const jir::Type &t, Value *dst, Value *src) {
-    (void)fn;
     const DataLayout &dl = m_.getDataLayout();
+    if (t.kind == jir::Type::Str) {
+      // A literal stays a literal; other bytes are copied.
+      Value *data = b.CreateLoad(ptr(), b.CreateStructGEP(header(), src, 0));
+      Value *len = b.CreateLoad(b.getInt64Ty(), b.CreateStructGEP(header(), src, 1));
+      Value *cap = b.CreateLoad(b.getInt64Ty(), b.CreateStructGEP(header(), src, 2));
+      auto *heap = BasicBlock::Create(ctx_, "heap", fn);
+      auto *done = BasicBlock::Create(ctx_, "done", fn);
+      BasicBlock *from = b.GetInsertBlock();
+      b.CreateCondBr(b.CreateICmpNE(cap, b.getInt64(0)), heap, done);
+      b.SetInsertPoint(heap);
+      Value *copy = b.CreateCall(malloc_fn(), {len});
+      check(b, b.CreateOr(b.CreateIsNotNull(copy), b.CreateICmpEQ(len, b.getInt64(0))));
+      b.CreateMemCpy(copy, Align(1), data, Align(1), len);
+      BasicBlock *copied = b.GetInsertBlock();
+      b.CreateBr(done);
+      b.SetInsertPoint(done);
+      PHINode *p = b.CreatePHI(ptr(), 2);
+      p->addIncoming(data, from);
+      p->addIncoming(copy, copied);
+      b.CreateStore(p, b.CreateStructGEP(header(), dst, 0));
+      b.CreateStore(len, b.CreateStructGEP(header(), dst, 1));
+      b.CreateStore(cap, b.CreateStructGEP(header(), dst, 2));
+      return;
+    }
     if (t.kind != jir::Type::List) {
       // Copy the bytes, then replace each owning part with a copy of its own.
       Type *ty = types_.lower(t);
@@ -666,8 +706,13 @@ class FnGen {
   void print(uint32_t r) {
     if (!native_) fail(f_.name, "`print` needs the C library; it is only available in hosted and native modules");
     const jir::Type &t = type(r);
-    Value *v = load(r);
     auto str = [&](const char *s) { return b_.CreateGlobalString(s, ".str.print", 0, &mod_); };
+    if (t.kind == jir::Type::Str) {
+      Value *n = b_.CreateTrunc(list_field(slot(r), 1), b_.getInt32Ty());
+      b_.CreateCall(libc_fn(mod_, "printf"), {str("%.*s\n"), n, list_field(slot(r), 0)});
+      return;
+    }
+    Value *v = load(r);
     switch (t.kind) {
       case jir::Type::Int:
         b_.CreateCall(libc_fn(mod_, "printf"), {str(t.is_signed ? "%lld\n" : "%llu\n"), b_.CreateIntCast(v, i64_, t.is_signed)});
@@ -681,7 +726,7 @@ class FnGen {
         return;
       case jir::Type::Float:
         if (t.bits == 32) v = b_.CreateFPExt(v, b_.getDoubleTy());
-        b_.CreateCall(print_float_fn(mod_), {v, b_.getInt1(t.bits == 32)});
+        b_.CreateCall(print_float_fn(mod_), {v, b_.getInt1(t.bits == 32), ConstantPointerNull::get(PointerType::get(ctx_, 0))});
         return;
       default: break;
     }
@@ -902,6 +947,41 @@ class FnGen {
     return type(r);
   }
 
+  bool is_str(uint32_t r) { return type(r).kind == jir::Type::Str; }
+
+  // Makes the string at `header` new memory for `n` bytes, not yet written;
+  // gives its address.
+  Value *new_str(Value *n, Value *header) {
+    Value *data = b_.CreateCall(glue_.malloc_fn(), {n});
+    check(b_.CreateOr(b_.CreateIsNotNull(data), b_.CreateICmpEQ(n, b_.getInt64(0))), "str.alloc");
+    StructType *h = glue_.header();
+    b_.CreateStore(data, b_.CreateStructGEP(h, header, 0));
+    b_.CreateStore(n, b_.CreateStructGEP(h, header, 1));
+    b_.CreateStore(b_.getInt64(1), b_.CreateStructGEP(h, header, 2));  // not a literal
+    return data;
+  }
+
+  // Sets the string at `header` to a copy of the NUL-terminated bytes at `s`.
+  void str_from_c(Value *s, Value *header) {
+    Value *n = b_.CreateCall(mod_.getOrInsertFunction("strlen", FunctionType::get(i64_, {PointerType::get(ctx_, 0)}, false)), {s});
+    Value *data = new_str(n, header);
+    b_.CreateMemCpy(data, Align(1), s, Align(1), n);
+  }
+
+  // `a op b` on strings: byte by byte, then by length, as the VM orders them.
+  Value *str_compare(jir::Op op, uint32_t a, uint32_t b) {
+    Value *la = list_field(slot(a), 1), *lb = list_field(slot(b), 1);
+    Value *n = b_.CreateSelect(b_.CreateICmpULT(la, lb), la, lb);
+    FunctionCallee memcmp = mod_.getOrInsertFunction(
+        "memcmp", FunctionType::get(b_.getInt32Ty(), {PointerType::get(ctx_, 0), PointerType::get(ctx_, 0), i64_}, false));
+    Value *c = b_.CreateCall(memcmp, {list_field(slot(a), 0), list_field(slot(b), 0), n});
+    // -1, 0 or 1 from the bytes, else from the lengths.
+    Value *by_len = b_.CreateSelect(b_.CreateICmpULT(la, lb), b_.getInt32(-1),
+                                    b_.CreateSelect(b_.CreateICmpUGT(la, lb), b_.getInt32(1), b_.getInt32(0)));
+    Value *order = b_.CreateSelect(b_.CreateICmpEQ(c, b_.getInt32(0)), by_len, c);
+    return compare(op, order, b_.getInt32(0), true);
+  }
+
   Value *list_field(Value *header, unsigned k) {
     Type *ty = k == 0 ? static_cast<Type *>(PointerType::get(ctx_, 0)) : i64_;
     return b_.CreateLoad(ty, b_.CreateStructGEP(glue_.header(), header, k));
@@ -1069,6 +1149,13 @@ class FnGen {
       }
       case Op::Unit: store(inst.dst, unit()); return;
       case Op::Str:
+        if (is_str(inst.dst)) {
+          StructType *h = glue_.header();
+          b_.CreateStore(b_.CreateGlobalString(inst.text, ".str", 0, &mod_), b_.CreateStructGEP(h, slot(inst.dst), 0));
+          b_.CreateStore(b_.getInt64(inst.text.size()), b_.CreateStructGEP(h, slot(inst.dst), 1));
+          b_.CreateStore(b_.getInt64(0), b_.CreateStructGEP(h, slot(inst.dst), 2));  // a literal
+          return;
+        }
         // Compiled strings are addresses of NUL-terminated constant bytes.
         store(inst.dst, b_.CreateGlobalString(inst.text, ".str", 0, &mod_));
         return;
@@ -1076,7 +1163,13 @@ class FnGen {
       case Op::Neg: store(inst.dst, is_float(arg_reg(0)) ? b_.CreateFNeg(arg(0)) : b_.CreateNeg(arg(0))); return;
       case Op::Not: store(inst.dst, b_.CreateNot(arg(0))); return;
       case Op::Add:
-        if (type(arg_reg(0)).kind == jir::Type::List) {
+        if (is_str(arg_reg(0))) {
+          Value *a = slot(arg_reg(0)), *b = slot(arg_reg(1));
+          Value *la = list_field(a, 1), *lb = list_field(b, 1);
+          Value *data = new_str(b_.CreateAdd(la, lb), slot(inst.dst));
+          b_.CreateMemCpy(data, Align(1), list_field(a, 0), Align(1), la);
+          b_.CreateMemCpy(b_.CreateGEP(b_.getInt8Ty(), data, {la}), Align(1), list_field(b, 0), Align(1), lb);
+        } else if (type(arg_reg(0)).kind == jir::Type::List) {
           const jir::Type &elem = *list_of(inst.dst).pointee;
           Value *a = slot(arg_reg(0)), *b = slot(arg_reg(1));
           Value *la = list_field(a, 1), *lb = list_field(b, 1);
@@ -1114,6 +1207,10 @@ class FnGen {
         return;
       }
       case Op::Eq: case Op::Ne: case Op::Lt: case Op::Le: case Op::Gt: case Op::Ge:
+        if (is_str(arg_reg(0))) {
+          store(inst.dst, str_compare(inst.op, arg_reg(0), arg_reg(1)));
+          return;
+        }
         store(inst.dst, is_float(arg_reg(0)) ? fcompare(inst.op, arg(0), arg(1))
                                              : compare(inst.op, arg(0), arg(1), is_signed(arg_reg(0))));
         return;
@@ -1384,7 +1481,62 @@ class FnGen {
         return;
       }
       case Op::Print: print(arg_reg(0)); return;
-      case Op::Len: list_of(arg_reg(0)); store(inst.dst, list_field(slot(arg_reg(0)), 1)); return;
+      case Op::Len:
+        if (!is_str(arg_reg(0))) list_of(arg_reg(0));
+        store(inst.dst, list_field(slot(arg_reg(0)), 1));
+        return;
+      case Op::StrByte: {
+        if (!is_str(arg_reg(0))) fail(f_.name, "`strbyte` needs a str");
+        Value *h = slot(arg_reg(0)), *i = arg(1);
+        check(b_.CreateICmpULT(i, list_field(h, 1)), "in_bounds");
+        store(inst.dst, b_.CreateLoad(b_.getInt8Ty(), b_.CreateGEP(b_.getInt8Ty(), list_field(h, 0), {i})));
+        return;
+      }
+      case Op::FromBytes: {
+        if (list_of(arg_reg(0)) != jir::Type::list(jir::Type::integer(8, false))) fail(f_.name, "`frombytes` needs a [u8]");
+        Value *src = slot(arg_reg(0));
+        Value *n = list_field(src, 1);
+        Value *data = new_str(n, slot(inst.dst));
+        b_.CreateMemCpy(data, Align(1), list_field(src, 0), Align(1), n);
+        return;
+      }
+      case Op::ToStr: {
+        const jir::Type &t = type(arg_reg(0));
+        Value *v = arg(0);
+        AllocaInst *buf = temp(ArrayType::get(b_.getInt8Ty(), 64), jir::Type::integer(64, true));
+        auto str = [&](const char *s) { return b_.CreateGlobalString(s, ".str.to_str", 0, &mod_); };
+        if (t.kind == jir::Type::Int) {
+          b_.CreateCall(libc_fn(mod_, "snprintf"), {buf, b_.getInt64(64), str(t.is_signed ? "%lld" : "%llu"),
+                                                    b_.CreateIntCast(v, i64_, t.is_signed)});
+        } else if (t.kind == jir::Type::Bool) {
+          b_.CreateCall(libc_fn(mod_, "snprintf"), {buf, b_.getInt64(64), str("%s"), b_.CreateSelect(v, str("true"), str("false"))});
+        } else if (t.kind == jir::Type::Float) {
+          if (t.bits == 32) v = b_.CreateFPExt(v, b_.getDoubleTy());
+          b_.CreateCall(print_float_fn(mod_), {v, b_.getInt1(t.bits == 32), buf});
+        } else {
+          fail(f_.name, "`to_str` takes a number or a bool");
+        }
+        str_from_c(buf, slot(inst.dst));
+        return;
+      }
+      case Op::ReadLine: {
+        // getline(&line, &size, stdin): the line with its newline, or -1 at the end.
+        Type *ptr = PointerType::get(ctx_, 0);
+        auto *in = mod_.getOrInsertGlobal("stdin", ptr);
+        AllocaInst *line = temp(ptr, jir::Type::pointer(jir::Type::integer(8, false)));
+        AllocaInst *size = temp(i64_, jir::Type::integer(64, true));
+        b_.CreateStore(ConstantPointerNull::get(PointerType::get(ctx_, 0)), line);
+        b_.CreateStore(b_.getInt64(0), size);
+        FunctionCallee getline = mod_.getOrInsertFunction("getline", FunctionType::get(i64_, {ptr, ptr, ptr}, false));
+        Value *n = b_.CreateCall(getline, {line, size, b_.CreateLoad(ptr, in)});
+        Value *got = b_.CreateICmpSGT(n, b_.getInt64(0));
+        StructType *h = glue_.header();
+        // The buffer becomes the string's memory, so nothing is copied.
+        b_.CreateStore(b_.CreateLoad(ptr, line), b_.CreateStructGEP(h, slot(inst.dst), 0));
+        b_.CreateStore(b_.CreateSelect(got, n, b_.getInt64(0)), b_.CreateStructGEP(h, slot(inst.dst), 1));
+        b_.CreateStore(b_.getInt64(1), b_.CreateStructGEP(h, slot(inst.dst), 2));
+        return;
+      }
       case Op::Clone:
         if (type(inst.dst) != type(arg_reg(0))) fail(f_.name, "`clone` result has the wrong type");
         if (glue_.owns(type(inst.dst)))
@@ -1412,6 +1564,15 @@ class FnGen {
         return;
       }
       case Op::Slice: {
+        if (is_str(arg_reg(0))) {
+          Value *src = slot(arg_reg(0));
+          Value *lo = arg(1), *hi = arg(2);
+          check(b_.CreateAnd(b_.CreateICmpULE(lo, hi), b_.CreateICmpULE(hi, list_field(src, 1))), "slice.bounds");
+          Value *n = b_.CreateSub(hi, lo);
+          Value *data = new_str(n, slot(inst.dst));
+          b_.CreateMemCpy(data, Align(1), b_.CreateGEP(b_.getInt8Ty(), list_field(src, 0), {lo}), Align(1), n);
+          return;
+        }
         const jir::Type &elem = *list_of(arg_reg(0)).pointee;
         Value *src = slot(arg_reg(0));
         Value *lo = arg(1), *hi = arg(2);
@@ -1669,11 +1830,12 @@ FunctionCallee libc_fn(Module &m, const char *name) {
   return m.getOrInsertFunction(name, ty);
 }
 
-// Defines `void jihoo.print_float(double x, i1 is_f32)`, which prints `x` (an
+// Defines `void jihoo.print_float(double x, i1 is_f32, ptr out)`, which prints `x` (an
 // `f32` if `is_f32`) and a newline the way the VM does: the shortest decimal
 // that reads back as `x` in its type, with a `.` or an exponent (`1.0`, `0.1`,
 // `1e100`, `1.5e-7`; exponents for magnitudes below 1e-4 and from 1e16 on),
-// or `inf`, `-inf`, `NaN`.
+// or `inf`, `-inf`, `NaN`. Given an `out` buffer of 64 bytes, it writes the
+// text there instead, without the newline (for `to_str`).
 //
 // The search reads the first 18 digits of x exactly, from `%.40e` or, if
 // that may have rounded them, `%.767e` (a double has at most 767 significant
@@ -1689,18 +1851,32 @@ Function *print_float_fn(Module &m) {
   LLVMContext &ctx = m.getContext();
   Type *dbl = Type::getDoubleTy(ctx), *i64 = Type::getInt64Ty(ctx), *i32 = Type::getInt32Ty(ctx);
   Type *i8 = Type::getInt8Ty(ctx);
-  auto *fn = Function::Create(FunctionType::get(Type::getVoidTy(ctx), {dbl, Type::getInt1Ty(ctx)}, false),
+  Type *ptr = PointerType::get(ctx, 0);
+  auto *fn = Function::Create(FunctionType::get(Type::getVoidTy(ctx), {dbl, Type::getInt1Ty(ctx), ptr}, false),
                               GlobalValue::InternalLinkage, "jihoo.print_float", m);
   fn->addFnAttr(Attribute::NoInline);
-  Value *x = fn->getArg(0), *is_f32 = fn->getArg(1);
+  Value *x = fn->getArg(0), *is_f32 = fn->getArg(1), *out = fn->getArg(2);
   auto block = [&](const char *n) { return BasicBlock::Create(ctx, n, fn); };
   IRBuilder<> b(block("entry"));
   auto str = [&](const char *s) { return b.CreateGlobalString(s, ".str.print", 0, &m); };
   auto call = [&](const char *name, std::vector<Value *> args) { return b.CreateCall(libc_fn(m, name), args); };
-  auto puts_and_return = [&](Value *s) {
-    call("puts", {s});
+  // Prints `fmt` (which ends in a newline) with `args` and returns; with an
+  // `out` buffer (64 bytes), writes the text there instead, without the newline.
+  auto finish = [&](std::string fmt, std::vector<Value *> args) {
+    BasicBlock *to_stdout = block("stdout"), *to_buf = block("buffer");
+    b.CreateCondBr(b.CreateIsNull(out), to_stdout, to_buf);
+    b.SetInsertPoint(to_stdout);
+    std::vector<Value *> pargs{str(fmt.c_str())};
+    pargs.insert(pargs.end(), args.begin(), args.end());
+    call("printf", pargs);
+    b.CreateRetVoid();
+    b.SetInsertPoint(to_buf);
+    std::vector<Value *> sargs{out, b.getInt64(64), str(fmt.substr(0, fmt.size() - 1).c_str())};
+    sargs.insert(sargs.end(), args.begin(), args.end());
+    call("snprintf", sargs);
     b.CreateRetVoid();
   };
+  auto puts_and_return = [&](Value *s) { finish("%s\n", {s}); };
 
   // `d.<767 digits>e-XXX` and a NUL.
   const uint64_t kDigits = 767, kExact = kDigits + 8;
@@ -1863,24 +2039,20 @@ Function *print_float_fn(Module &m) {
   b.CreateCondBr(b.CreateOr(b.CreateFCmpOLT(ax, lo), b.CreateFCmpOGE(ax, hi)), sci, dec);
   b.SetInsertPoint(sci);
   Value *point = b.CreateSelect(b.CreateICmpSGT(n, b.getInt32(1)), str("."), str(""));
-  call("printf", {str("%s%.1s%s%se%d\n"), sign, num, point, b.CreateGEP(b.getInt8Ty(), num, b.getInt64(1)), fe});
-  b.CreateRetVoid();
+  finish("%s%.1s%s%se%d\n", {sign, num, point, b.CreateGEP(b.getInt8Ty(), num, b.getInt64(1)), fe});
 
   b.SetInsertPoint(dec);
   b.CreateCondBr(b.CreateICmpSLT(fe, b.getInt32(0)), dec_small, big);
   b.SetInsertPoint(dec_small);  // 0.000ddd
-  call("printf", {str("%s0.%.*s%s\n"), sign, b.CreateSub(b.getInt32(-1), fe), zeros, num});
-  b.CreateRetVoid();
+  finish("%s0.%.*s%s\n", {sign, b.CreateSub(b.getInt32(-1), fe), zeros, num});
   b.SetInsertPoint(big);
   Value *int_digits = b.CreateAdd(fe, b.getInt32(1));
   b.CreateCondBr(b.CreateICmpSLE(n, int_digits), dec_int, dec_frac);
   b.SetInsertPoint(dec_int);  // ddd000.0
-  call("printf", {str("%s%s%.*s.0\n"), sign, num, b.CreateSub(int_digits, n), zeros});
-  b.CreateRetVoid();
+  finish("%s%s%.*s.0\n", {sign, num, b.CreateSub(int_digits, n), zeros});
   b.SetInsertPoint(dec_frac);  // ddd.ddd
   Value *rest = b.CreateGEP(b.getInt8Ty(), num, b.CreateSExt(int_digits, i64));
-  call("printf", {str("%s%.*s.%s\n"), sign, int_digits, num, rest});
-  b.CreateRetVoid();
+  finish("%s%.*s.%s\n", {sign, int_digits, num, rest});
   return fn;
 }
 
