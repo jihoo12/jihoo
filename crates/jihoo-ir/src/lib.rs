@@ -8,6 +8,7 @@
 //! The LLVM backend gives each register an alloca and lets mem2reg clean up.
 
 pub mod layout;
+pub mod ownership;
 mod parse;
 mod print;
 pub mod types;
@@ -23,7 +24,7 @@ pub use verify::verify;
 /// module instead of compiling it with other rules. Bump it whenever the
 /// format or the meaning of anything in it changes (see "Versions" in
 /// `docs/jir.md`); the `version` tests check that both sides and the spec agree.
-pub const JIR_VERSION: u32 = 8;
+pub const JIR_VERSION: u32 = 9;
 
 /// Language profile, selected with `#![native]` or `#![freestanding]` at the
 /// top of a source file.
@@ -348,6 +349,13 @@ pub enum Inst {
     /// NUL-terminated bytes when compiled.
     Str { dst: Reg, value: String },
     Copy { dst: Reg, src: Reg },
+    /// Native only: a deep copy of `src`, which owns memory of its own (a list,
+    /// or an aggregate holding one). Inserted by the ownership pass where a
+    /// value is copied while the original is still used; the VM copies.
+    Clone { dst: Reg, src: Reg },
+    /// Native only: frees the memory value `src` owns. Inserted by the
+    /// ownership pass where a value dies; does nothing on the VM.
+    Drop { src: Reg },
     Unary { dst: Reg, op: UnOp, src: Reg },
     Binary { dst: Reg, op: BinOp, lhs: Reg, rhs: Reg },
     /// Converts between integer and float types, bool to integer, and pointers.
@@ -575,6 +583,7 @@ impl Inst {
                 vec![dst]
             }
             Copy { dst, src }
+            | Clone { dst, src }
             | Unary { dst, src, .. }
             | Cast { dst, src }
             | Bitcast { dst, src }
@@ -621,7 +630,7 @@ impl Inst {
                     SelectCase::Send { chan, value } => [chan, value],
                 }))
                 .collect(),
-            Print { src } => vec![src],
+            Print { src } | Drop { src } => vec![src],
             Trap | Fence => vec![],
             Call { dst, args, .. }
             | Struct { dst, fields: args, .. }

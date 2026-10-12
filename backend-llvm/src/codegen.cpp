@@ -30,6 +30,7 @@
 #include "cabi.h"
 
 #include <algorithm>
+#include <functional>
 #include <unordered_map>
 
 #include <llvm/IR/Constants.h>
@@ -82,13 +83,20 @@ class Types {
       case jir::Type::Fn: return PointerType::get(ctx_, 0);
       case jir::Type::Struct: return info(t.name).ty;
       case jir::Type::Array: return ArrayType::get(lower(*t.pointee), t.count);
+      // `{ T *data, i64 len, i64 cap }`; see `Glue`.
+      case jir::Type::List: {
+        Type *i64 = Type::getInt64Ty(ctx_);
+        return StructType::get(ctx_, {PointerType::get(ctx_, 0), i64, i64});
+      }
       case jir::Type::Str: break;
     }
     throw CodegenError("type `str` is garbage collected and cannot be compiled natively");
   }
 
-  // Structs, enums and arrays.
-  static bool is_agg(const jir::Type &t) { return t.kind == jir::Type::Struct || t.kind == jir::Type::Array; }
+  // Structs, enums, arrays and list headers.
+  static bool is_agg(const jir::Type &t) {
+    return t.kind == jir::Type::Struct || t.kind == jir::Type::Array || t.kind == jir::Type::List;
+  }
 
   // Aggregate parameters become pointers; an aggregate result becomes a leading
   // `sret` pointer parameter and a void return.
@@ -197,6 +205,253 @@ class Types {
   }
 };
 
+// Native lists and the memory they own.
+//
+// A list `[T]` is a header `{ T *data, i64 len, i64 cap }` held by value like
+// any aggregate; the elements live in memory from `malloc`. A type *owns*
+// memory if it holds a list by value, directly or in a field, element or
+// variant. Copying a header copies no elements, so who frees what is decided
+// before the backend runs: the frontend's ownership pass leaves a `copy` of an
+// owning value only where the original is not used again (a move), and puts a
+// `clone` (a deep copy) where it is, and a `drop` where a value dies. Reading
+// an owning part out of a value (`field`, `elem`, `getpath`, `payload`) gives
+// a view that shares the elements, which the pass clones where it must; the
+// backend drops the old part where it writes one.
+//
+// The glue for a type is a function per type, `jihoo.drop.T(ptr)` and
+// `jihoo.clone.T(ptr dst, ptr src)`, made on first use.
+class Glue {
+ public:
+  Glue(Module &m, const Types &types, const jir::Module &jm) : m_(m), types_(types), ctx_(m.getContext()) {
+    for (const auto &s : jm.structs) structs_[s.name] = &s;
+    for (const auto &e : jm.enums) enums_[e.name] = &e;
+  }
+
+  // Whether a value of type `t` owns memory that a drop frees.
+  bool owns(const jir::Type &t) {
+    switch (t.kind) {
+      case jir::Type::List: return true;
+      case jir::Type::Array: return owns(*t.pointee);
+      case jir::Type::Struct: {
+        auto memo = owns_.find(t.name);
+        if (memo != owns_.end()) return memo->second;
+        owns_[t.name] = false;  // a type holds itself only through a list, which owns anyway
+        bool result = false;
+        if (auto s = structs_.find(t.name); s != structs_.end()) {
+          for (const auto &f : s->second->fields) result = result || owns(f.second);
+        } else if (auto e = enums_.find(t.name); e != enums_.end()) {
+          for (const auto &v : e->second->variants)
+            for (const auto &p : v.second) result = result || owns(p);
+        }
+        owns_[t.name] = result;
+        return result;
+      }
+      default: return false;
+    }
+  }
+
+  uint64_t size(const jir::Type &t) const { return m_.getDataLayout().getTypeAllocSize(types_.lower(t)); }
+
+  StructType *header() const {
+    Type *ptr = PointerType::get(ctx_, 0);
+    Type *i64 = Type::getInt64Ty(ctx_);
+    return StructType::get(ctx_, {ptr, i64, i64});
+  }
+
+  FunctionCallee malloc_fn() {
+    return m_.getOrInsertFunction("malloc", FunctionType::get(ptr(), {Type::getInt64Ty(ctx_)}, false));
+  }
+  FunctionCallee realloc_fn() {
+    return m_.getOrInsertFunction("realloc", FunctionType::get(ptr(), {ptr(), Type::getInt64Ty(ctx_)}, false));
+  }
+  FunctionCallee free_fn() {
+    return m_.getOrInsertFunction("free", FunctionType::get(Type::getVoidTy(ctx_), {ptr()}, false));
+  }
+
+  // `void jihoo.drop.T(T *v)`: frees what the value at `v` owns.
+  Function *drop(const jir::Type &t) {
+    return get(drops_, "jihoo.drop." + t.str(), {ptr()}, [&](IRBuilder<> &b, Function *fn) {
+      drop_body(b, fn, t, fn->getArg(0));
+    });
+  }
+
+  // `void jihoo.clone.T(T *dst, T *src)`: a deep copy of the value at `src`
+  // into `dst`, which may be the same place.
+  Function *clone(const jir::Type &t) {
+    return get(clones_, "jihoo.clone." + t.str(), {ptr(), ptr()}, [&](IRBuilder<> &b, Function *fn) {
+      clone_body(b, fn, t, fn->getArg(0), fn->getArg(1));
+    });
+  }
+
+  // Calls `body(i)` for `i` from 0 to `n` (an i64) at the builder's position.
+  static void loop(IRBuilder<> &b, Value *n, const std::function<void(Value *)> &body) {
+    LLVMContext &ctx = b.getContext();
+    Function *fn = b.GetInsertBlock()->getParent();
+    BasicBlock *pre = b.GetInsertBlock();
+    auto *head = BasicBlock::Create(ctx, "each", fn);
+    auto *step = BasicBlock::Create(ctx, "each.body", fn);
+    auto *done = BasicBlock::Create(ctx, "each.done", fn);
+    b.CreateBr(head);
+    b.SetInsertPoint(head);
+    PHINode *i = b.CreatePHI(b.getInt64Ty(), 2);
+    i->addIncoming(b.getInt64(0), pre);
+    b.CreateCondBr(b.CreateICmpULT(i, n), step, done);
+    b.SetInsertPoint(step);
+    body(i);
+    i->addIncoming(b.CreateAdd(i, b.getInt64(1)), b.GetInsertBlock());
+    b.CreateBr(head);
+    b.SetInsertPoint(done);
+  }
+
+  // `n * size_of(elem)`, checking that it does not overflow.
+  Value *byte_count(IRBuilder<> &b, const jir::Type &elem, Value *n, const std::function<void(Value *)> &check) {
+    Value *mul = b.CreateBinaryIntrinsic(Intrinsic::umul_with_overflow, n, b.getInt64(size(elem)));
+    check(b.CreateNot(b.CreateExtractValue(mul, 1)));
+    return b.CreateExtractValue(mul, 0);
+  }
+
+ private:
+  Module &m_;
+  const Types &types_;
+  LLVMContext &ctx_;
+  std::unordered_map<std::string, const jir::StructDef *> structs_;
+  std::unordered_map<std::string, const jir::EnumDef *> enums_;
+  std::unordered_map<std::string, bool> owns_;
+  std::unordered_map<std::string, Function *> drops_, clones_;
+
+  Type *ptr() const { return PointerType::get(ctx_, 0); }
+
+  Function *get(std::unordered_map<std::string, Function *> &memo, const std::string &name,
+                std::vector<Type *> params, const std::function<void(IRBuilder<> &, Function *)> &body) {
+    if (auto it = memo.find(name); it != memo.end()) return it->second;
+    auto *fn = Function::Create(FunctionType::get(Type::getVoidTy(ctx_), params, false),
+                                GlobalValue::InternalLinkage, name, m_);
+    memo[name] = fn;  // before the body, which may need the function itself
+    IRBuilder<> b(BasicBlock::Create(ctx_, "entry", fn));
+    body(b, fn);
+    b.CreateRetVoid();
+    return fn;
+  }
+
+  // Traps unless `ok`, inside glue.
+  static void check(IRBuilder<> &b, Value *ok) {
+    LLVMContext &ctx = b.getContext();
+    Function *fn = b.GetInsertBlock()->getParent();
+    auto *next = BasicBlock::Create(ctx, "ok", fn);
+    auto *trap = BasicBlock::Create(ctx, "trap", fn);
+    b.CreateCondBr(ok, next, trap);
+    IRBuilder<> tb(trap);
+    tb.CreateCall(Intrinsic::getOrInsertDeclaration(trap->getModule(), Intrinsic::trap));
+    tb.CreateUnreachable();
+    b.SetInsertPoint(next);
+  }
+
+  // Calls `each(dst_part, src_part, type)` for every owning part of a `t` at
+  // `dst` (and the same part at `src`, if given) that is not inside a list.
+  void parts(IRBuilder<> &b, const jir::Type &t, Value *dst, Value *src,
+             const std::function<void(Value *, Value *, const jir::Type &)> &each) {
+    switch (t.kind) {
+      case jir::Type::Array: {
+        const jir::Type &elem = *t.pointee;
+        if (!owns(elem)) return;
+        Type *ty = types_.lower(t);
+        loop(b, b.getInt64(t.count), [&](Value *i) {
+          Value *d = b.CreateGEP(ty, dst, {b.getInt64(0), i});
+          Value *s = src ? b.CreateGEP(ty, src, {b.getInt64(0), i}) : nullptr;
+          each(d, s, elem);
+        });
+        return;
+      }
+      case jir::Type::Struct: {
+        Type *ty = types_.lower(t);
+        if (auto it = structs_.find(t.name); it != structs_.end()) {
+          const auto &fields = it->second->fields;
+          for (unsigned k = 0; k < fields.size(); k++) {
+            if (!owns(fields[k].second)) continue;
+            Value *d = b.CreateStructGEP(ty, dst, k);
+            Value *s = src ? b.CreateStructGEP(ty, src, k) : nullptr;
+            each(d, s, fields[k].second);
+          }
+          return;
+        }
+        // An enum: only the active variant's payload.
+        const jir::EnumDef *e = enums_.at(t.name);
+        Function *fn = b.GetInsertBlock()->getParent();
+        auto *done = BasicBlock::Create(ctx_, "variant.done", fn);
+        Value *tag = b.CreateLoad(b.getInt32Ty(), b.CreateStructGEP(ty, dst, 0));
+        SwitchInst *sw = b.CreateSwitch(tag, done);
+        for (unsigned v = 0; v < e->variants.size(); v++) {
+          const auto &payload = e->variants[v].second;
+          if (std::none_of(payload.begin(), payload.end(), [&](const jir::Type &p) { return owns(p); })) continue;
+          auto *bb = BasicBlock::Create(ctx_, "variant", fn);
+          sw->addCase(b.getInt32(v), bb);
+          b.SetInsertPoint(bb);
+          StructType *pty = types_.variant(t, v);
+          Value *dp = b.CreateStructGEP(ty, dst, 1);
+          Value *sp = src ? b.CreateStructGEP(ty, src, 1) : nullptr;
+          for (unsigned k = 0; k < payload.size(); k++) {
+            if (!owns(payload[k])) continue;
+            each(b.CreateStructGEP(pty, dp, k), sp ? b.CreateStructGEP(pty, sp, k) : nullptr, payload[k]);
+          }
+          b.CreateBr(done);
+        }
+        b.SetInsertPoint(done);
+        return;
+      }
+      default: return;
+    }
+  }
+
+  void drop_body(IRBuilder<> &b, Function *fn, const jir::Type &t, Value *v) {
+    (void)fn;
+    if (t.kind != jir::Type::List) {
+      parts(b, t, v, nullptr, [&](Value *d, Value *, const jir::Type &pt) { b.CreateCall(drop(pt), {d}); });
+      return;
+    }
+    const jir::Type &elem = *t.pointee;
+    Value *data = b.CreateLoad(ptr(), b.CreateStructGEP(header(), v, 0));
+    if (owns(elem)) {
+      Value *len = b.CreateLoad(b.getInt64Ty(), b.CreateStructGEP(header(), v, 1));
+      Type *ety = types_.lower(elem);
+      loop(b, len, [&](Value *i) { b.CreateCall(drop(elem), {b.CreateGEP(ety, data, {i})}); });
+    }
+    b.CreateCall(free_fn(), {data});
+  }
+
+  void clone_body(IRBuilder<> &b, Function *fn, const jir::Type &t, Value *dst, Value *src) {
+    (void)fn;
+    const DataLayout &dl = m_.getDataLayout();
+    if (t.kind != jir::Type::List) {
+      // Copy the bytes, then replace each owning part with a copy of its own.
+      Type *ty = types_.lower(t);
+      Align a = dl.getABITypeAlign(ty);
+      b.CreateMemMove(dst, a, src, a, dl.getTypeAllocSize(ty));
+      parts(b, t, dst, src, [&](Value *d, Value *s, const jir::Type &pt) { b.CreateCall(clone(pt), {d, s}); });
+      return;
+    }
+    // Read the source header before writing `dst`, which may be the same place.
+    const jir::Type &elem = *t.pointee;
+    Value *data = b.CreateLoad(ptr(), b.CreateStructGEP(header(), src, 0));
+    Value *len = b.CreateLoad(b.getInt64Ty(), b.CreateStructGEP(header(), src, 1));
+    auto chk = [&](Value *ok) { check(b, ok); };
+    Value *bytes = byte_count(b, elem, len, chk);
+    Value *copy = b.CreateCall(malloc_fn(), {bytes});
+    check(b, b.CreateOr(b.CreateIsNotNull(copy), b.CreateICmpEQ(bytes, b.getInt64(0))));
+    Type *ety = types_.lower(elem);
+    if (owns(elem)) {
+      loop(b, len, [&](Value *i) {
+        b.CreateCall(clone(elem), {b.CreateGEP(ety, copy, {i}), b.CreateGEP(ety, data, {i})});
+      });
+    } else {
+      Align a = dl.getABITypeAlign(ety);
+      b.CreateMemCpy(copy, a, data, a, bytes);
+    }
+    b.CreateStore(copy, b.CreateStructGEP(header(), dst, 0));
+    b.CreateStore(len, b.CreateStructGEP(header(), dst, 1));
+    b.CreateStore(len, b.CreateStructGEP(header(), dst, 2));
+  }
+};
+
 // `print` in native modules (defined below).
 FunctionCallee libc_fn(Module &m, const char *name);
 Function *print_float_fn(Module &m);
@@ -246,8 +501,8 @@ class FnGen {
   FnGen(const jir::Function &f, Function *llfn, Module &mod, const Types &types,
         const std::unordered_map<std::string, Function *> &fns,
         const std::unordered_map<std::string, CFunc> &externs, const Triple &triple, bool exit_on_return,
-        bool native)
-      : f_(f), fn_(llfn), mod_(mod), types_(types), fns_(fns), externs_(externs), triple_(triple),
+        bool native, Glue &glue)
+      : f_(f), fn_(llfn), mod_(mod), types_(types), glue_(glue), fns_(fns), externs_(externs), triple_(triple),
         exit_on_return_(exit_on_return), native_(native), ctx_(mod.getContext()), b_(ctx_), i64_(Type::getInt64Ty(ctx_)) {}
 
   void run() {
@@ -258,6 +513,11 @@ class FnGen {
     b_.SetInsertPoint(entry);
     for (size_t r = 0; r < f_.regs.size(); r++)
       slots_.push_back(b_.CreateAlloca(types_.lower(f_.regs[r]), nullptr, "r" + std::to_string(r)));
+    // A register that owns memory starts out owning none, so freeing it
+    // before anything was written to it frees nothing.
+    for (size_t r = f_.params.size(); r < f_.regs.size(); r++)
+      if (glue_.owns(f_.regs[r]))
+        b_.CreateMemSet(slots_[r], b_.getInt8(0), glue_.size(f_.regs[r]), slots_[r]->getAlign());
     unsigned first = 0;
     if (Types::is_agg(f_.ret)) sret_ = fn_->getArg(first++);
     for (size_t p = 0; p < f_.params.size(); p++) {
@@ -281,6 +541,7 @@ class FnGen {
   Function *fn_;
   Module &mod_;
   const Types &types_;
+  Glue &glue_;
   const std::unordered_map<std::string, Function *> &fns_;
   const std::unordered_map<std::string, CFunc> &externs_;
   const Triple &triple_;
@@ -482,6 +743,12 @@ class FnGen {
       args.push_back(Types::is_agg(ft.params[i]) ? field : b.CreateLoad(types_.lower(ft.params[i]), field));
     }
     b.CreateCall(types_.signature(ft.params, ret), callee, args);
+    // The thread owns its arguments (they were moved into `env`); the callee
+    // only borrowed them.
+    if (Types::is_agg(ret) && glue_.owns(ret)) b.CreateCall(glue_.drop(ret), {args[0]});
+    for (size_t i = 0; i < ft.params.size(); i++)
+      if (glue_.owns(ft.params[i]))
+        b.CreateCall(glue_.drop(ft.params[i]), {b.CreateStructGEP(env_ty, env, unsigned(i + 1))});
     b.CreateCall(mod_.getOrInsertFunction("free", FunctionType::get(Type::getVoidTy(ctx_), {ptr}, false)), {env});
     b.CreateRet(ConstantPointerNull::get(PointerType::get(ctx_, 0)));
     return fn;
@@ -565,9 +832,11 @@ class FnGen {
     Value *addr = base;
     for (const auto &step : path) {
       if (step.elem) {
-        if (cur->kind != jir::Type::Array) fail(f_.name, cur->str() + " is not an array");
+        if (cur->kind != jir::Type::Array && cur->kind != jir::Type::List)
+          fail(f_.name, cur->str() + " is not an array or list");
         if (type(step.value) != jir::Type::integer(64, true)) fail(f_.name, "path index must be i64");
-        addr = elem_addr(*cur, addr, load(step.value));
+        addr = cur->kind == jir::Type::List ? list_elem_addr(*cur, addr, load(step.value))
+                                             : elem_addr(*cur, addr, load(step.value));
         cur = cur->pointee.get();
       } else {
         const jir::Type &field = types_.field(*cur, step.value);
@@ -576,6 +845,66 @@ class FnGen {
       }
     }
     return {addr, cur};
+  }
+
+  // Address of element `index` of the list whose header is at `header`, after
+  // a bounds check against its length.
+  Value *list_elem_addr(const jir::Type &list, Value *header, Value *index) {
+    StructType *h = glue_.header();
+    Value *len = b_.CreateLoad(i64_, b_.CreateStructGEP(h, header, 1));
+    check(b_.CreateICmpULT(index, len), "in_bounds");
+    Value *data = b_.CreateLoad(PointerType::get(ctx_, 0), b_.CreateStructGEP(h, header, 0));
+    return b_.CreateGEP(types_.lower(*list.pointee), data, {index});
+  }
+
+  // Reads the part at `addr` into `dst`. A part that owns memory is read as a
+  // view (the header only); the ownership pass puts a `clone` after the read
+  // where the part must become a value of its own.
+  void read_part(uint32_t dst, Value *addr) { read_mem(dst, addr); }
+
+  // Replaces the part at `addr` by the value of `src`, which moves there,
+  // freeing what the old part owned.
+  void write_part(Value *addr, uint32_t src) {
+    if (glue_.owns(type(src))) b_.CreateCall(glue_.drop(type(src)), {addr});
+    write_mem(addr, src);
+  }
+
+  // Makes the list at `header` a new list of `n` elements of `elem`, not yet
+  // written; gives the address of the first.
+  Value *new_list(const jir::Type &elem, Value *n, Value *header) {
+    auto chk = [&](Value *ok) { check(ok, "list.size"); };
+    Value *bytes = glue_.byte_count(b_, elem, n, chk);
+    Value *data = b_.CreateCall(glue_.malloc_fn(), {bytes});
+    check(b_.CreateOr(b_.CreateIsNotNull(data), b_.CreateICmpEQ(bytes, b_.getInt64(0))), "list.alloc");
+    StructType *h = glue_.header();
+    b_.CreateStore(data, b_.CreateStructGEP(h, header, 0));
+    b_.CreateStore(n, b_.CreateStructGEP(h, header, 1));
+    b_.CreateStore(n, b_.CreateStructGEP(h, header, 2));
+    return data;
+  }
+
+  // Copies `n` elements of `elem` from `src` to `dst` (fresh memory): deep
+  // copies if they own memory.
+  void copy_elems(const jir::Type &elem, Value *dst, Value *src, Value *n) {
+    Type *ety = types_.lower(elem);
+    if (glue_.owns(elem)) {
+      Glue::loop(b_, n, [&](Value *i) {
+        b_.CreateCall(glue_.clone(elem), {b_.CreateGEP(ety, dst, {i}), b_.CreateGEP(ety, src, {i})});
+      });
+    } else {
+      Align a = mod_.getDataLayout().getABITypeAlign(ety);
+      b_.CreateMemCpy(dst, a, src, a, b_.CreateMul(n, b_.getInt64(glue_.size(elem))));
+    }
+  }
+
+  const jir::Type &list_of(uint32_t r) {
+    if (type(r).kind != jir::Type::List) fail(f_.name, "%" + std::to_string(r) + " is not a list");
+    return type(r);
+  }
+
+  Value *list_field(Value *header, unsigned k) {
+    Type *ty = k == 0 ? static_cast<Type *>(PointerType::get(ctx_, 0)) : i64_;
+    return b_.CreateLoad(ty, b_.CreateStructGEP(glue_.header(), header, k));
   }
 
   // Address of element `index` of the array at `base`, after a bounds check.
@@ -595,7 +924,11 @@ class FnGen {
     b_.SetInsertPoint(loop);
     PHINode *i = b_.CreatePHI(i64_, 2);
     i->addIncoming(b_.getInt64(0), pre);
-    write_mem(b_.CreateGEP(arr_ty, slot(dst), {b_.getInt64(0), i}), value);
+    Value *at = b_.CreateGEP(arr_ty, slot(dst), {b_.getInt64(0), i});
+    if (glue_.owns(type(value)))
+      b_.CreateCall(glue_.clone(type(value)), {at, slot(value)});
+    else
+      write_mem(at, value);
     Value *next = b_.CreateAdd(i, b_.getInt64(1));
     i->addIncoming(next, loop);
     b_.CreateCondBr(b_.CreateICmpULT(next, b_.getInt64(arr.count)), loop, done);
@@ -743,7 +1076,14 @@ class FnGen {
       case Op::Neg: store(inst.dst, is_float(arg_reg(0)) ? b_.CreateFNeg(arg(0)) : b_.CreateNeg(arg(0))); return;
       case Op::Not: store(inst.dst, b_.CreateNot(arg(0))); return;
       case Op::Add:
-        if (type(arg_reg(0)).kind == jir::Type::Ptr)
+        if (type(arg_reg(0)).kind == jir::Type::List) {
+          const jir::Type &elem = *list_of(inst.dst).pointee;
+          Value *a = slot(arg_reg(0)), *b = slot(arg_reg(1));
+          Value *la = list_field(a, 1), *lb = list_field(b, 1);
+          Value *data = new_list(elem, b_.CreateAdd(la, lb), slot(inst.dst));
+          copy_elems(elem, data, list_field(a, 0), la);
+          copy_elems(elem, b_.CreateGEP(types_.lower(elem), data, {la}), list_field(b, 0), lb);
+        } else if (type(arg_reg(0)).kind == jir::Type::Ptr)
           store(inst.dst, b_.CreateGEP(pointee(arg_reg(0)), arg(0), {arg(1)}));
         else
           store(inst.dst, b_.CreateAdd(arg(0), arg(1)));
@@ -872,20 +1212,20 @@ class FnGen {
         if (inst.imm2 < 0 || uint64_t(inst.imm2) >= payload_ty->getNumElements())
           fail(f_.name, "variant " + std::to_string(inst.imm) + " has no value " + std::to_string(inst.imm2));
         Value *payload = b_.CreateStructGEP(types_.lower(t), slot(arg_reg(0)), 1);
-        read_mem(inst.dst, b_.CreateStructGEP(payload_ty, payload, unsigned(inst.imm2)));
+        read_part(inst.dst, b_.CreateStructGEP(payload_ty, payload, unsigned(inst.imm2)));
         return;
       }
       case Op::Field: {
         const jir::Type &st = type(arg_reg(0));
         types_.field(st, inst.imm);  // bounds check
-        read_mem(inst.dst, b_.CreateStructGEP(types_.lower(st), slot(arg_reg(0)), unsigned(inst.imm)));
+        read_part(inst.dst, b_.CreateStructGEP(types_.lower(st), slot(arg_reg(0)), unsigned(inst.imm)));
         return;
       }
       case Op::SetField: {
         const jir::Type &st = type(arg_reg(0));
         types_.field(st, inst.imm);
         copy_reg(inst.dst, arg_reg(0));
-        write_mem(b_.CreateStructGEP(types_.lower(st), slot(inst.dst), unsigned(inst.imm)), arg_reg(1));
+        write_part(b_.CreateStructGEP(types_.lower(st), slot(inst.dst), unsigned(inst.imm)), arg_reg(1));
         return;
       }
       case Op::Load:
@@ -947,6 +1287,13 @@ class FnGen {
         return;
       }
       case Op::Array: {
+        if (type(inst.dst).kind == jir::Type::List) {
+          const jir::Type &elem = *type(inst.dst).pointee;
+          Value *data = new_list(elem, b_.getInt64(inst.args.size()), slot(inst.dst));
+          for (unsigned i = 0; i < inst.args.size(); i++)
+            write_mem(b_.CreateConstGEP1_64(types_.lower(elem), data, i), arg_reg(i));
+          return;
+        }
         const jir::Type &arr = array_of(inst.dst, false);
         if (arr.count != inst.args.size()) fail(f_.name, "wrong number of array elements");
         Type *ty = types_.lower(arr);
@@ -957,22 +1304,29 @@ class FnGen {
       case Op::Splat: splat(inst.dst, arg_reg(0)); return;
       case Op::Elem: {
         // Registers live in allocas, so index the alloca instead of the loaded value.
+        if (type(arg_reg(0)).kind == jir::Type::List) {
+          read_part(inst.dst, list_elem_addr(type(arg_reg(0)), slot(arg_reg(0)), arg(1)));
+          return;
+        }
         const jir::Type &arr = array_of(arg_reg(0), false);
-        read_mem(inst.dst, elem_addr(arr, slot(arg_reg(0)), arg(1)));
+        read_part(inst.dst, elem_addr(arr, slot(arg_reg(0)), arg(1)));
         return;
       }
       case Op::SetElem: {
-        const jir::Type &arr = array_of(arg_reg(0), false);
+        const jir::Type &arr = type(arg_reg(0));
+        if (arr.kind != jir::Type::List) array_of(arg_reg(0), false);
         if (type(inst.dst) != arr) fail(f_.name, "`setelem` result has the wrong type");
         Value *index = arg(1);
         copy_reg(inst.dst, arg_reg(0));
-        write_mem(elem_addr(arr, slot(inst.dst), index), arg_reg(2));
+        Value *at = arr.kind == jir::Type::List ? list_elem_addr(arr, slot(inst.dst), index)
+                                                 : elem_addr(arr, slot(inst.dst), index);
+        write_part(at, arg_reg(2));
         return;
       }
       case Op::GetPath: {
         auto [addr, t] = path_addr(type(arg_reg(0)), slot(arg_reg(0)), inst.path);
         if (*t != type(inst.dst)) fail(f_.name, "`getpath` result has the wrong type");
-        read_mem(inst.dst, addr);
+        read_part(inst.dst, addr);
         return;
       }
       case Op::SetPath: {
@@ -980,7 +1334,7 @@ class FnGen {
         copy_reg(inst.dst, arg_reg(0));
         auto [addr, t] = path_addr(type(inst.dst), slot(inst.dst), inst.path);
         if (*t != type(arg_reg(1))) fail(f_.name, "`setpath` value has the wrong type");
-        write_mem(addr, arg_reg(1));
+        write_part(addr, arg_reg(1));
         return;
       }
       case Op::ElemPtr: {
@@ -1030,6 +1384,80 @@ class FnGen {
         return;
       }
       case Op::Print: print(arg_reg(0)); return;
+      case Op::Len: list_of(arg_reg(0)); store(inst.dst, list_field(slot(arg_reg(0)), 1)); return;
+      case Op::Clone:
+        if (type(inst.dst) != type(arg_reg(0))) fail(f_.name, "`clone` result has the wrong type");
+        if (glue_.owns(type(inst.dst)))
+          b_.CreateCall(glue_.clone(type(inst.dst)), {slot(inst.dst), slot(arg_reg(0))});
+        else
+          copy_reg(inst.dst, arg_reg(0));
+        return;
+      case Op::Drop:
+        if (glue_.owns(type(arg_reg(0)))) b_.CreateCall(glue_.drop(type(arg_reg(0))), {slot(arg_reg(0))});
+        return;
+      case Op::Repeat: {
+        const jir::Type &elem = *list_of(inst.dst).pointee;
+        Value *n = arg(1);
+        check(b_.CreateICmpSGE(n, b_.getInt64(0)), "repeat.count");
+        Value *data = new_list(elem, n, slot(inst.dst));
+        Type *ety = types_.lower(elem);
+        uint32_t v = arg_reg(0);
+        Glue::loop(b_, n, [&](Value *i) {
+          Value *at = b_.CreateGEP(ety, data, {i});
+          if (glue_.owns(elem))
+            b_.CreateCall(glue_.clone(elem), {at, slot(v)});
+          else
+            write_mem(at, v);
+        });
+        return;
+      }
+      case Op::Slice: {
+        const jir::Type &elem = *list_of(arg_reg(0)).pointee;
+        Value *src = slot(arg_reg(0));
+        Value *lo = arg(1), *hi = arg(2);
+        // Unsigned: a negative `lo` is above any `hi` that passes the second test.
+        check(b_.CreateAnd(b_.CreateICmpULE(lo, hi), b_.CreateICmpULE(hi, list_field(src, 1))), "slice.bounds");
+        Value *n = b_.CreateSub(hi, lo);
+        Value *data = new_list(elem, n, slot(inst.dst));
+        copy_elems(elem, data, b_.CreateGEP(types_.lower(elem), list_field(src, 0), {lo}), n);
+        return;
+      }
+      case Op::Push: {
+        auto [header, t] = path_addr(type(arg_reg(0)), slot(arg_reg(0)), inst.path);
+        if (t->kind != jir::Type::List) fail(f_.name, "`push` needs a list");
+        const jir::Type &elem = *t->pointee;
+        if (elem != type(arg_reg(1))) fail(f_.name, "pushed value has the wrong type");
+        StructType *h = glue_.header();
+        Value *len = list_field(header, 1), *cap = list_field(header, 2);
+        auto *grow = BasicBlock::Create(ctx_, "push.grow", fn_);
+        auto *put = BasicBlock::Create(ctx_, "push.put", fn_);
+        b_.CreateCondBr(b_.CreateICmpEQ(len, cap), grow, put);
+        b_.SetInsertPoint(grow);
+        Value *more = b_.CreateSelect(b_.CreateICmpEQ(cap, b_.getInt64(0)), b_.getInt64(4), b_.CreateShl(cap, 1));
+        auto chk = [&](Value *ok) { check(ok, "push.size"); };
+        Value *bytes = glue_.byte_count(b_, elem, more, chk);
+        Value *data = b_.CreateCall(glue_.realloc_fn(), {list_field(header, 0), bytes});
+        check(b_.CreateIsNotNull(data), "push.alloc");
+        b_.CreateStore(data, b_.CreateStructGEP(h, header, 0));
+        b_.CreateStore(more, b_.CreateStructGEP(h, header, 2));
+        b_.CreateBr(put);
+        b_.SetInsertPoint(put);
+        write_mem(b_.CreateGEP(types_.lower(elem), list_field(header, 0), {len}), arg_reg(1));
+        b_.CreateStore(b_.CreateAdd(len, b_.getInt64(1)), b_.CreateStructGEP(h, header, 1));
+        return;
+      }
+      case Op::Pop: {
+        auto [header, t] = path_addr(type(arg_reg(0)), slot(arg_reg(0)), inst.path);
+        if (t->kind != jir::Type::List) fail(f_.name, "`pop` needs a list");
+        if (*t->pointee != type(inst.dst)) fail(f_.name, "`pop` result has the wrong type");
+        Value *len = list_field(header, 1);
+        check(b_.CreateICmpNE(len, b_.getInt64(0)), "pop.nonempty");
+        Value *last = b_.CreateSub(len, b_.getInt64(1));
+        // The element moves out: nothing is copied or freed.
+        read_mem(inst.dst, b_.CreateGEP(types_.lower(*t->pointee), list_field(header, 0), {last}));
+        b_.CreateStore(last, b_.CreateStructGEP(glue_.header(), header, 1));
+        return;
+      }
       // Goes to the shared trap block; what follows in the JIR block is dead.
       case Op::Trap: {
         check(ConstantInt::getFalse(ctx_), "after.trap");
@@ -1602,6 +2030,7 @@ std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, co
     mod->setPIELevel(PIELevel::Large);
   }
   Types types(ctx, m, dl);
+  Glue glue(*mod, types, m);
 
   // Declare everything first so calls can refer to any function.
   std::unordered_map<std::string, Function *> fns;
@@ -1637,7 +2066,7 @@ std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, co
   if (!entry->params.empty() && !native) throw CodegenError("@_start must take no parameters");
 
   for (const auto &f : m.funcs)
-    FnGen(f, fns[f.name], *mod, types, fns, externs, triple, !native && f.name == "_start", native).run();
+    FnGen(f, fns[f.name], *mod, types, fns, externs, triple, !native && f.name == "_start", native, glue).run();
   for (const auto &f : m.funcs)
     if (!f.export_name.empty()) define_export(*mod, types, triple, f, fns[f.name]);
   if (native) {

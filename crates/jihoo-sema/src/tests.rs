@@ -1481,7 +1481,7 @@ fn list_operations() {
     assert!(err("fn main() { let a = [1, 2]\n push(a, 3) }").contains("`push` needs a list, found [i64; 2]"));
     assert!(err("fn f() -> [i64] { return [] }\nfn main() { push(f(), 1) }").contains("cannot `push` on a temporary value"));
     assert!(err("fn main() { let xs: [i64] = [1]\n let r = ref xs\n print(pop(*r)) }").contains("cannot `pop` on a value behind a `ref`"));
-    assert!(err(&fs("fn f(xs: [i64]) {}")).contains("lists are garbage collected and only available in hosted mode"));
+    assert!(err(&fs("fn f(xs: [i64]) {}")).contains("lists need an allocator and are not available in freestanding mode"));
     assert!(err("fn main() { let xs: [i64] = [1]\n print(xs < xs) }").contains("cannot apply `<`"));
     assert!(err("fn main() { let xs: [fn()] = []\n print(xs == xs) }").contains("function values"));
 }
@@ -1591,4 +1591,36 @@ fn path_references() {
     assert!(e("let p = path(i64)").contains("a path starts at a struct, not i64"));
     assert!(e("let b = B { a: A { xs: [], r: ref 1 } }\n print(b[3])").contains("a struct is indexed with a path"));
     assert!(err("struct A { x: i64 }\nfn f(p: path(A).x[_]) {}\nfn main() {}").contains("a path cannot take an element of i64"));
+}
+
+#[test]
+fn native_lists_are_owned() {
+    let ir = |src: &str| check(&format!("#![native]\n{src}")).unwrap().to_string();
+    let body = |m: &str, f: &str| -> String {
+        let start = m.find(&format!("fn @{f}(")).unwrap();
+        m[start..].split("\n}\n").next().unwrap().to_string()
+    };
+    // A copy of a list still used afterwards is a clone; the last use moves;
+    // every value is freed after its last use.
+    let m = ir("fn main() -> i64 {\n let a: [i64] = [1]\n let b = a\n push(b, 2)\n let c = b\n return len(a) + len(c) }");
+    let main = body(&m, "main");
+    assert_eq!(main.matches(" = clone ").count(), 1, "{main}");
+    assert_eq!(main.matches("drop ").count(), 2, "{main}");
+    // Parameters are borrowed: reading one copies nothing, changing one copies it once.
+    let m = ir("fn n(xs: [i64]) -> i64 { return len(xs) }\nfn g(xs: [i64]) -> [i64] { push(xs, 1)\n return xs }\n\
+                fn main() -> i64 { let a: [i64] = [1]\n return n(g(a)) }");
+    assert!(!body(&m, "n").contains("clone") && !body(&m, "n").contains("drop"), "{m}");
+    assert!(body(&m, "g").contains("%0 = clone %0"), "{m}");
+    // Reading a part is a view: `len(s.items)` copies nothing.
+    let m = ir("struct S { items: [i64] }\nfn main() -> i64 { let s = S { items: [1, 2] }\n return len(s.items) }");
+    assert!(!body(&m, "main").contains("clone"), "{m}");
+    // ...unless the value it was read from changes while the part is used.
+    let m = ir("struct S { items: [i64] }\nfn main() -> i64 { let s = S { items: [1] }\n let x = s.items\n push(s.items, 2)\n return len(x) }");
+    assert!(body(&m, "main").contains("clone"), "{m}");
+    // Pointers never reach memory a value owns.
+    let e = |src: &str| err(&format!("#![native]\n{src}"));
+    assert!(e("fn main() { let a: [i64] = [1]\n let p = &a }").contains("cannot take the address of [i64]"));
+    assert!(e("struct S { xs: [i64] }\nfn f(p: *S) -> S { return *p }\nfn main() {}").contains("cannot be read or written through a pointer"));
+    // Fields that do not own memory can still be reached through a pointer.
+    ir("struct S { n: i64, xs: [i64] }\nfn f(p: *i64) -> i64 { return *p }\nfn main() { let s = S { n: 1, xs: [] }\n print(s.n) }");
 }

@@ -92,7 +92,7 @@ impl Program {
                 Op::Const { dst: *dst, value }
             }
             Inst::FConst { dst, value } => Op::Const { dst: *dst, value: Value::float(*value) },
-            Inst::Copy { dst, src } => Op::Copy { dst: *dst, src: *src },
+            Inst::Copy { dst, src } | Inst::Clone { dst, src } => Op::Copy { dst: *dst, src: *src },
             Inst::Binary { dst, op, lhs, rhs } => match f.reg_type(*lhs) {
                 &Type::Int(ty) => Op::Int { dst: *dst, op: *op, ty, lhs: *lhs, rhs: *rhs },
                 _ => Op::Inst,

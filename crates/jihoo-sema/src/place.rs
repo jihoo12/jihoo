@@ -31,6 +31,9 @@ const BEHIND_REF: &str = "a value behind a `ref` (refs are immutable; build a ne
 
 const IN_STR: &str = "a byte of a str (strings are immutable; build a new one instead)";
 
+const OWNED_IN_MEMORY: &str = "a list, or a value holding one, cannot be read or written through a pointer \
+     (it owns its memory, which only its variable may free; use a path to refer to a part of it)";
+
 const CAPTURED: &str =
     "a captured variable (a closure keeps its own copy, taken when it was made; pass the value as an argument or return it instead)";
 
@@ -108,6 +111,16 @@ impl FnCx<'_> {
     }
 
     pub(crate) fn place(&mut self, e: &Expr) -> Result<Place, Error> {
+        let place = self.place_of(e)?;
+        if let Place::Mem { ty, .. } = &place {
+            if self.profile() == jihoo_ir::Profile::Native && self.env.owns(ty) {
+                return Err(Error::new(e.pos, format!("{OWNED_IN_MEMORY}, found {ty}")));
+            }
+        }
+        Ok(place)
+    }
+
+    fn place_of(&mut self, e: &Expr) -> Result<Place, Error> {
         match &e.kind {
             ExprKind::Var(name) if self.local(name).is_some() => {
                 let root = self.lookup(e.pos, name)?;
@@ -381,6 +394,13 @@ impl FnCx<'_> {
     }
 
     pub(crate) fn addr_of(&mut self, pos: Pos, place: Place) -> Result<Reg, Error> {
+        if self.env.owns(place.ty()) {
+            let msg = format!(
+                "cannot take the address of {}: it owns its memory, which only its variable may free; use a path",
+                place.ty()
+            );
+            return Err(Error::new(pos, msg));
+        }
         match place {
             Place::Mem { ptr, .. } => Ok(ptr),
             Place::Cell { .. } => Err(Error::new(pos, "cannot take the address of what a cell holds")),

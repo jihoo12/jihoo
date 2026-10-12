@@ -1,0 +1,541 @@
+//! The ownership pass: who frees a native list, and when.
+//!
+//! jihoo values are values: assigning or passing one copies it, and no two
+//! variables ever share a list. On the VM the GC makes that cheap (copies share
+//! until one is changed). Native code has no GC, so this pass decides, from
+//! liveness alone, what each copy of a value that owns memory (a list, or an
+//! aggregate holding one; see [`owns`]) does:
+//!
+//! - A *consuming* use (`copy`, building a struct or array from it, storing it
+//!   into a part of another value, `push`, `ret`, `spawn`) **moves** the value
+//!   when the register is not used again, and otherwise gets a `clone` (a deep
+//!   copy) inserted before it.
+//! - A *borrowing* use (reading a part, `len`, a call argument) leaves the value
+//!   where it is.
+//! - Reading an owning part out of a value (`field`, `elem`, `getpath`,
+//!   `payload`) gives a *view*: the backend copies the header only, so the view
+//!   shares the elements with the value it was read from, its *root*. A view is
+//!   kept as one when nothing can tell: the view itself is never changed, and
+//!   its root is not changed while the view is still used (liveness counts a
+//!   use of a view as a use of its root, so the root is not freed or moved
+//!   away before the view's last use either). Otherwise a `clone` right after
+//!   the read makes it a value of its own. So `len(g.nodes)` copies nothing.
+//! - Where a register's value dies without being moved (after its last use, on
+//!   a branch that does not use it again, or right after it is made if it is
+//!   never used) a `drop` frees it.
+//!
+//! Parameters are borrowed: the caller keeps its argument and frees it. A
+//! function that changes, consumes or reassigns a parameter it also reads
+//! first clones it on entry, as the VM copies a list the first time a
+//! function changes it. A thread started with `spawn` owns its arguments.
+//!
+//! No borrow checker is needed because nothing can refer to a value's memory:
+//! references into values are paths (indices), and pointers to owning values
+//! are refused by the frontend. Liveness is computed on registers, which
+//! already have value semantics, so a move is never visible: it only happens
+//! where nothing could tell the difference.
+
+use std::collections::{HashMap, HashSet};
+
+use crate::{Block, BlockId, Function, Inst, Module, PathStep, Reg, Terminator, Type};
+
+/// Inserts `clone` and `drop` into every function of a native module.
+pub fn insert(m: &mut Module) {
+    let mut owning = Owning::new(m);
+    for f in &mut m.funcs {
+        function(f, &mut owning);
+    }
+}
+
+/// Whether values of a type own memory: lists, and structs, arrays and enums
+/// that hold one by value.
+pub struct Owning {
+    members: HashMap<String, Vec<Type>>,
+    memo: HashMap<String, bool>,
+}
+
+impl Owning {
+    pub fn new(m: &Module) -> Owning {
+        let mut members = HashMap::new();
+        for s in &m.structs {
+            members.insert(s.name.clone(), s.fields.iter().map(|(_, t)| t.clone()).collect());
+        }
+        for e in &m.enums {
+            members.insert(e.name.clone(), e.variants.iter().flat_map(|(_, ts)| ts.clone()).collect());
+        }
+        Owning { members, memo: HashMap::new() }
+    }
+
+    pub fn owns(&mut self, t: &Type) -> bool {
+        match t {
+            Type::List(_) => true,
+            Type::Array(elem, _) => self.owns(elem),
+            Type::Struct(name) | Type::Enum(name) => {
+                if let Some(&r) = self.memo.get(name) {
+                    return r;
+                }
+                // A type holds itself only through a list, which owns anyway.
+                self.memo.insert(name.clone(), false);
+                let members = self.members.get(name).cloned().unwrap_or_default();
+                let r = members.iter().any(|m| self.owns(m));
+                self.memo.insert(name.clone(), r);
+                r
+            }
+            _ => false,
+        }
+    }
+}
+
+fn path_regs(path: &[PathStep]) -> impl Iterator<Item = Reg> + '_ {
+    path.iter().filter_map(|s| match s {
+        PathStep::Elem(r) => Some(*r),
+        PathStep::Field(_) => None,
+    })
+}
+
+/// The operands an instruction consumes (takes ownership of), as places that
+/// can be replaced by a clone.
+fn consumed(inst: &mut Inst) -> Vec<&mut Reg> {
+    use Inst::*;
+    match inst {
+        Copy { dst, src } if dst == src => vec![],
+        Copy { src, .. } => vec![src],
+        Struct { fields, .. } | Variant { fields, .. } | Array { items: fields, .. } => fields.iter_mut().collect(),
+        SetField { dst, src, value, .. } | SetElem { dst, src, value, .. } | SetPath { dst, src, value, .. } => {
+            // A copy of `src` with a part replaced: in place when it is the same register.
+            if dst == src {
+                vec![value]
+            } else {
+                vec![src, value]
+            }
+        }
+        Store { value, .. } | Push { value, .. } | Send { value, .. } | NewCell { value, .. } | CellSet { value, .. } => {
+            vec![value]
+        }
+        Ref { src, .. } => vec![src],
+        Spawn { args, .. } | Closure { captures: args, .. } => args.iter_mut().collect(),
+        _ => vec![],
+    }
+}
+
+/// The operands an instruction reads without taking them.
+fn borrowed(inst: &Inst) -> Vec<Reg> {
+    use Inst::*;
+    match inst {
+        Const { .. } | FConst { .. } | Unit { .. } | Str { .. } | FuncRef { .. } | ReadLine { .. } | Trap | Fence => {
+            vec![]
+        }
+        Copy { .. } | Struct { .. } | Variant { .. } | Array { .. } | Ref { .. } | Closure { .. } => vec![],
+        Clone { src, .. }
+        | Drop { src }
+        | Unary { src, .. }
+        | Cast { src, .. }
+        | Bitcast { src, .. }
+        | Field { src, .. }
+        | Tag { src, .. }
+        | Payload { src, .. }
+        | Deref { src, .. }
+        | NewChan { cap: src, .. }
+        | Recv { chan: src, .. }
+        | ToStr { src, .. }
+        | Len { src, .. }
+        | FromBytes { src, .. }
+        | Addr { src, .. }
+        | Unique { prefix: src, .. }
+        | Stringify { code: src, .. }
+        | Load { ptr: src, .. }
+        | AtomicLoad { ptr: src, .. }
+        | FieldPtr { ptr: src, .. }
+        | Splat { value: src, .. }
+        | Print { src } => vec![*src],
+        Binary { lhs, rhs, .. } => vec![*lhs, *rhs],
+        Elem { src, index, .. } | StrByte { src, index, .. } | ElemPtr { ptr: src, index, .. } => vec![*src, *index],
+        Repeat { value, count, .. } => vec![*value, *count],
+        SetField { dst, src, .. } => [*src].into_iter().filter(|s| s == dst).collect(),
+        SetElem { dst, src, index, .. } => [*src].into_iter().filter(|s| s == dst).chain([*index]).collect(),
+        SetPath { dst, src, path, .. } => [*src].into_iter().filter(|s| s == dst).chain(path_regs(path)).collect(),
+        AtomicRmw { ptr, value, .. } | AtomicStore { ptr, value } => vec![*ptr, *value],
+        AtomicCas { ptr, expected, new, .. } => vec![*ptr, *expected, *new],
+        Slice { src, lo, hi, .. } => vec![*src, *lo, *hi],
+        Store { ptr, .. } | Send { chan: ptr, .. } => vec![*ptr],
+        Spawn { callee, .. } => vec![*callee],
+        GetPath { src, path, .. } | CellGet { cell: src, path, .. } => [*src].into_iter().chain(path_regs(path)).collect(),
+        CellSet { cell, path, .. } => [*cell].into_iter().chain(path_regs(path)).collect(),
+        Push { root, path, .. } | Pop { root, path, .. } => [*root].into_iter().chain(path_regs(path)).collect(),
+        NewCell { .. } => vec![],
+        Select { cases, .. } => cases
+            .iter()
+            .flat_map(|c| match c {
+                crate::SelectCase::Recv { chan, .. } => vec![*chan],
+                crate::SelectCase::Send { chan, value } => vec![*chan, *value],
+            })
+            .collect(),
+        Call { args, .. } | Syscall { args, .. } | Asm { args, .. } | Quote { holes: args, .. } => args.clone(),
+        CallIndirect { callee, args, .. } => [*callee].into_iter().chain(args.iter().copied()).collect(),
+    }
+}
+
+/// The registers an instruction writes. An instruction that changes a value in
+/// place (`push`, `setpath %r, %r`) both borrows and writes it.
+fn defined(inst: &Inst) -> Vec<Reg> {
+    use Inst::*;
+    match inst {
+        Store { .. } | AtomicStore { .. } | Send { .. } | Spawn { .. } | Print { .. } | Trap | Fence | Drop { .. } => {
+            vec![]
+        }
+        CellSet { .. } => vec![],
+        Copy { dst, src } if dst == src => vec![],
+        Push { root, .. } => vec![*root],
+        Pop { dst, root, .. } => vec![*dst, *root],
+        Select { dst, cases, .. } => [*dst]
+            .into_iter()
+            .chain(cases.iter().filter_map(|c| match c {
+                crate::SelectCase::Recv { dst, .. } => Some(*dst),
+                crate::SelectCase::Send { .. } => None,
+            }))
+            .collect(),
+        _ => {
+            let mut i = inst.clone();
+            vec![*i.regs_mut().remove(0)]
+        }
+    }
+}
+
+/// Whether the instruction changes `r` in place, keeping what it owns.
+fn changes(inst: &Inst, r: Reg) -> bool {
+    use Inst::*;
+    match inst {
+        Push { root, .. } | Pop { root, .. } => *root == r,
+        SetField { dst, src, .. } | SetElem { dst, src, .. } | SetPath { dst, src, .. } => *dst == r && *src == r,
+        _ => false,
+    }
+}
+
+fn term_uses(t: &Terminator) -> Vec<Reg> {
+    match t {
+        Terminator::Branch { cond, .. } => vec![*cond],
+        Terminator::Ret(r) => vec![*r],
+        Terminator::Jump(_) | Terminator::Unreachable => vec![],
+    }
+}
+
+/// Registers live at the start of each block, given the owning registers. A
+/// use of a view (a key of `roots`) is also a use of its root.
+fn liveness(f: &Function, tracked: &HashSet<Reg>, roots: &HashMap<Reg, Reg>) -> Vec<HashSet<Reg>> {
+    let n = f.blocks.len();
+    let mut live_in: Vec<HashSet<Reg>> = vec![HashSet::new(); n];
+    loop {
+        let mut changed = false;
+        for b in (0..n).rev() {
+            let mut live = live_out(f, b, &live_in);
+            step_term(&f.blocks[b].term, &mut live, tracked, roots);
+            for inst in f.blocks[b].insts.iter().rev() {
+                step_back(inst, &mut live, tracked, roots);
+            }
+            if live != live_in[b] {
+                live_in[b] = live;
+                changed = true;
+            }
+        }
+        if !changed {
+            return live_in;
+        }
+    }
+}
+
+fn live_out(f: &Function, b: usize, live_in: &[HashSet<Reg>]) -> HashSet<Reg> {
+    let mut out = HashSet::new();
+    for s in f.blocks[b].term.successors() {
+        out.extend(live_in[s.0 as usize].iter().copied());
+    }
+    out
+}
+
+fn step_term(t: &Terminator, live: &mut HashSet<Reg>, tracked: &HashSet<Reg>, roots: &HashMap<Reg, Reg>) {
+    for r in term_uses(t).into_iter().filter(|r| tracked.contains(r)) {
+        live.insert(r);
+        live.extend(roots.get(&r));
+    }
+}
+
+/// Live registers before `inst`, from those after it.
+fn step_back(inst: &Inst, live: &mut HashSet<Reg>, tracked: &HashSet<Reg>, roots: &HashMap<Reg, Reg>) {
+    for d in defined(inst) {
+        live.remove(&d);
+    }
+    for r in uses(inst).into_iter().filter(|r| tracked.contains(r)) {
+        live.insert(r);
+        live.extend(roots.get(&r));
+    }
+}
+
+fn uses(inst: &Inst) -> Vec<Reg> {
+    let mut i = inst.clone();
+    consumed(&mut i).into_iter().map(|r| *r).chain(borrowed(inst)).collect()
+}
+
+/// The register an instruction reads an owning part out of, giving a view.
+fn projection(inst: &Inst) -> Option<(Reg, Reg)> {
+    match inst {
+        Inst::Field { dst, src, .. }
+        | Inst::Elem { dst, src, .. }
+        | Inst::GetPath { dst, src, .. }
+        | Inst::Payload { dst, src, .. } => Some((*dst, *src)),
+        _ => None,
+    }
+}
+
+/// Which owning registers can stay views, and the root of each. `borrowed`
+/// registers (parameters) are never written, so they are roots that stay.
+fn views(f: &Function, tracked: &HashSet<Reg>) -> HashMap<Reg, Reg> {
+    // Only a register written once, by a part read or a copy of a view, and
+    // never changed in place, can be a view.
+    let mut writes: HashMap<Reg, usize> = HashMap::new();
+    let mut changed = HashSet::new();
+    let mut source: HashMap<Reg, (Reg, bool)> = HashMap::new();
+    for b in &f.blocks {
+        for inst in &b.insts {
+            for d in defined(inst) {
+                *writes.entry(d).or_default() += 1;
+                if changes(inst, d) {
+                    changed.insert(d);
+                }
+            }
+            if let Some((dst, src)) = projection(inst) {
+                source.insert(dst, (src, true));
+            } else if let Inst::Copy { dst, src } = inst {
+                if dst != src {
+                    source.insert(*dst, (*src, false));
+                }
+            }
+        }
+    }
+    let params = f.params.len() as u32;
+    source.retain(|d, _| tracked.contains(d) && writes.get(d) == Some(&1) && !changed.contains(d) && d.0 >= params);
+    let mut excluded: HashSet<Reg> = HashSet::new();
+    loop {
+        // A projection is a view unless excluded; a copy is one if its source is.
+        let mut is_view: HashSet<Reg> =
+            source.iter().filter(|(d, (_, proj))| *proj && !excluded.contains(d)).map(|(d, _)| *d).collect();
+        loop {
+            let more: Vec<Reg> = source
+                .iter()
+                .filter(|(d, (s, proj))| !*proj && !excluded.contains(d) && !is_view.contains(d) && is_view.contains(s))
+                .map(|(d, _)| *d)
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            is_view.extend(more);
+        }
+        let mut roots = HashMap::new();
+        for &d in &is_view {
+            let mut r = source[&d].0;
+            while is_view.contains(&r) {
+                r = source[&r].0;
+            }
+            roots.insert(d, r);
+        }
+        // A view whose root is written while the view is live must be a copy.
+        let live_in = liveness(f, tracked, &roots);
+        let mut conflicts = HashSet::new();
+        for b in 0..f.blocks.len() {
+            let mut live = live_out(f, b, &live_in);
+            step_term(&f.blocks[b].term, &mut live, tracked, &roots);
+            for inst in f.blocks[b].insts.iter().rev() {
+                for w in defined(inst) {
+                    for (v, root) in &roots {
+                        if *root == w && live.contains(v) && !defined(inst).contains(v) {
+                            conflicts.insert(*v);
+                        }
+                    }
+                }
+                step_back(inst, &mut live, tracked, &roots);
+            }
+        }
+        if conflicts.is_empty() {
+            return roots;
+        }
+        excluded.extend(conflicts);
+    }
+}
+
+fn function(f: &mut Function, owning: &mut Owning) {
+    let tracked: HashSet<Reg> = (0..f.regs.len() as u32).map(Reg).filter(|&r| owning.owns(f.reg_type(r))).collect();
+    if tracked.is_empty() {
+        return;
+    }
+    entry_without_predecessors(f);
+
+    // Parameters are borrowed. One whose value the function changes, consumes
+    // or replaces while it still reads it gets a copy of its own on entry.
+    let live_at_entry = liveness(f, &tracked, &HashMap::new())[0].clone();
+    let params: Vec<Reg> = (0..f.params.len() as u32).map(Reg).filter(|r| tracked.contains(r)).collect();
+    let mut borrowed_params = HashSet::new();
+    let mut entry_clones = Vec::new();
+    for p in params {
+        if !live_at_entry.contains(&p) {
+            continue; // never read: only later values, which the function owns
+        }
+        let owned_use = f.blocks.iter().any(|b| {
+            b.insts.iter().any(|inst| {
+                let mut i = inst.clone();
+                consumed(&mut i).into_iter().any(|r| *r == p) || defined(inst).contains(&p) || changes(inst, p)
+            }) || matches!(b.term, Terminator::Ret(r) if r == p)
+        });
+        if owned_use {
+            entry_clones.push(Inst::Clone { dst: p, src: p });
+        } else {
+            borrowed_params.insert(p);
+        }
+    }
+    f.blocks[0].insts.splice(0..0, entry_clones);
+
+    // Parts read out of values are views where that cannot be told apart from
+    // a copy; the others become copies right after the read.
+    let roots = views(f, &tracked);
+    for b in &mut f.blocks {
+        let mut insts = Vec::with_capacity(b.insts.len());
+        for inst in std::mem::take(&mut b.insts) {
+            let copy = projection(&inst).filter(|(d, _)| tracked.contains(d) && !roots.contains_key(d));
+            insts.push(inst);
+            if let Some((d, _)) = copy {
+                insts.push(Inst::Clone { dst: d, src: d });
+            }
+        }
+        b.insts = insts;
+    }
+    // Neither borrowed parameters nor views are ever freed: their memory is
+    // someone else's. Consuming one copies it.
+    let borrowed_params: HashSet<Reg> = borrowed_params.into_iter().chain(roots.keys().copied()).collect();
+
+    let owned: HashSet<Reg> = tracked.difference(&borrowed_params).copied().collect();
+    let live_in = liveness(f, &tracked, &roots);
+
+    // Within blocks: clones before consuming uses that are not last uses, drops
+    // after last uses that do not move.
+    for b in 0..f.blocks.len() {
+        let mut live = live_out(f, b, &live_in);
+        let block = std::mem::replace(&mut f.blocks[b], Block { insts: vec![], term: Terminator::Unreachable });
+        // `ret` moves its value.
+        step_term(&block.term, &mut live, &tracked, &roots);
+        let mut after: Vec<HashSet<Reg>> = Vec::with_capacity(block.insts.len());
+        for inst in block.insts.iter().rev() {
+            after.push(live.clone());
+            step_back(inst, &mut live, &tracked, &roots);
+        }
+        after.reverse();
+
+        let mut insts = Vec::with_capacity(block.insts.len());
+        // What `inst` reads, the roots of the views among them (read through
+        // them), and what it writes.
+        let touched = |inst: &Inst| -> HashSet<Reg> {
+            let u = uses(inst);
+            let through = u.iter().filter_map(|r| roots.get(r)).copied().collect::<Vec<_>>();
+            u.into_iter().chain(through).chain(defined(inst)).collect()
+        };
+        for (mut inst, live_after) in block.insts.into_iter().zip(after) {
+            let borrows = borrowed(&inst);
+            let before = touched(&inst);
+            let mut moved = HashSet::new();
+            let mut clones = Vec::new();
+            // A view copied into a view is the same view.
+            let alias = matches!(&inst, Inst::Copy { dst, .. } if roots.contains_key(dst));
+            if !alias {
+                let slots = consumed(&mut inst);
+                let regs: Vec<Reg> = slots.iter().map(|r| **r).collect();
+                for (k, slot) in slots.into_iter().enumerate() {
+                    let r = *slot;
+                    if !owned.contains(&r) && !borrowed_params.contains(&r) {
+                        continue;
+                    }
+                    let used_again = live_after.contains(&r)
+                        || regs[k + 1..].contains(&r)
+                        || borrows.contains(&r)
+                        || borrowed_params.contains(&r);
+                    if used_again {
+                        let t = Reg(f.regs.len() as u32);
+                        f.regs.push(f.regs[r.0 as usize].clone());
+                        clones.push(Inst::Clone { dst: t, src: r });
+                        *slot = t;
+                    } else {
+                        moved.insert(r);
+                    }
+                }
+            }
+            let mut dying: Vec<Reg> =
+                before.into_iter().filter(|r| owned.contains(r) && !live_after.contains(r) && !moved.contains(r)).collect();
+            dying.sort_by_key(|r| r.0);
+            insts.extend(clones);
+            insts.push(inst);
+            insts.extend(dying.into_iter().map(|src| Inst::Drop { src }));
+        }
+        // `ret` gives its value away: a value of its own moves, a borrowed one
+        // or a view is copied. Everything else still owned dies here.
+        let mut term = block.term;
+        if let Terminator::Ret(r) = &mut term {
+            if tracked.contains(r) {
+                let mut dying: Vec<Reg> = roots.get(r).copied().into_iter().filter(|x| owned.contains(x)).collect();
+                if borrowed_params.contains(r) {
+                    let t = Reg(f.regs.len() as u32);
+                    f.regs.push(f.regs[r.0 as usize].clone());
+                    insts.push(Inst::Clone { dst: t, src: *r });
+                    *r = t;
+                }
+                dying.sort_by_key(|x| x.0);
+                insts.extend(dying.into_iter().map(|src| Inst::Drop { src }));
+            }
+        }
+        f.blocks[b] = Block { insts, term };
+    }
+
+    // On edges: a value live at the end of a block but not at the start of a
+    // successor dies on the way there.
+    let preds = predecessor_counts(f);
+    for b in 0..f.blocks.len() {
+        let out = live_out(f, b, &live_in);
+        let succs = f.blocks[b].term.successors();
+        for (k, s) in succs.iter().enumerate() {
+            let mut dying: Vec<Reg> =
+                out.iter().filter(|r| owned.contains(r) && !live_in[s.0 as usize].contains(r)).copied().collect();
+            if dying.is_empty() {
+                continue;
+            }
+            dying.sort_by_key(|r| r.0);
+            let drops = dying.into_iter().map(|src| Inst::Drop { src });
+            if preds[s.0 as usize] == 1 {
+                f.blocks[s.0 as usize].insts.splice(0..0, drops);
+            } else {
+                // A block of its own on this edge.
+                let id = BlockId(f.blocks.len() as u32);
+                f.blocks.push(Block { insts: drops.collect(), term: Terminator::Jump(*s) });
+                *f.blocks[b].term.successors_mut()[k] = id;
+            }
+        }
+    }
+}
+
+/// How many edges lead to each block.
+fn predecessor_counts(f: &Function) -> Vec<usize> {
+    let mut n = vec![0; f.blocks.len()];
+    for b in &f.blocks {
+        for s in b.term.successors() {
+            n[s.0 as usize] += 1;
+        }
+    }
+    n
+}
+
+/// Makes sure nothing jumps back to the entry block, so code put at its start
+/// runs once.
+fn entry_without_predecessors(f: &mut Function) {
+    if predecessor_counts(f)[0] == 0 {
+        return;
+    }
+    for b in &mut f.blocks {
+        for s in b.term.successors_mut() {
+            s.0 += 1;
+        }
+    }
+    f.blocks.insert(0, Block { insts: vec![], term: Terminator::Jump(BlockId(1)) });
+}

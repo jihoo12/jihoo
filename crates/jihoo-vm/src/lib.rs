@@ -536,7 +536,12 @@ impl<'m> Vm<'m> {
     fn exec(&mut self, f: &'m Function, inst: &'m Inst, out: &mut dyn Write) -> Result<(), VmError> {
         match inst {
             // Prepared as `Op`s and run by `call`.
-            Inst::Const { .. } | Inst::FConst { .. } | Inst::Copy { .. } | Inst::Call { .. } | Inst::FuncRef { .. } => {
+            Inst::Const { .. }
+            | Inst::FConst { .. }
+            | Inst::Copy { .. }
+            | Inst::Clone { .. }
+            | Inst::Call { .. }
+            | Inst::FuncRef { .. } => {
                 unreachable!("prepared as an `Op` and run by `call`")
             }
             Inst::Unit { dst } => self.set(*dst, Value::Unit),
@@ -891,6 +896,8 @@ impl<'m> Vm<'m> {
                 let r = self.alloc_str(&name);
                 self.set(*dst, Value::Str(r));
             }
+            // The GC frees what nothing refers to.
+            Inst::Drop { .. } => {}
             Inst::Print { src } => {
                 let line = match self.get(*src) {
                     Value::Int(n) if f.reg_type(*src) == &Type::Int(jihoo_ir::IntTy::U64) => (n as u64).to_string(),

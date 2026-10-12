@@ -181,7 +181,7 @@ struct Line {
     if (t.kind != TokKind::Word || t.text.rfind("bb", 0) != 0) fail(no, "expected a block like bb0");
     return uint32_t(number(no, t.text.substr(2)));
   }
-  // unit | bool | str | i8..i64 | u8..u64 | *T | $Name | [N x T] | fn(T, ...) -> R
+  // unit | bool | str | i8..i64 | u8..u64 | *T | $Name | [N x T] | [T] | fn(T, ...) -> R
   Type type() {
     const Tok &t = next("a type");
     if (t.kind == TokKind::Word && t.text == "fn") {
@@ -201,6 +201,11 @@ struct Line {
     }
     if (t.kind == TokKind::Punct && t.text == "*") return Type::pointer(type());
     if (t.kind == TokKind::Punct && t.text == "[") {
+      if (done() || toks[i].kind != TokKind::Int) {
+        Type elem = type();
+        punct("]");
+        return Type::list(std::move(elem));
+      }
       int64_t n = integer();
       if (n < 0) fail(no, "array length must not be negative");
       word("x");
@@ -242,6 +247,25 @@ struct Line {
     if (n < 0) fail(no, "field index must not be negative");
     return uint32_t(n);
   }
+  // `(` [step {`,` step}] `)` where a step is `field N` or `elem %r`.
+  std::vector<PathStep> path() {
+    std::vector<PathStep> steps;
+    punct("(");
+    while (!peek_punct(")")) {
+      const Tok &kind = next("`field` or `elem`");
+      if (kind.kind == TokKind::Word && kind.text == "field") {
+        steps.push_back({false, index()});
+      } else if (kind.kind == TokKind::Word && kind.text == "elem") {
+        steps.push_back({true, reg()});
+      } else {
+        fail(no, "expected `field N` or `elem %r`");
+      }
+      if (!peek_punct(",")) break;
+      i++;
+    }
+    punct(")");
+    return steps;
+  }
   bool peek_punct(const char *p) const {
     return !done() && toks[i].kind == TokKind::Punct && toks[i].text == p;
   }
@@ -277,7 +301,7 @@ const std::unordered_map<std::string, Op> kUnOps = {
     {"floor", Op::Floor}, {"ceil", Op::Ceil},   {"trunc", Op::Trunc}, {"round", Op::Round},
     {"abs", Op::Abs},     {"cast", Op::Cast},   {"bitcast", Op::Bitcast},
     {"load", Op::Load},   {"addr", Op::Addr},   {"splat", Op::Splat}, {"tag", Op::Tag},
-    {"atomic_load", Op::AtomicLoad},
+    {"atomic_load", Op::AtomicLoad}, {"len", Op::Len}, {"clone", Op::Clone},
 };
 
 // `%d = <op> ...`
@@ -316,6 +340,24 @@ Inst parse_assign(Line &l) {
     uint32_t a = l.reg();
     l.punct(",");
     inst.args = {a, l.reg()};
+  } else if (w == "repeat") {
+    inst.op = Op::Repeat;
+    uint32_t v = l.reg();
+    l.punct(",");
+    inst.args = {v, l.reg()};
+  } else if (w == "slice") {
+    inst.op = Op::Slice;
+    uint32_t a = l.reg();
+    l.punct(",");
+    uint32_t lo = l.reg();
+    l.punct(",");
+    inst.args = {a, lo, l.reg()};
+  } else if (w == "pop") {
+    // `pop %r, (step, ...)`
+    inst.op = Op::Pop;
+    inst.args = {l.reg()};
+    l.punct(",");
+    inst.path = l.path();
   } else if (w == "call") {
     // `call @f(...)` calls a function by name, `call %r(...)` a function value.
     const Tok &f = l.next("a function");
@@ -379,20 +421,7 @@ Inst parse_assign(Line &l) {
     inst.op = w == "getpath" ? Op::GetPath : Op::SetPath;
     inst.args = {l.reg()};
     l.punct(",");
-    l.punct("(");
-    while (true) {
-      const Tok &kind = l.next("`field` or `elem`");
-      if (kind.kind == TokKind::Word && kind.text == "field") {
-        inst.path.push_back({false, l.index()});
-      } else if (kind.kind == TokKind::Word && kind.text == "elem") {
-        inst.path.push_back({true, l.reg()});
-      } else {
-        fail(l.no, "expected `field N` or `elem %r`");
-      }
-      if (!l.peek_punct(",")) break;
-      l.i++;
-    }
-    l.punct(")");
+    inst.path = l.path();
     if (inst.path.empty()) fail(l.no, "empty path");
     if (inst.op == Op::SetPath) {
       l.punct(",");
@@ -619,6 +648,21 @@ Module parse(const std::string &text) {
         inst.op = Op::Spawn;
         inst.args = {l.reg()};
         for (uint32_t r : l.reg_list()) inst.args.push_back(r);
+        block->insts.push_back(inst);
+        l.end();
+        continue;
+      }
+      // `push %r, (step, ...), %v` and `drop %r`
+      if (w == "push" || w == "drop") {
+        Inst inst{};
+        inst.op = w == "push" ? Op::Push : Op::Drop;
+        inst.args = {l.reg()};
+        if (inst.op == Op::Push) {
+          l.punct(",");
+          inst.path = l.path();
+          l.punct(",");
+          inst.args.push_back(l.reg());
+        }
         block->insts.push_back(inst);
         l.end();
         continue;

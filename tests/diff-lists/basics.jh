@@ -1,0 +1,66 @@
+// Lists are values: copies never share, in every profile.
+
+fn total(xs: [i64]) -> i64 {
+    let t = 0
+    let i = 0
+    while i < len(xs) {
+        t = t + xs[i]
+        i = i + 1
+    }
+    return t
+}
+
+// Changes its own copy only.
+fn bumped(xs: [i64]) -> [i64] {
+    let i = 0
+    while i < len(xs) {
+        xs[i] = xs[i] + 100
+        i = i + 1
+    }
+    push(xs, 7)
+    return xs
+}
+
+// Never reads its parameter's value before replacing it.
+fn replaced(xs: [i64]) -> [i64] {
+    xs = [9, 9]
+    return xs
+}
+
+fn same(xs: [i64]) -> [i64] {
+    return xs
+}
+
+fn entry() -> i64 {
+    let a: [i64] = [1, 2, 3]
+    let b = a
+    push(b, 4)
+    out(len(a))                 // 3
+    out(len(b))                 // 4
+    let c = bumped(a)
+    out(total(a))               // 6: unchanged
+    out(total(c))               // 313
+    a = c                       // the old a dies here
+    out(total(a))
+    a[0] = 0
+    out(c[0])                   // 101: c is its own copy
+    out(total(replaced(a)))     // 18
+    out(total(same(same(a))))
+    let e: [i64] = []
+    let i = 0
+    while i < 100 {
+        push(e, i)
+        i = i + 1
+    }
+    let popped = 0
+    while len(e) > 90 {
+        popped = popped + pop(e)
+    }
+    out(popped)                 // 99 + ... + 90 = 945
+    out(len(e))
+    let unused: [i64] = [5, 6]  // never read: freed at once
+    let f = e
+    f = e                       // overwritten while e lives
+    out(total(f) - total(e))
+    return len(a)
+}

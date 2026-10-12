@@ -325,8 +325,11 @@ impl<'p> Env<'p> {
                 Ok(Type::array(self.resolve_in(elem, b, in_macro)?, self.array_len(n, b)?))
             }
             TypeExprKind::List(inner) => {
-                if self.profile != Profile::Hosted && !in_macro {
-                    return Err(Error::new(t.pos, "lists are garbage collected and only available in hosted mode; use an array (`[T; N]`)"));
+                if self.profile == Profile::Freestanding && !in_macro {
+                    return Err(Error::new(
+                        t.pos,
+                        "lists need an allocator and are not available in freestanding mode; use an array (`[T; N]`)",
+                    ));
                 }
                 Ok(Type::List(Box::new(self.resolve_in(inner, b, in_macro)?)))
             }
@@ -655,6 +658,23 @@ impl<'p> Env<'p> {
         let Type::Enum(e) = t else { unreachable!("not an enum: {t}") };
         let variants = self.enum_variants(Pos::default(), e).expect("enum was resolved before");
         variants[index as usize].1.clone()
+    }
+
+    /// Whether values of `t` own memory in native code: lists, and what holds
+    /// one by value. Pointers may not reach such values (see `ownership.rs`
+    /// in the IR crate).
+    pub fn owns(&self, t: &Type) -> bool {
+        match t {
+            Type::List(_) => true,
+            Type::Array(elem, _) => self.owns(elem),
+            Type::Struct(name) => {
+                self.struct_fields(Pos::default(), name).is_ok_and(|fs| fs.iter().any(|(_, t)| self.owns(t)))
+            }
+            Type::Enum(name) => self
+                .enum_variants(Pos::default(), name)
+                .is_ok_and(|vs| vs.iter().flat_map(|(_, ts)| ts).any(|t| self.owns(t))),
+            _ => false,
+        }
     }
 
     pub fn layout(&self, pos: Pos, t: &Type) -> Result<layout::Layout, Error> {

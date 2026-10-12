@@ -270,6 +270,8 @@ impl Cx<'_> {
                     Inst::Unit { dst } => expect(dst, &Type::Unit),
                     Inst::Str { dst, .. } => expect(dst, &types::str_literal(profile)),
                     Inst::Copy { dst, src } => expect(dst, ty(src)?),
+                    Inst::Clone { dst, src } => expect(dst, ty(src)?),
+                    Inst::Drop { src } => ty(src).map(|_| ()),
                     Inst::Unary { dst, op, src } => match types::unary(*op, ty(src)?) {
                         Some(t) => expect(dst, &t),
                         None => Err(format!("`{}` cannot take {}", op.mnemonic(), ty(src)?.jir())),

@@ -1,0 +1,74 @@
+// Values that die on some paths and not others: branches, loops, early
+// returns, and enums holding lists.
+
+enum Found {
+    Hit([i64])
+    Miss
+}
+
+fn find(xs: [[i64]], want: i64) -> Found {
+    let i = 0
+    while i < len(xs) {
+        let row = xs[i]
+        if len(row) > 0 && row[0] == want {
+            return Found.Hit(row)            // the row moves into the result
+        }
+        i = i + 1
+    }
+    return Found.Miss
+}
+
+fn pick(c: bool, a: [i64], b: [i64]) -> [i64] {
+    if c {
+        return a
+    }
+    return b
+}
+
+fn count(f: Found) -> i64 {
+    match f {
+        Hit(xs) => return len(xs)
+        Miss => return -1
+    }
+}
+
+fn entry() -> i64 {
+    let rows: [[i64]] = [[1, 2], [3, 4, 5], [6]]
+    out(count(find(rows, 3)))               // 3
+    out(count(find(rows, 9)))               // -1
+    let keep: [i64] = [0]
+    let i = 0
+    while i < 10 {
+        let tmp: [i64] = [i, i]
+        i = i + 1
+        if i % 3 == 0 {
+            keep = tmp                      // moved on this path only
+            continue
+        }
+        if i == 8 {
+            break                           // tmp dies on the way out
+        }
+        push(tmp, 1)
+    }
+    out(keep[0])                            // 5
+    let a: [i64] = [1]
+    let b: [i64] = [2, 2]
+    let c = pick(len(a) > 0, a, b)
+    out(len(c))
+    out(len(a) + len(b))                    // a and b are still there
+    let m = match find(rows, 6) {
+        Hit(xs) => xs
+        Miss => []
+    }
+    out(m[0])
+    let x = Found.Hit([1, 2, 3])
+    let y = x
+    match y {
+        Hit(xs) => out(len(xs))
+        Miss => out(0)
+    }
+    if count(x) > 0 {
+        return 0
+    }
+    return 1
+}

@@ -211,7 +211,9 @@ impl Type {
             Type::Ptr(inner) => profile.is_compiled() && inner.available_in(profile),
             Type::Array(elem, _) => elem.available_in(profile),
             Type::Fn(params, ret) => params.iter().chain([&**ret]).all(|t| t.available_in(profile)),
-            Type::List(inner) | Type::Ref(inner) | Type::Chan(inner) | Type::Cell(inner) => {
+            // Native lists own their memory, which the ownership pass frees.
+            Type::List(inner) => profile != Profile::Freestanding && inner.available_in(profile),
+            Type::Ref(inner) | Type::Chan(inner) | Type::Cell(inner) => {
                 profile == Profile::Hosted && inner.available_in(profile)
             }
             Type::Expr | Type::Stmts | Type::Items => false,

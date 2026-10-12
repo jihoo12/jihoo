@@ -1,0 +1,52 @@
+// Slices, joining, comparing, and generic code over lists.
+
+struct Named {
+    id: i64
+    parts: [i64]
+}
+
+fn first(comptime T: type, xs: [T]) -> T {
+    return xs[0]
+}
+
+fn reversed(comptime T: type, xs: [T]) -> [T] {
+    let out_list: [T] = []
+    let i = len(xs)
+    while i > 0 {
+        i = i - 1
+        push(out_list, xs[i])
+    }
+    return out_list
+}
+
+fn entry() -> i64 {
+    let a: [i64] = [1, 2, 3, 4, 5]
+    let mid = a[1:4]
+    out(len(mid) * 100 + mid[0] * 10 + mid[2])  // 324
+    let joined = a + mid + [9]
+    out(len(joined))
+    out(joined[8])
+    if a == [1, 2, 3, 4, 5] {
+        out(1)
+    }
+    if mid != a[1:4] {
+        out(2)
+    }
+    let n: [Named] = [Named { id: 1, parts: [1] }, Named { id: 2, parts: [2, 2] }]
+    let m = n
+    if n == m {
+        out(3)
+    }
+    m[1].parts[0] = 3
+    if n != m {
+        out(4)
+    }
+    let r = reversed(Named, n)
+    out(first(Named, r).id)
+    out(len(first([i64], [[4, 4], [1]])))
+    let nested: [[[i64]]] = [[a], [mid, mid]]
+    let flat: [[i64]] = nested[0] + nested[1]
+    out(len(flat))
+    out(len(flat[1:][0]))
+    return 0
+}

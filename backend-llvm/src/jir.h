@@ -12,15 +12,15 @@ namespace jir {
 
 // The one JIR version this backend reads, from the `jir N` header. It must
 // equal JIR_VERSION in crates/jihoo-ir/src/lib.rs (a Rust test checks this).
-constexpr int64_t kVersion = 8;
+constexpr int64_t kVersion = 9;
 
 enum class Profile { Hosted, Native, Freestanding };
 
 struct Type {
-  enum Kind { Unit, Bool, Int, Float, Str, Ptr, Struct, Array, Fn } kind = Unit;
+  enum Kind { Unit, Bool, Int, Float, Str, Ptr, Struct, Array, Fn, List } kind = Unit;
   unsigned bits = 0;               // Int, Float (32 or 64)
   bool is_signed = false;          // Int
-  std::shared_ptr<Type> pointee;   // Ptr: the pointee; Array: the element type; Fn: the result
+  std::shared_ptr<Type> pointee;   // Ptr: the pointee; Array, List: the element type; Fn: the result
   uint64_t count = 0;              // Array
   std::string name;                // Struct: a struct or enum name
   std::vector<Type> params;        // Fn
@@ -52,6 +52,12 @@ struct Type {
     t.pointee = std::make_shared<Type>(std::move(ret));
     return t;
   }
+  static Type list(Type elem) {
+    Type t;
+    t.kind = List;
+    t.pointee = std::make_shared<Type>(std::move(elem));
+    return t;
+  }
   static Type array(Type elem, uint64_t count) {
     Type t;
     t.kind = Array;
@@ -65,7 +71,7 @@ struct Type {
     switch (kind) {
       case Int: return bits == o.bits && is_signed == o.is_signed;
       case Float: return bits == o.bits;
-      case Ptr: return *pointee == *o.pointee;
+      case Ptr: case List: return *pointee == *o.pointee;
       case Array: return count == o.count && *pointee == *o.pointee;
       case Struct: return name == o.name;
       case Fn: return params == o.params && *pointee == *o.pointee;
@@ -84,6 +90,7 @@ struct Type {
       case Ptr: return "*" + pointee->str();
       case Struct: return "$" + name;
       case Array: return "[" + std::to_string(count) + " x " + pointee->str() + "]";
+      case List: return "[" + pointee->str() + "]";
       case Fn: {
         std::string s = "fn(";
         for (size_t i = 0; i < params.size(); i++) s += (i ? ", " : "") + params[i].str();
@@ -127,6 +134,8 @@ enum class Op {
   Cast, Call, FuncRef, CallIndirect, Struct, Field, SetField, Load, Store, Addr, FieldPtr,
   Array, Splat, Elem, SetElem, ElemPtr, Variant, Tag, Payload, GetPath, SetPath,
   Syscall, Print, Asm, Trap,
+  // Native lists, and the ownership pass's deep copy and free.
+  Len, Slice, Repeat, Push, Pop, Clone, Drop,
   Spawn,
   AtomicLoad, AtomicStore, AtomicSwap, AtomicAdd, AtomicSub, AtomicAnd, AtomicOr, AtomicXor, AtomicCas, Fence,
 };
@@ -146,7 +155,7 @@ struct Inst {
   int64_t imm2 = 0;            // Payload: index of the value in the variant
   std::string text;            // Str bytes, Call/FuncRef function, Struct name, or Asm template
   std::string constraints;     // Asm only: LLVM constraint string
-  std::vector<PathStep> path;  // GetPath / SetPath: the steps, outside in
+  std::vector<PathStep> path;  // GetPath / SetPath / Push / Pop: the steps, outside in
 };
 
 enum class TermKind { Jump, Branch, Ret, Unreachable };

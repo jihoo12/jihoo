@@ -1,0 +1,67 @@
+// A graph of nodes in a list, with edges as paths: cycles without pointers.
+
+struct Node {
+    weight: i64
+    edges: [path(Graph).nodes[_]]
+}
+
+struct Graph {
+    nodes: [Node]
+}
+
+fn node(i: i64) -> path(Graph).nodes[_] {
+    return path(Graph).nodes[i]
+}
+
+fn add(g: Graph, w: i64) -> Graph {
+    push(g.nodes, Node { weight: w, edges: [] })
+    return g
+}
+
+// The total weight reachable from `from`, each node once.
+fn reach(g: Graph, from: path(Graph).nodes[_]) -> i64 {
+    let seen: [bool] = [false; len(g.nodes)]
+    let todo: [path(Graph).nodes[_]] = [from]
+    let total = 0
+    let i = 0
+    while len(todo) > 0 {
+        let p = pop(todo)
+        let k = 0
+        while k < len(g.nodes) {
+            if node(k) == p && !seen[k] {
+                seen[k] = true
+                total = total + g[p].weight
+                let e = 0
+                while e < len(g[p].edges) {
+                    push(todo, g[p].edges[e])
+                    e = e + 1
+                }
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return total
+}
+
+fn entry() -> i64 {
+    let g = Graph { nodes: [] }
+    let i = 0
+    while i < 6 {
+        g = add(g, i + 1)
+        i = i + 1
+    }
+    // 0 -> 1 -> 2 -> 0 (a cycle), 3 -> 4, 5 alone
+    push(g[node(0)].edges, node(1))
+    push(g[node(1)].edges, node(2))
+    push(g[node(2)].edges, node(0))
+    push(g[node(3)].edges, node(4))
+    out(reach(g, node(0)))          // 1 + 2 + 3
+    out(reach(g, node(3)))          // 4 + 5
+    out(reach(g, node(5)))          // 6
+    let h = g                       // a copy: changing it leaves g alone
+    push(h[node(2)].edges, node(3))
+    out(reach(h, node(0)))          // 1 + 2 + 3 + 4 + 5
+    out(reach(g, node(0)))          // still 6
+    return 0
+}

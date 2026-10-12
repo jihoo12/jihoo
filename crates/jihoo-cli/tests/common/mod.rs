@@ -66,6 +66,11 @@ pub struct Outcome {
 /// Runs `body` as a `profile` program in `work`, under the name `name`. An
 /// error is a program that does not compile, or a VM error message.
 pub fn run(body: &str, profile: Profile, work: &Path, name: &str) -> Result<Outcome, String> {
+    run_under(body, profile, work, name, None)
+}
+
+/// Like `run`; a compiled program runs under `runner` (such as valgrind) if given.
+pub fn run_under(body: &str, profile: Profile, work: &Path, name: &str, runner: Option<&[String]>) -> Result<Outcome, String> {
     let src = work.join(format!("{name}.{}.jh", profile.name()));
     std::fs::write(&src, wrap(body, profile)).unwrap();
     let out = if profile == Profile::Hosted {
@@ -76,7 +81,10 @@ pub fn run(body: &str, profile: Profile, work: &Path, name: &str) -> Result<Outc
         if !build.status.success() {
             return Err(format!("`jihoo build` failed: {}", String::from_utf8_lossy(&build.stderr)));
         }
-        let out = Command::new(&bin).output().unwrap();
+        let out = match runner {
+            Some([tool, args @ ..]) => Command::new(tool).args(args).arg(&bin).output().unwrap(),
+            _ => Command::new(&bin).output().unwrap(),
+        };
         std::fs::remove_file(&bin).unwrap();
         out
     };

@@ -48,6 +48,41 @@ fn vm_and_native_agree() {
     std::fs::remove_dir_all(&work).unwrap();
 }
 
+/// The programs in `tests/diff-lists/` use lists, so they run hosted and native
+/// (freestanding programs have no allocator). Natively, the ownership pass
+/// decides where lists are copied and freed; with `JIHOO_VALGRIND` set to
+/// valgrind's path, each native program also runs under it, and any leak or
+/// invalid access fails the test.
+#[test]
+fn vm_and_native_agree_on_lists() {
+    let compiled = common::compiled_enabled();
+    let work = common::work_dir("diff-lists");
+    let valgrind: Option<Vec<String>> = std::env::var("JIHOO_VALGRIND").ok().map(|v| {
+        [v.as_str(), "-q", "--leak-check=full", "--errors-for-leak-kinds=all", "--error-exitcode=99"]
+            .map(String::from)
+            .to_vec()
+    });
+    let mut files: Vec<_> = std::fs::read_dir(repo_root().join("tests/diff-lists"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "jh"))
+        .collect();
+    files.sort();
+    assert!(!files.is_empty());
+    for file in files {
+        let name = file.file_stem().unwrap().to_string_lossy().into_owned();
+        let body = std::fs::read_to_string(&file).unwrap();
+        let vm = common::run(&body, Profile::Hosted, &work, &name).unwrap_or_else(|e| panic!("{name}: {e}"));
+        if compiled {
+            let nat = common::run_under(&body, Profile::Native, &work, &name, valgrind.as_deref())
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(vm, nat, "{name}: the VM and the native build differ");
+        }
+        eprintln!("{name}: {:?}, {} lines of output", vm.status, vm.stdout.lines().count());
+    }
+    std::fs::remove_dir_all(&work).unwrap();
+}
+
 /// Checks that `body`'s `entry` stops with a runtime error on the VM, whose
 /// message contains `vm_error`, and traps when compiled.
 fn fails_on_both_backends(name: &str, body: &str, vm_error: &str) {

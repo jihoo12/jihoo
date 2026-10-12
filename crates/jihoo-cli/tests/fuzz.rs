@@ -15,6 +15,16 @@
 //!   JIHOO_FUZZ_SEEDS=5000 cargo test --release --test fuzz  # more
 //!   JIHOO_FUZZ_SEED=1234 cargo test --test fuzz             # one, to reproduce
 //!
+//! With lists (`vm_and_native_agree_on_random_list_programs`), programs also
+//! hold lists `[T]` in variables, fields and elements, push to and pop from
+//! them, slice and join them, and pass them to functions that change their
+//! copy. Lists never become empty, so indexes (taken modulo the length) are in
+//! bounds. Those run on the VM and natively only, where the ownership pass
+//! decides where lists are copied and freed; with `JIHOO_VALGRIND` set to
+//! valgrind's path, any leak or invalid access fails the seed.
+//!
+//!   JIHOO_FUZZ_LIST_SEEDS=500 cargo test --release --test fuzz lists
+//!
 //! A failing seed's program is saved, wrapped for the VM, to a file the failure
 //! names. Without `JIHOO_LLC` the programs only run on the VM, which still
 //! checks that they compile and run without errors.
@@ -61,13 +71,15 @@ enum Ty {
     Array(Box<Ty>, usize),
     /// An index into `Gen::structs`.
     Struct(usize),
+    /// Never empty.
+    List(Box<Ty>),
 }
 
 impl Ty {
     const I64: Ty = Ty::Int { bits: 64, signed: true };
 
     fn is_aggregate(&self) -> bool {
-        matches!(self, Ty::Array(..) | Ty::Struct(_))
+        matches!(self, Ty::Array(..) | Ty::Struct(_) | Ty::List(_))
     }
 }
 
@@ -77,6 +89,8 @@ enum Step {
     /// An element of an array of this length.
     Elem(usize),
     Field(usize),
+    /// An element of a list.
+    Item,
 }
 
 struct Var {
@@ -88,6 +102,8 @@ struct Var {
 
 struct Gen {
     rng: Rng,
+    /// Whether to make lists (hosted and native programs only).
+    lists: bool,
     /// Field types of `S0`, `S1`, ...; a struct only holds earlier ones.
     structs: Vec<Vec<Ty>>,
     /// Parameter and result types of `f0`, `f1`, ...; a function only calls
@@ -103,8 +119,13 @@ struct Gen {
 
 impl Gen {
     fn new(seed: u64) -> Gen {
+        Gen::with_lists(seed, false)
+    }
+
+    fn with_lists(seed: u64, lists: bool) -> Gen {
         Gen {
             rng: Rng(seed),
+            lists,
             structs: Vec::new(),
             funcs: Vec::new(),
             vars: Vec::new(),
@@ -140,9 +161,8 @@ impl Gen {
         // a wrong update shows even where nothing printed the value.
         for v in 0..self.vars.len() {
             let name = self.vars[v].name.clone();
-            for (suffix, t) in self.leaves(&self.vars[v].ty.clone()) {
-                self.out(&format!("{name}{suffix}"), &t);
-            }
+            let t = self.vars[v].ty.clone();
+            self.dump(&name, &t);
         }
         let ret = self.expr(&Ty::I64, 2);
         self.line(&format!("return {ret}"));
@@ -186,6 +206,7 @@ impl Gen {
 
     fn any_ty(&mut self, depth: u32) -> Ty {
         match self.rng.below(10) {
+            0..=2 if depth > 0 && self.lists && self.rng.chance(50) => Ty::List(Box::new(self.any_ty(depth - 1))),
             0..=2 if depth > 0 => Ty::Array(Box::new(self.any_ty(depth - 1)), 1 + self.rng.below(4)),
             3 if !self.structs.is_empty() => Ty::Struct(self.rng.below(self.structs.len())),
             _ => self.scalar_ty(),
@@ -199,6 +220,7 @@ impl Gen {
             Ty::F64 => "f64".into(),
             Ty::Array(e, n) => format!("[{}; {n}]", self.ty_name(e)),
             Ty::Struct(k) => format!("S{k}"),
+            Ty::List(e) => format!("[{}]", self.ty_name(e)),
         }
     }
 
@@ -211,6 +233,7 @@ impl Gen {
         }
         let parts: Vec<(Step, Ty)> = match t {
             Ty::Array(e, n) => vec![(Step::Elem(*n), (**e).clone())],
+            Ty::List(e) => vec![(Step::Item, (**e).clone())],
             Ty::Struct(k) => self.structs[*k].iter().cloned().enumerate().map(|(i, f)| (Step::Field(i), f)).collect(),
             _ => Vec::new(),
         };
@@ -223,13 +246,20 @@ impl Gen {
         out
     }
 
-    /// `path` as source; element indexes are computed (always in bounds) unless
-    /// `constant`.
-    fn path(&mut self, path: &[Step], constant: bool) -> String {
-        let mut s = String::new();
+    /// `base` followed by `path`, as source; element indexes are computed
+    /// (always in bounds) unless `constant`.
+    fn path(&mut self, base: &str, path: &[Step], constant: bool) -> String {
+        let mut s = base.to_string();
         for step in path {
             match step {
                 Step::Field(i) => write!(s, ".f{i}").unwrap(),
+                // Lists are never empty.
+                Step::Item if constant || self.rng.chance(40) => s.push_str("[0]"),
+                Step::Item => {
+                    let t = self.int_ty();
+                    let i = self.expr(&t, 1);
+                    s = format!("{s}[(({i}) as u64 % (len({s}) as u64)) as i64]");
+                }
                 Step::Elem(n) if constant || self.rng.chance(40) => write!(s, "[{}]", self.rng.below(*n)).unwrap(),
                 Step::Elem(n) => {
                     let t = self.int_ty();
@@ -241,27 +271,10 @@ impl Gen {
         s
     }
 
-    /// Every scalar inside a value of type `t`: its path, with constant
-    /// indexes, and its type.
-    fn leaves(&self, t: &Ty) -> Vec<(String, Ty)> {
-        let parts: Vec<(String, Ty)> = match t {
-            Ty::Array(e, n) => (0..*n).map(|i| (format!("[{i}]"), (**e).clone())).collect(),
-            Ty::Struct(k) => self.structs[*k].iter().enumerate().map(|(i, f)| (format!(".f{i}"), f.clone())).collect(),
-            _ => return vec![(String::new(), t.clone())],
-        };
-        let mut out = Vec::new();
-        for (step, part) in parts {
-            for (rest, end) in self.leaves(&part) {
-                out.push((format!("{step}{rest}"), end));
-            }
-        }
-        out
-    }
-
     /// Variable `v` followed by `path`.
     fn place(&mut self, v: usize, path: &[Step], constant: bool) -> String {
-        let path = self.path(path, constant);
-        format!("{}{path}", self.vars[v].name)
+        let name = self.vars[v].name.clone();
+        self.path(&name, path, constant)
     }
 
     /// The variables and paths in them that lead to a `t`.
@@ -286,9 +299,36 @@ impl Gen {
         if places.is_empty() {
             return None;
         }
-        let (v, path) = &places[self.rng.below(places.len())];
-        let path = self.path(path, false);
-        Some(format!("{}{path}", self.vars[*v].name))
+        let (v, path) = places[self.rng.below(places.len())].clone();
+        Some(self.place(v, &path, false))
+    }
+
+    /// Prints every scalar in `e`, a `t`: the length and each element of a list.
+    fn dump(&mut self, e: &str, t: &Ty) {
+        match t {
+            Ty::Int { .. } | Ty::Bool | Ty::F64 => self.out(e, t),
+            Ty::Array(el, n) => {
+                for i in 0..*n {
+                    self.dump(&format!("{e}[{i}]"), el);
+                }
+            }
+            Ty::Struct(k) => {
+                for (i, f) in self.structs[*k].clone().iter().enumerate() {
+                    self.dump(&format!("{e}.f{i}"), f);
+                }
+            }
+            Ty::List(el) => {
+                self.out(&format!("len({e})"), &Ty::I64);
+                let i = self.fresh("d");
+                self.line(&format!("let {i}: i64 = 0"));
+                self.line(&format!("while {i} < len({e}) {{"));
+                self.indent += 1;
+                self.dump(&format!("{e}[{i}]"), el);
+                self.line(&format!("{i} = {i} + 1"));
+                self.indent -= 1;
+                self.line("}");
+            }
+        }
     }
 
     // ---- expressions ----
@@ -364,7 +404,16 @@ impl Gen {
                     }
                     let operand = self.rng.pick(&aggregates).clone();
                     let op = *self.rng.pick(&["==", "!="]);
-                    let (a, b) = (self.expr(&operand, d), self.expr(&operand, d));
+                    // A list literal needs a list type from where it is used,
+                    // which `==` does not give: compare variables.
+                    let (a, b) = if self.has_list(&operand) {
+                        match (self.projection(&operand), self.projection(&operand)) {
+                            (Some(a), Some(b)) => (a, b),
+                            _ => return self.leaf(t, depth),
+                        }
+                    } else {
+                        (self.expr(&operand, d), self.expr(&operand, d))
+                    };
                     format!("({a} {op} {b})")
                 }
                 _ => self.leaf(t, depth),
@@ -396,6 +445,43 @@ impl Gen {
                 let xs: Vec<String> = fields.iter().enumerate().map(|(i, f)| format!("f{i}: {}", self.expr(f, d))).collect();
                 format!("S{k} {{ {} }}", xs.join(", "))
             }
+            // Never empty. Literals only where a list type is expected, which
+            // is everywhere `expr` is used for one.
+            Ty::List(e) => match self.rng.below(6) {
+                0 => {
+                    let x = self.expr(e, d);
+                    format!("[{x}; {}]", 1 + self.rng.below(3))
+                }
+                1 | 2 => match self.projection(t) {
+                    // From a list somewhere in a variable: a slice from an
+                    // index in range to the end, or joined with another.
+                    Some(p) if self.rng.chance(50) => {
+                        let it = self.int_ty();
+                        let i = self.expr(&it, 1);
+                        format!("{p}[(({i}) as u64 % (len({p}) as u64)) as i64:]")
+                    }
+                    Some(p) => match self.projection(t) {
+                        Some(q) => format!("({p} + {q})"),
+                        None => p,
+                    },
+                    None => self.list_literal(e, d),
+                },
+                _ => self.list_literal(e, d),
+            },
+        }
+    }
+
+    fn list_literal(&mut self, e: &Ty, d: u32) -> String {
+        let xs: Vec<String> = (0..1 + self.rng.below(3)).map(|_| self.expr(e, d)).collect();
+        format!("[{}]", xs.join(", "))
+    }
+
+    fn has_list(&self, t: &Ty) -> bool {
+        match t {
+            Ty::List(_) => true,
+            Ty::Array(e, _) => self.has_list(e),
+            Ty::Struct(k) => self.structs[*k].iter().any(|f| self.has_list(f)),
+            _ => false,
         }
     }
 
@@ -480,6 +566,9 @@ impl Gen {
     }
 
     fn stmt(&mut self, depth: u32) {
+        if self.lists && self.rng.chance(25) && self.list_stmt() {
+            return;
+        }
         match self.rng.below(24) {
             // A copy of an aggregate, then updates deep inside it and the
             // original, one after the other: what goes wrong when the VM updates
@@ -603,6 +692,48 @@ impl Gen {
         }
     }
 
+    /// Pushes to or pops from a list somewhere in a variable, if there is one.
+    fn list_stmt(&mut self) -> bool {
+        let mut lists = Vec::new();
+        for (v, var) in self.vars.iter().enumerate() {
+            if !var.mutable {
+                continue;
+            }
+            for (path, end) in self.paths(&var.ty, 3) {
+                if let Ty::List(e) = end {
+                    lists.push((v, path, *e));
+                }
+            }
+        }
+        if lists.is_empty() {
+            return false;
+        }
+        let (v, path, e) = lists[self.rng.below(lists.len())].clone();
+        let constant = self.rng.chance(50);
+        let target = self.place(v, &path, constant);
+        if self.rng.chance(60) {
+            let x = self.expr(&e, 2);
+            self.line(&format!("push({target}, {x})"));
+        } else {
+            // Lists never become empty.
+            let x = self.fresh("x");
+            let t = self.ty_name(&e);
+            self.line(&format!("if len({target}) > 1 {{"));
+            self.indent += 1;
+            self.line(&format!("let {x}: {t} = pop({target})"));
+            if self.scalar(&e) {
+                self.out(&x, &e);
+            }
+            self.indent -= 1;
+            self.line("}");
+        }
+        true
+    }
+
+    fn scalar(&self, t: &Ty) -> bool {
+        matches!(t, Ty::Int { .. } | Ty::Bool | Ty::F64)
+    }
+
     fn aliasing(&mut self) {
         let nested: Vec<usize> = (0..self.vars.len())
             .filter(|&v| self.vars[v].mutable && self.paths(&self.vars[v].ty, 3).iter().any(|(p, _)| p.len() >= 2))
@@ -648,16 +779,16 @@ impl Gen {
     }
 }
 
-/// Runs one seed: `Err` describes how the VM and the compiled program differ,
+/// Runs one seed, with lists or without: `Err` describes how the VM and the compiled program differ,
 /// or what went wrong, and where the program was saved.
-fn check(seed: u64, work: &std::path::Path) -> Result<(), String> {
-    let body = Gen::new(seed).program();
+fn check_with(seed: u64, work: &std::path::Path, lists: bool) -> Result<(), String> {
+    let body = Gen::with_lists(seed, lists).program();
     if std::env::var_os("JIHOO_FUZZ_SHOW").is_some() {
         eprintln!("---- seed {seed}\n{body}");
     }
-    let name = format!("seed-{seed}");
+    let name = format!("{}seed-{seed}", if lists { "lists-" } else { "" });
     let fail = |what: String| {
-        let saved = std::env::temp_dir().join(format!("jihoo-fuzz-{seed}.jh"));
+        let saved = std::env::temp_dir().join(format!("jihoo-fuzz-{name}.jh"));
         std::fs::write(&saved, common::wrap(&body, Profile::Hosted)).unwrap();
         format!("seed {seed}: {what}\n  the program: {}", saved.display())
     };
@@ -665,9 +796,21 @@ fn check(seed: u64, work: &std::path::Path) -> Result<(), String> {
     if common::compiled_enabled() {
         // Freestanding for every seed; native, which links with the C compiler
         // and is slower to build, for some.
-        let profiles: &[Profile] = if seed.is_multiple_of(4) { &[Profile::Freestanding, Profile::Native] } else { &[Profile::Freestanding] };
+        let profiles: &[Profile] = if lists {
+            &[Profile::Native]
+        } else if seed.is_multiple_of(4) {
+            &[Profile::Freestanding, Profile::Native]
+        } else {
+            &[Profile::Freestanding]
+        };
+        let valgrind: Option<Vec<String>> = std::env::var("JIHOO_VALGRIND").ok().filter(|_| lists).map(|v| {
+            [v.as_str(), "-q", "--leak-check=full", "--errors-for-leak-kinds=all", "--error-exitcode=99"]
+                .map(String::from)
+                .to_vec()
+        });
         for &profile in profiles {
-            let nat = common::run(&body, profile, work, &name).map_err(|e| fail(format!("{} build: {e}", profile.name())))?;
+            let nat = common::run_under(&body, profile, work, &name, valgrind.as_deref())
+                .map_err(|e| fail(format!("{} build: {e}", profile.name())))?;
             if nat != vm {
                 let (a, b): (Vec<&str>, Vec<&str>) = (vm.stdout.lines().collect(), nat.stdout.lines().collect());
                 let line = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
@@ -691,15 +834,24 @@ fn check(seed: u64, work: &std::path::Path) -> Result<(), String> {
 
 #[test]
 fn vm_and_llvm_agree_on_random_programs() {
+    fuzz("JIHOO_FUZZ_SEEDS", false);
+}
+
+#[test]
+fn vm_and_native_agree_on_random_list_programs() {
+    fuzz("JIHOO_FUZZ_LIST_SEEDS", true);
+}
+
+fn fuzz(seeds_var: &str, lists: bool) {
     let env = |name: &str| std::env::var(name).ok().map(|v| v.parse::<u64>().unwrap_or_else(|_| panic!("{name} is not a number")));
     let seeds: Vec<u64> = match env("JIHOO_FUZZ_SEED") {
         Some(seed) => vec![seed],
-        None => (0..env("JIHOO_FUZZ_SEEDS").unwrap_or(DEFAULT_SEEDS)).collect(),
+        None => (0..env(seeds_var).unwrap_or(DEFAULT_SEEDS)).collect(),
     };
     if !common::compiled_enabled() {
         eprintln!("JIHOO_LLC is not set: running the programs on the VM only");
     }
-    let work = common::work_dir("fuzz");
+    let work = common::work_dir(if lists { "fuzz-lists" } else { "fuzz" });
 
     // Seeds in parallel; each has its own file names.
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
@@ -707,7 +859,9 @@ fn vm_and_llvm_agree_on_random_programs() {
         let handles: Vec<_> = (0..threads)
             .map(|t| {
                 let (seeds, work) = (&seeds, &work);
-                s.spawn(move || seeds.iter().skip(t).step_by(threads).filter_map(|&seed| check(seed, work).err()).collect::<Vec<_>>())
+                s.spawn(move || {
+                    seeds.iter().skip(t).step_by(threads).filter_map(|&seed| check_with(seed, work, lists).err()).collect::<Vec<_>>()
+                })
             })
             .collect();
         handles.into_iter().flat_map(|h| h.join().unwrap()).collect()

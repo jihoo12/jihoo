@@ -414,6 +414,7 @@ fn assign(l: &mut Line, dst: Reg) -> Result<Inst> {
         "unit" => Inst::Unit { dst },
         "str" => Inst::Str { dst, value: l.str()? },
         "copy" => Inst::Copy { dst, src: l.reg()? },
+        "clone" => Inst::Clone { dst, src: l.reg()? },
         "cast" => Inst::Cast { dst, src: l.reg()? },
         "bitcast" => Inst::Bitcast { dst, src: l.reg()? },
         "call" => match l.next("a function")? {
@@ -645,6 +646,7 @@ fn statement(l: &mut Line) -> Result<Stmt> {
             Stmt::Inst(Inst::Push { root, path, value: l.reg()? })
         }
         "print" => Stmt::Inst(Inst::Print { src: l.reg()? }),
+        "drop" => Stmt::Inst(Inst::Drop { src: l.reg()? }),
         "trap" => Stmt::Inst(Inst::Trap),
         "fence" => Stmt::Inst(Inst::Fence),
         "jmp" => Stmt::Term(Terminator::Jump(l.block()?)),

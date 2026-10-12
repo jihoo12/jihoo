@@ -98,6 +98,8 @@ impl Display for Inst {
             Inst::Unit { dst } => write!(f, "{dst} = unit"),
             Inst::Str { dst, value } => write!(f, "{dst} = str {}", quote(value)),
             Inst::Copy { dst, src } => write!(f, "{dst} = copy {src}"),
+            Inst::Clone { dst, src } => write!(f, "{dst} = clone {src}"),
+            Inst::Drop { src } => write!(f, "drop {src}"),
             Inst::Unary { dst, op, src } => write!(f, "{dst} = {} {src}", op.mnemonic()),
             Inst::Binary { dst, op, lhs, rhs } => {
                 write!(f, "{dst} = {} {lhs}, {rhs}", op.mnemonic())

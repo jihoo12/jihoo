@@ -241,7 +241,12 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
     let externs = externs.into_iter().map(|(_, e)| e).collect();
 
     if errors.is_empty() {
-        Ok(ir::Module { profile, target: ir::Target::host(), structs, enums, externs, funcs })
+        let mut m = ir::Module { profile, target: ir::Target::host(), structs, enums, externs, funcs };
+        // Native lists have no GC: decide where values move, are copied and are freed.
+        if profile == Profile::Native {
+            ir::ownership::insert(&mut m);
+        }
+        Ok(m)
     } else {
         // One failing item can surface as the same error through several others.
         let mut seen = std::collections::HashSet::new();

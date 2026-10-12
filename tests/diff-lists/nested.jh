@@ -1,0 +1,67 @@
+// Lists in structs, lists of lists, and parts changed in place.
+
+struct Bag {
+    name: i64
+    items: [i64]
+}
+
+struct Shelf {
+    bags: [Bag]
+    tags: [[i64]]
+    pair: [Bag; 2]
+}
+
+fn bag(n: i64, k: i64) -> Bag {
+    let b = Bag { name: n, items: [] }
+    let i = 0
+    while i < k {
+        push(b.items, n * 10 + i)
+        i = i + 1
+    }
+    return b
+}
+
+fn weight(s: Shelf) -> i64 {
+    let w = 0
+    let i = 0
+    while i < len(s.bags) {
+        let j = 0
+        while j < len(s.bags[i].items) {
+            w = w + s.bags[i].items[j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return w
+}
+
+fn entry() -> i64 {
+    let s = Shelf { bags: [], tags: [[1], [2, 3]], pair: [bag(1, 1), bag(2, 2)] }
+    push(s.bags, bag(3, 3))
+    push(s.bags, bag(4, 2))
+    out(weight(s))                          // 30+31+32+40+41
+    let first = s.bags[0]                   // a copy of a part
+    push(first.items, 1000)
+    out(len(s.bags[0].items))               // 3: the shelf is unchanged
+    push(s.bags[1].items, 5)                // in place, through a path
+    s.bags[0].items[2] = 0
+    out(weight(s))
+    s.bags[0] = first                       // the old bag is freed
+    out(weight(s))
+    let copy = s                            // a deep copy: s is used below
+    s.tags[1] = [7]
+    push(s.tags, [8, 9])
+    out(len(copy.tags[1]) * 10 + len(s.tags[1]))  // 21
+    let t = s.tags[2]
+    out(t[0] + t[1])
+    let last = pop(s.bags)                  // moves out
+    out(last.name)
+    out(len(s.bags))
+    s.pair[1] = s.pair[0]
+    push(s.pair[0].items, 3)
+    out(len(s.pair[0].items) * 10 + len(s.pair[1].items))  // 21
+    let grid: [[i64]] = [[0; 3]; 4]         // `[v; n]` copies v n times
+    grid[1][1] = 5
+    out(grid[0][1] + grid[1][1])
+    return 0
+}

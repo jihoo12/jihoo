@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 8)
+# JIR — jihoo IR text format (version 9)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -38,6 +38,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 6 | `trap` |
 | 7 | atomics: `atomic_load`, `atomic_store`, `atomic_swap`, `atomic_add`, `atomic_sub`, `atomic_and`, `atomic_or`, `atomic_xor`, `atomic_cas`, and `fence` |
 | 8 | `spawn` in native modules, starting a thread |
+| 9 | lists in native modules, and `clone` and `drop` |
 
 ## Example
 
@@ -90,7 +91,7 @@ bb3:
 ## Module
 
 ```
-jir 8                                ; format version, must come first
+jir 9                                ; format version, must come first
 profile hosted|native|freestanding   ; language profile
 target x86_64|aarch64                ; the machine, 64-bit Linux
 struct ...                           ; zero or more structs
@@ -154,7 +155,7 @@ cannot be a `funcref`.
 | `$Name`           | struct or enum, by value                 | named struct  |
 | `expr`, `stmts`, `items` | code, inside macros; compile time only | —        |
 | `[N x T]`         | array of `N` `T`s, by value              | `[N x T]`     |
-| `[T]`             | list of any number of `T`s, by value, hosted only | —     |
+| `[T]`             | list of any number of `T`s, by value; hosted and native | `{ptr, i64, i64}` |
 | `fn(T, ...) -> R` | function value                           | `ptr`         |
 | `ref T`           | immutable GC reference to a `T`, hosted only | —         |
 | `chan T`          | channel of `T` values between tasks, hosted only | —     |
@@ -353,9 +354,12 @@ runtime error and native code traps.
 | `%d = elem %a, %i`                  | `[N x T], i64`        | `T`    | read an element |
 | `%d = setelem %a, %i, %v`           | `[N x T], i64, T`     | `[N x T]` | copy of `%a` with element `%i` replaced |
 
-### Lists and strings (hosted only)
+### Lists and strings (hosted, and lists natively)
 
 A list `[T]` is an array whose length is known only when the program runs.
+Natively, it is a header `{ ptr data, i64 len, i64 cap }` held by value, with
+the elements in memory from `malloc`; see [Ownership](#ownership-native-lists)
+for who frees it.
 `array` builds one when `%d` is a list (of as many elements as it lists), and
 `elem`, `setelem`, `getpath`, `setpath`, `cellget` and `cellset` work on lists
 as on arrays, bounds-checked against the current length. `len` and `slice`
@@ -375,6 +379,41 @@ also take a `str`, which is a sequence of bytes.
 `push` and `pop` change register `%r` (or the cell): as for `setpath %r, %r`,
 the list is changed in place unless something else refers to it, so a loop of
 `push`es takes time in proportion to the number of elements.
+
+#### Ownership (native lists)
+
+A value *owns memory* if it is a list or holds one by value (in a field, an
+element or a variant's payload). Natively there is no GC, and copying a list
+header copies no elements, so a native module states who frees what with two
+instructions, which the frontend's ownership pass inserts
+(`crates/jihoo-ir/src/ownership.rs`):
+
+| syntax              | operands | result | meaning |
+|---------------------|----------|--------|---------|
+| `%d = clone %a`     | any `T`  | `T`    | a deep copy: new memory for every list in `%a`; `%d` may be `%a` |
+| `drop %a`           | any `T`  |        | frees the memory `%a` owns; `%a` must not be used again before it is written |
+
+In a native module:
+
+- `copy`, building a value from parts (`struct`, `variant`, `array`), writing a
+  part (`setfield`, `setelem`, `setpath`, `push`), `ret` and `spawn` *move*
+  an owning operand: the operand's register must not be used again before it
+  is written. Writing a part frees the part it replaces.
+- Reading an owning part (`field`, `elem`, `getpath`, `payload`) gives a
+  *view* that shares the memory of the value it was read from; the value must
+  outlive the view and not change while the view is used, and the view must
+  not be dropped. `clone %v, %v` makes a view a value of its own.
+- `pop` moves the element out of the list.
+- Call arguments are borrowed: the callee must not change, move or drop its
+  parameters (it clones one first), and the caller still owns its argument. A
+  thread started with `spawn` owns its arguments and frees them when the
+  function returns.
+- `repeat`, `splat`, `slice` and `add` on lists copy the elements they take
+  (cloning owning ones) and leave their operands as they were.
+- Registers that own memory start out empty, so dropping one that was never
+  written frees nothing.
+
+The VM ignores both: on it, `clone` is `copy` and `drop` does nothing.
 
 ### Memory (native and freestanding only)
 
