@@ -89,12 +89,12 @@ impl FnCx<'_> {
         let counter = self.emit_to(Type::I64, |dst| Inst::Copy { dst, src: zero });
         let head = self.loop_head(counter, limit);
         let i = head.value;
+        // A register read into afresh each round: the body may assign to it
+        // without a copy, as nothing else holds it.
         let x = match t {
-            Type::Str => self.emit_to(elem.clone(), |dst| Inst::StrByte { dst, src: seq, index: i }),
-            _ => self.emit_to(elem.clone(), |dst| Inst::Elem { dst, src: seq, index: i }),
+            Type::Str => self.emit_to(elem, |dst| Inst::StrByte { dst, src: seq, index: i }),
+            _ => self.emit_to(elem, |dst| Inst::Elem { dst, src: seq, index: i }),
         };
-        // A variable of its own, as `let x = xs[i]` makes.
-        let x = self.emit_to(elem, |dst| Inst::Copy { dst, src: x });
         let mut names = vec![(name.to_string(), x)];
         if let Some(index) = index {
             names.push((index.to_string(), i));
@@ -103,9 +103,10 @@ impl FnCx<'_> {
     }
 
     /// Starts a loop while `counter < limit`. Each round copies the counter
-    /// into `value` and then steps it.
+    /// into `value`, which the body may change, and then steps it in place.
     fn loop_head(&mut self, counter: Reg, limit: Reg) -> LoopHead {
         let t = self.ty(counter).clone();
+        let one = self.konst(t.clone(), 1);
         let test = self.new_block();
         let body = self.new_block();
         let end = self.new_block();
@@ -116,10 +117,8 @@ impl FnCx<'_> {
         self.terminate(Terminator::Branch { cond: c, then: body, els: end });
 
         self.switch_to(body);
-        let value = self.emit_to(t.clone(), |dst| Inst::Copy { dst, src: counter });
-        let one = self.konst(t.clone(), 1);
-        let next = self.emit_to(t, |dst| Inst::Binary { dst, op: BinOp::Add, lhs: counter, rhs: one });
-        self.emit(Inst::Copy { dst: counter, src: next });
+        let value = self.emit_to(t, |dst| Inst::Copy { dst, src: counter });
+        self.emit(Inst::Binary { dst: counter, op: BinOp::Add, lhs: counter, rhs: one });
         LoopHead { value, test, end }
     }
 
