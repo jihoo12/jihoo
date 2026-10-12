@@ -358,6 +358,9 @@ pub enum ExprKind {
     Lambda(Box<Lambda>),
     /// `match value { pattern => value ... }` where a value is expected.
     Match(Box<Expr>, Vec<MatchExprArm>),
+    /// `{ statements... value }`: runs the statements in a scope of their own;
+    /// its value is that of the last statement if it is an expression, else unit.
+    Block(Block),
     /// `Point { x: 1, y: 2 }` or `Pair(i64) { a: 1, b: 2 }`
     StructLit(TypeExpr, Vec<FieldInit>),
     /// `base.field`
@@ -525,6 +528,7 @@ pub fn set_pos(e: &mut Expr, pos: Pos) {
             args.iter_mut().for_each(|a| set_pos(a, pos));
         }
         ExprKind::Type(t) => ty(t),
+        ExprKind::Block(b) => set_block_pos(b, pos),
         ExprKind::Match(value, arms) => {
             set_pos(value, pos);
             for arm in arms {
@@ -794,6 +798,7 @@ pub fn names_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut String, NameRole)) {
             args.iter_mut().for_each(|a| names_in_expr(a, f));
         }
         ExprKind::Type(t) | ExprKind::SizeOf(t) | ExprKind::AlignOf(t) | ExprKind::PathRoot(t) => names_in_type(t, f),
+        ExprKind::Block(b) => names_in_block(b, f),
         ExprKind::Match(value, arms) => {
             names_in_expr(value, f);
             for arm in arms {

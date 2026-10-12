@@ -1,0 +1,47 @@
+// Blocks as expressions: the statements run in a scope of their own, and the
+// last one, if it is an expression, gives the value.
+
+struct P { x: i64, y: i64 }
+
+fn clamp(v: i64, lo: i64, hi: i64) -> i64 {
+    return {
+        let a = v
+        if a < lo { a = lo }
+        if a > hi { a = hi }
+        a
+    }
+}
+
+fn early(n: i64) -> i64 {
+    let r = {
+        if n > 5 { return -1 }   // leaves the function, not the block
+        n * 10
+    }
+    return r
+}
+
+fn entry() -> i64 {
+    let x = 3
+    let y = {
+        let x = 10                // hides the outer `x` inside the block only
+        x * 2
+    } + x
+    out(y)                        // 23
+    out(x)                        // 3
+    out(clamp(15, 0, 9) + clamp(-4, 0, 9) * 100)
+    out(early(2))
+    out(early(7))
+    let p = { P { x: 1, y: 2 } }
+    out(p.x + p.y)
+    {
+        let x = 99
+        out(x)
+    }
+    let total = 0
+    for i in 0..4 {
+        total += { let sq = i * i
+            sq + 1 }
+    }
+    out(total)                    // 1 + 2 + 5 + 10
+    return { y - 20 }             // 3
+}

@@ -17,7 +17,7 @@ fn stage(kind: str, call: expr, body: stmts) -> stmts {
     }
 }
 
-macro fuse(out: str, xs: expr, stages: [expr]) -> stmts {
+macro fuse(xs: expr, stages: [expr]) -> expr {
     let binds = quote { let acc = 0 }
     let body = quote { let v = x }
     for s in stages {
@@ -35,14 +35,14 @@ macro fuse(out: str, xs: expr, stages: [expr]) -> stmts {
             _ => trap()
         }
     }
-    return quote {
+    return quote({
         $binds
         for x in $xs {
             $body
             acc += v
         }
-        let $out = acc
-    }
+        acc
+    })
 }
 
 fn total(xs: [i64]) -> i64 {
@@ -73,19 +73,21 @@ fn entry() -> i64 {
     }
     let k = 3
 
-    fuse!("a", xs, map(fn(x: i64) -> i64 { return x * k }))
+    let a = fuse!(xs, map(fn(x: i64) -> i64 { return x * k }))
     out(a - total(lists.map(i64, i64, xs, fn(x: i64) -> i64 { return x * k })))
 
-    fuse!("b", xs, filter(fn(x: i64) -> bool { return x > 0 }), map(fn(x: i64) -> i64 { return x + 1 }), sum())
+    let b = fuse!(xs, filter(fn(x: i64) -> bool { return x > 0 }), map(fn(x: i64) -> i64 { return x + 1 }), sum())
     out(b - total(lists.map(i64, i64, lists.filter(i64, xs, fn(x: i64) -> bool { return x > 0 }), fn(x: i64) -> i64 { return x + 1 })))
 
-    fuse!("c", xs)
+    let c = fuse!(xs)
     out(c - total(xs))
 
     // Captured values, and a filter that keeps nothing.
     let limit = 1000
-    fuse!("d", xs, filter(fn(x: i64) -> bool { return x > limit }))
+    let d = fuse!(xs, filter(fn(x: i64) -> bool { return x > limit }))
     out(d)
+    // A fused pipeline is an expression like any other.
+    out(fuse!(xs, map(fn(x: i64) -> i64 { return x % 4 })) * 2 - fuse!(xs, map(fn(x: i64) -> i64 { return 2 * (x % 4) })))
 
     out(shape!(add(1, 2)))
     out(shape!(xs))

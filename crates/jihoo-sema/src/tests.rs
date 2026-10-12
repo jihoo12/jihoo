@@ -993,6 +993,23 @@ fn functions_on_code() {
 }
 
 #[test]
+fn block_expressions() {
+    assert_eq!(run("fn main() {\n  let x = 1\n  let y = {\n    let x = 5\n    x + 1\n  } * 2\n  print(y)\n  print(x)\n}"), "12\n1\n");
+    // A block whose last statement is not an expression is unit.
+    assert!(err("fn main() { let u = { let a = 1 } }").contains("would have type unit"));
+    assert!(err("macro m() -> stmts { return quote { print(1) } }\nfn main() { let u = { m!() } }").contains("would have type unit"));
+    // The value takes the expected type, as literals do.
+    check("fn main() { let b: u8 = { 200 } }").unwrap();
+    // Names declared in a block end with it.
+    assert!(err("fn main() { let a = { let t = 1\n t }\n print(t) }").contains("unknown"));
+    // Where a block follows, as after `if`, a `{` is not a block expression.
+    assert!(err("fn main() { if { true } { print(1) } }").contains("expected an expression, found `{`"));
+    // An expression macro may make statements with a block.
+    let src = "macro sq(e: expr) -> expr { return quote({\n  let t = $e\n  t * t\n}) }\nfn main() {\n  let t = 3\n  print(sq!(t + 1) + t)\n}";
+    assert_eq!(run(src), "19\n");
+}
+
+#[test]
 fn types_that_hold_code() {
     // A struct or enum may hold code; it then only exists while compiling,
     // and so do the functions that take or return it.

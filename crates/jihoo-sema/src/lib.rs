@@ -824,6 +824,30 @@ impl<'a> FnCx<'a> {
         r
     }
 
+    /// `{ statements... value }`: the statements in a scope of their own, and
+    /// the value of the last one if it is an expression (a statement macro is
+    /// not), or unit.
+    fn block_expr(&mut self, b: &Block, expected: Option<&Type>) -> Result<Reg, Error> {
+        self.scopes.push(HashMap::new());
+        let r = self.block_value(b, expected);
+        self.scopes.pop();
+        r
+    }
+
+    fn block_value(&mut self, b: &Block, expected: Option<&Type>) -> Result<Reg, Error> {
+        let (init, last) = match b.stmts.split_last() {
+            Some((Stmt::Expr(e), init)) if !matches!(&e.kind, ExprKind::MacroCall(m, _) if self.macro_kind(m) == Some(Type::Stmts)) => {
+                (init, Some(e))
+            }
+            _ => (&b.stmts[..], None),
+        };
+        init.iter().try_for_each(|s| self.stmt(s))?;
+        match last {
+            Some(e) => self.expr(e, expected),
+            None => Ok(self.unit()),
+        }
+    }
+
     fn stmt(&mut self, s: &Stmt) -> Result<(), Error> {
         match s {
             Stmt::Let { pos, name, ty, value } => {
@@ -1019,6 +1043,7 @@ impl<'a> FnCx<'a> {
             }
             ExprKind::Lambda(l) => self.lambda(e.pos, l, expected)?,
             ExprKind::Match(value, arms) => self.match_expr(e.pos, value, arms, expected)?,
+            ExprKind::Block(b) => self.block_expr(b, expected)?,
             ExprKind::NewChan(t, cap) => self.new_chan(e.pos, t, cap.as_deref())?,
             ExprKind::Type(t) => {
                 return Err(Error::new(t.pos, "`fn(...)` is a type, not a value"));

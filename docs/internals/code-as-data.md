@@ -1,8 +1,9 @@
 # Design: code as data
 
-Status: steps 1 to 3 are done ([Functions on code](../language/macros.md#functions-on-code),
+Status: steps 1 to 4 are done ([Functions on code](../language/macros.md#functions-on-code),
 [`[expr]` parameters](../language/macros.md#declaring-a-macro),
-[`meta`](../reference/standard-library.md#meta)); steps 4 and 5 are proposals.
+[`meta`](../reference/standard-library.md#meta),
+[blocks as expressions](../language/control-flow.md#blocks)); step 5 is a proposal.
 
 ## Why
 
@@ -154,22 +155,25 @@ is not yet checked against the Rust one on every file in the repository.
 Fixes gap 3. `examples/pipe.jh` is now `fuse!("s", xs, map(f), filter(g),
 sum())`, as fast as the loop written by hand.
 
-### 4. Statement macros as expressions
+### 4. Statement macros as expressions (done)
 
 `let s = fuse!(...)` needs statements where an expression is expected. Two
 ways:
 
 - **Block expressions** in the language: `{ stmts; value }` as an expression,
-  as in Rust. General, but it touches every profile's lowering of expressions
-  and the ownership pass.
+  as in Rust.
 - **Hoisting**: an `expr` macro may return `quote { stmts } then (value)`, and
   sema runs the statements just before the statement that holds the call. Only
   sema changes, but it is wrong inside `a && m!()` or a `while` condition,
   where the call does not always run; those places would be errors.
 
-Open: block expressions are the cleaner answer; hoisting is the cheaper one.
+Done with block expressions, which turned out to touch no more than hoisting:
+sema lowers a block to the same control flow as its statements, so JIR, the
+VM, the backend and the ownership pass see nothing new. An `expr` macro
+returns `quote({ ... value })`.
 
-Fixes gap 4.
+Fixes gap 4. `examples/pipe.jh` is now `let s = fuse!(xs, map(f), filter(g),
+sum())`, and a fused pipeline can stand anywhere an expression can.
 
 ### 5. Types at compile time
 

@@ -79,6 +79,7 @@ primary = INT | FLOAT | STRING | "true" | "false"
         | path "." NAME ("(" exprs ")")?                  ; enum variant: `Shape.Rect(1, 2)`
         | "[" exprs "]" | "[" expr ";" expr "]"           ; array (or list) literals
         | "(" expr ")"
+        | block                                           ; its last statement's value, if an expression
         | "fn" "(" (NAME (":" type)?),* ")" ("->" type)? block   ; anonymous function
         | "match" expr "{" (pattern ("if" expr)? "=>" expr) sep* "}"
         | path "!" "(" exprs ")"                          ; an expression macro

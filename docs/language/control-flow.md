@@ -43,6 +43,29 @@ let x = "42"
 let x = 42            // a new variable; the str is no longer reachable by name
 ```
 
+## Blocks
+
+A block `{ ... }` is also an expression. Its statements run in a scope of
+their own, and if the last one is an expression, that is the block's value;
+otherwise the block's value is unit.
+
+```jihoo
+let area = {
+    let w = right - left
+    let h = bottom - top
+    w * h
+}
+```
+
+- Variables declared in the block end with it; a name it declares hides an
+  outer one only inside the block.
+- `return`, `break` and `continue` inside the block leave the function or
+  loop around it, as anywhere else.
+- Where a block follows, a `{` starts that block and not a block expression:
+  `if { c } { ... }` is an error, as struct literals are in conditions.
+- An expression [macro](macros.md) can make statements this way, returning
+  `quote({ ... })`.
+
 ## Assignment
 
 `place = value` stores into a *place*: a variable, a field (`p.x`), an array

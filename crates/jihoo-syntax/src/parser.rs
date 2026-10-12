@@ -1018,6 +1018,9 @@ impl Parser {
                 self.bump();
                 ExprKind::Str(s)
             }
+            // A block is an expression, except where a block follows (`if`,
+            // `while`, `match` heads), as struct literals are not.
+            Tok::LBrace if !self.no_struct_lit => ExprKind::Block(self.block()?),
             Tok::Ident(name) if name == "path" && self.toks[self.i + 1].tok == Tok::LParen => {
                 self.bump();
                 self.bump();

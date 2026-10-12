@@ -78,9 +78,9 @@
   which macros build their code with, macros taking any number of code
   arguments, and `meta.node` to look inside code (JIR 14: `codetext`), with
   which `examples/pipe.jh` fuses `map`, `filter` and sums into one loop, three
-  times as fast as `lists`. Next: statement macros as expressions, so that a
-  fused pipeline is a value, and `type_of`, so that it works for any element
-  type; `meta` for freestanding programs.
+  times as fast as `lists`; blocks as expressions, so that a fused pipeline is
+  a value. Next: `type_of`, so that it works for any element type; `meta` for
+  freestanding programs.
 - **Memory:** a report of where native code copies lists (`jihoo build
   --cost`), which needs source positions in JIR; moving a field out of a
   value at its last use instead of copying it.
