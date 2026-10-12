@@ -11,9 +11,11 @@
 //! - What a `cell` holds (`*c`, `c.x`, `c[i]`, `c.a[i]`) is a *cell place*:
 //!   one `cellget` reads it and one `cellset` writes it, so everything holding
 //!   the cell sees the change.
+//! - `root[p]` with a path `p` is the part of `root` the path leads to
+//!   (`paths.rs`), and `p.x`, `p[i]` are longer paths.
 
 use jihoo_ir::{BinOp, Inst, PathStep, Reg, Type};
-use jihoo_syntax::ast::{Expr, ExprKind};
+use jihoo_syntax::ast::{Expr, ExprKind, PathShape};
 use jihoo_syntax::{Error, Pos};
 
 use crate::FnCx;
@@ -81,7 +83,7 @@ impl FnCx<'_> {
     }
 
     /// Extends `base` (whose type is a struct or array) by `step`.
-    fn step(&mut self, base: Place, step: Step, ty: Type) -> Place {
+    pub(crate) fn step(&mut self, base: Place, step: Step, ty: Type) -> Place {
         match base {
             Place::Reg { root, mut path, readonly, .. } => {
                 path.push(step);
@@ -123,6 +125,9 @@ impl FnCx<'_> {
             ExprKind::Field(base, name) => {
                 let base = self.place(base)?;
                 match base.ty().clone() {
+                    t if self.env.path_def(&t).is_some() => {
+                        self.extend_path(e.pos, base, PathShape::Field(name.clone()), None)
+                    }
                     t @ Type::Struct(_) => {
                         let (index, fty) = self.env.field(e.pos, &t, name, self.bindings.module)?;
                         Ok(self.step(base, Step::Field(index), fty))
@@ -151,6 +156,38 @@ impl FnCx<'_> {
             ExprKind::Index(base_expr, index) => {
                 let base = self.place(base_expr)?;
                 match base.ty().clone() {
+                    t if self.env.path_def(&t).is_some() => {
+                        let i = self.index(index)?;
+                        self.extend_path(e.pos, base, PathShape::Elem, Some(i))
+                    }
+                    // `g[p]` with a path `p` into a struct.
+                    Type::Struct(_) => {
+                        let p = self.expr(index, None)?;
+                        self.follow_path(index, base, p)
+                    }
+                    Type::Cell(inner) if matches!(*inner, Type::Struct(_)) => {
+                        let cell = self.read(base);
+                        let p = self.expr(index, None)?;
+                        self.follow_path(index, Place::Cell { cell, path: vec![], ty: *inner }, p)
+                    }
+                    Type::Ref(inner) if matches!(*inner, Type::Struct(_)) => {
+                        let target = self.deref(base);
+                        let p = self.expr(index, None)?;
+                        self.follow_path(index, target, p)
+                    }
+                    // `gp[p]` with `gp: *Struct` follows the path in memory; `gp[i]`
+                    // is still `*(gp + i)`.
+                    Type::Ptr(inner) if matches!(*inner, Type::Struct(_)) => {
+                        let ptr = self.read(base);
+                        let i = self.expr(index, Some(&Type::I64))?;
+                        if self.is_path(i) {
+                            return self.follow_path(index, Place::Mem { ptr, ty: *inner }, i);
+                        }
+                        self.expect(index.pos, i, &Type::I64, "an index")?;
+                        let ty = Type::Ptr(inner.clone());
+                        let ptr = self.emit_to(ty, |dst| Inst::Binary { dst, op: BinOp::Add, lhs: ptr, rhs: i });
+                        Ok(Place::Mem { ptr, ty: *inner })
+                    }
                     Type::Array(elem, _) | Type::List(elem) => {
                         let i = self.index(index)?;
                         Ok(self.step(base, Step::Elem(i), *elem))
@@ -224,7 +261,7 @@ impl FnCx<'_> {
     }
 
     /// The place a `ref` place refers to.
-    fn deref(&mut self, r: Place) -> Place {
+    pub(crate) fn deref(&mut self, r: Place) -> Place {
         let src = self.read(r);
         let Type::Ref(ty) = self.ty(src).clone() else { unreachable!("not a ref") };
         let root = self.emit_to(*ty.clone(), |dst| Inst::Deref { dst, src });

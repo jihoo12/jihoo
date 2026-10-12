@@ -145,6 +145,18 @@ pub enum TypeExprKind {
     Cell(Box<TypeExpr>),
     /// `fn(A, B) -> R`; without `-> R` the function returns unit.
     Fn(Vec<TypeExpr>, Option<Box<TypeExpr>>),
+    /// `path(Root).a[_].b`: a path from a `Root` value to a part of it. Values
+    /// of the type hold one index for each `[_]`.
+    Path(Box<TypeExpr>, Vec<PathShape>),
+}
+
+/// One step of a path type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PathShape {
+    /// `.name`
+    Field(String),
+    /// `[_]`: an element, whose index the path value holds.
+    Elem,
 }
 
 #[derive(Debug, Clone)]
@@ -345,6 +357,9 @@ pub enum ExprKind {
     Comptime(Box<Expr>),
     /// `size_of(T)`
     SizeOf(TypeExpr),
+    /// `path(T)`: the empty path, from a `T` to itself. `.f` and `[i]` on a
+    /// path make longer paths.
+    PathRoot(TypeExpr),
     /// `align_of(T)`
     AlignOf(TypeExpr),
 }
@@ -514,7 +529,7 @@ pub fn set_pos(e: &mut Expr, pos: Pos) {
             set_pos(x, pos);
             ty(t);
         }
-        ExprKind::SizeOf(t) | ExprKind::AlignOf(t) => ty(t),
+        ExprKind::SizeOf(t) | ExprKind::AlignOf(t) | ExprKind::PathRoot(t) => ty(t),
         ExprKind::Asm(a) => {
             if let Some((_, t)) = &mut a.output {
                 ty(t);
@@ -540,6 +555,7 @@ fn set_type_pos(t: &mut TypeExpr, pos: Pos) {
             set_pos(n, pos);
         }
         TypeExprKind::Generic(_, args) => args.iter_mut().for_each(|a| set_pos(a, pos)),
+        TypeExprKind::Path(root, _) => set_type_pos(root, pos),
         TypeExprKind::Fn(params, ret) => {
             params.iter_mut().for_each(|t| set_type_pos(t, pos));
             if let Some(r) = ret {
@@ -731,7 +747,7 @@ pub fn names_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut String, NameRole)) {
             names_in_expr(callee, f);
             args.iter_mut().for_each(|a| names_in_expr(a, f));
         }
-        ExprKind::Type(t) | ExprKind::SizeOf(t) | ExprKind::AlignOf(t) => names_in_type(t, f),
+        ExprKind::Type(t) | ExprKind::SizeOf(t) | ExprKind::AlignOf(t) | ExprKind::PathRoot(t) => names_in_type(t, f),
         ExprKind::Match(value, arms) => {
             names_in_expr(value, f);
             for arm in arms {
@@ -810,6 +826,14 @@ fn names_in_type(t: &mut TypeExpr, f: &mut dyn FnMut(&mut String, NameRole)) {
             params.iter_mut().for_each(|p| names_in_type(p, f));
             if let Some(r) = ret {
                 names_in_type(r, f);
+            }
+        }
+        TypeExprKind::Path(root, shape) => {
+            names_in_type(root, f);
+            for step in shape {
+                if let PathShape::Field(n) = step {
+                    f(n, NameRole::Field);
+                }
             }
         }
     }

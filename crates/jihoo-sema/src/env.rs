@@ -120,6 +120,8 @@ pub(crate) struct Env<'p> {
     struct_keys: RefCell<HashMap<String, String>>,
     struct_instances: RefCell<Vec<(String, String, Rc<Bindings>)>>,
     instance_keys: RefCell<HashMap<String, String>>,
+    /// Path types (`path(Root).a[_]`) by name, in creation order (`paths.rs`).
+    pub(crate) paths: RefCell<Vec<(String, Rc<crate::paths::PathDef>)>>,
     pending: RefCell<VecDeque<String>>,
     /// The C symbols of the extern functions code uses (see `ir_name`).
     used_externs: RefCell<HashSet<String>>,
@@ -161,6 +163,7 @@ impl<'p> Env<'p> {
             struct_keys: RefCell::new(HashMap::new()),
             struct_instances: RefCell::new(Vec::new()),
             instance_keys: RefCell::new(HashMap::new()),
+            paths: RefCell::new(Vec::new()),
             pending: RefCell::new(VecDeque::new()),
             used_externs: RefCell::new(HashSet::new()),
         };
@@ -359,6 +362,10 @@ impl<'p> Env<'p> {
                 };
                 Ok(Type::Fn(params, Box::new(ret)))
             }
+            TypeExprKind::Path(root, shape) => {
+                let root = self.resolve_in(root, b, in_macro)?;
+                self.path_type(t.pos, root, shape.clone(), b.module)
+            }
             TypeExprKind::Generic(name, args) => {
                 let key = self.key_or_err(t.pos, b, name)?;
                 self.check_visible(t.pos, self.viewer(b.module, name), &key)?;
@@ -505,6 +512,9 @@ impl<'p> Env<'p> {
     }
 
     pub fn struct_fields(&self, pos: Pos, name: &str) -> Result<Fields, Error> {
+        if let Some(def) = self.path_named(name) {
+            return Ok(def.fields());
+        }
         let (decl, bindings) = self.struct_decl(pos, name)?;
         if !decl.params.is_empty() && bindings.is_empty() {
             return Err(Error::new(pos, format!("struct `{name}` is generic; write `{name}(...)`")));
@@ -585,6 +595,9 @@ impl<'p> Env<'p> {
 
     fn acyclic(&self, root: &Type, t: &Type, stack: &mut Vec<String>) -> Result<(), Error> {
         let (Type::Struct(root_name) | Type::Enum(root_name)) = root else { return Ok(()) };
+        if self.path_named(root_name).is_some() {
+            return Ok(()); // indices only
+        }
         let decl = self.struct_decl(Pos::new(1, 1), root_name)?.0;
         let name = t.to_string();
         if stack.contains(&name) {
@@ -611,6 +624,9 @@ impl<'p> Env<'p> {
         let Type::Struct(s) = t else {
             return Err(Error::new(pos, format!("type {t} has no fields")));
         };
+        if self.path_named(s).is_some() {
+            return Err(Error::new(pos, format!("type {t} is a path; `.{name}` on it makes a longer path")));
+        }
         let (index, ty) = self
             .struct_fields(pos, s)?
             .iter()

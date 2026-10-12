@@ -1574,3 +1574,21 @@ fn go_starts_threads_natively() {
     assert!(m.to_string().contains("  spawn %"), "{m}");
     assert!(err(&fs("fn f() {}\nfn g() { go f() }")).contains("`go` needs the VM's scheduler or the C library's threads"));
 }
+
+#[test]
+fn path_references() {
+    let ok = "struct N { v: i64, next: path(G).ns[_] }\nstruct G { ns: [N], first: path(G).ns[_] }\n\
+              fn main() { let g = G { ns: [], first: path(G).ns[0] }\n\
+              push(g.ns, N { v: 1, next: g.first })\n g[g[g.first].next].v = 2\n print(g.first == g[g.first].next) }";
+    let m = check(ok).unwrap();
+    // A path is a struct of its indices.
+    assert!(m.structs.iter().any(|s| s.name == "path(G).ns[_]" && s.fields.len() == 1));
+    let base = "struct A { xs: [i64], r: ref i64 }\nstruct B { a: A }\n";
+    let e = |body: &str| err(&format!("{base}fn main() {{ {body} }}"));
+    assert!(e("let b = B { a: A { xs: [], r: ref 1 } }\n print(b[path(A).xs[0]])").contains("path(A).xs[_] leads from `A`, not from `B`"));
+    assert!(e("let p = path(A).r.x").contains("a path cannot take `.x` of ref i64"));
+    assert!(e("let p = path(A).nope").contains("struct `A` has no field `nope`"));
+    assert!(e("let p = path(i64)").contains("a path starts at a struct, not i64"));
+    assert!(e("let b = B { a: A { xs: [], r: ref 1 } }\n print(b[3])").contains("a struct is indexed with a path"));
+    assert!(err("struct A { x: i64 }\nfn f(p: path(A).x[_]) {}\nfn main() {}").contains("a path cannot take an element of i64"));
+}

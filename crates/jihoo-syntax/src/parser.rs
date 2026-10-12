@@ -506,6 +506,9 @@ impl Parser {
             return Ok(TypeExpr { pos, kind: TypeExprKind::Array(Box::new(elem), Box::new(len)) });
         }
         let (pos, mut name) = self.ident("a type")?;
+        if name == "path" && self.same_line(&Tok::LParen) {
+            return self.path_type(pos);
+        }
         if !is_builtin_type(&name) {
             self.mark();
         }
@@ -519,6 +522,32 @@ impl Parser {
             return Ok(TypeExpr { pos, kind: TypeExprKind::Generic(name, args) });
         }
         Ok(TypeExpr { pos, kind: TypeExprKind::Named(name) })
+    }
+
+    /// The rest of `path(Root).a[_].b`, after `path`.
+    fn path_type(&mut self, pos: Pos) -> PResult<TypeExpr> {
+        self.expect(&Tok::LParen, "`(`")?;
+        let root = self.type_expr()?;
+        self.expect(&Tok::RParen, "`)`")?;
+        let mut shape = Vec::new();
+        loop {
+            if self.same_line(&Tok::Dot) {
+                self.bump();
+                shape.push(PathShape::Field(self.ident("a field name")?.1));
+                self.mark();
+            } else if self.same_line(&Tok::LBracket) {
+                self.bump();
+                if !matches!(self.peek(), Tok::Ident(n) if n == "_") {
+                    return Err(Error::new(self.pos(), "expected `_`: a path type leaves its indices open, as in `[_]`"));
+                }
+                self.bump();
+                self.expect(&Tok::RBracket, "`]`")?;
+                shape.push(PathShape::Elem);
+            } else {
+                break;
+            }
+        }
+        Ok(TypeExpr { pos, kind: TypeExprKind::Path(Box::new(root), shape) })
     }
 
     /// `(a, b, ...)`
@@ -964,6 +993,13 @@ impl Parser {
             Tok::Str(s) => {
                 self.bump();
                 ExprKind::Str(s)
+            }
+            Tok::Ident(name) if name == "path" && self.toks[self.i + 1].tok == Tok::LParen => {
+                self.bump();
+                self.bump();
+                let ty = self.type_expr()?;
+                self.expect(&Tok::RParen, "`)`")?;
+                ExprKind::PathRoot(ty)
             }
             Tok::Ident(name) if matches!(name.as_str(), "size_of" | "align_of") && self.toks[self.i + 1].tok == Tok::LParen => {
                 self.bump();

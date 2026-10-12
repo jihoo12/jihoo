@@ -1,0 +1,59 @@
+// Path references: `path(Root).a[_]` holds indices only, and `root[p]` follows
+// it like the written-out place would, in every profile.
+
+struct Link {
+    value: i64
+    next: path(Ring).links[_]
+}
+
+struct Ring {
+    links: [Link; 6]
+    head: path(Ring).links[_]
+}
+
+struct Grid {
+    cells: [[i64; 3]; 3]
+}
+
+fn at(i: i64) -> path(Ring).links[_] {
+    return path(Ring).links[i]
+}
+
+fn sum(r: Ring) -> i64 {
+    let total = r[r.head].value
+    let p = r[r.head].next
+    while p != r.head {
+        total = total + r[p].value
+        p = r[p].next
+    }
+    return total
+}
+
+fn entry() -> i64 {
+    let r = Ring { links: [Link { value: 0, next: at(0) }; 6], head: at(0) }
+    let i = 0
+    while i < 6 {
+        r[at(i)].value = i * 10
+        r[at(i)].next = at((i + 2) % 6)       // 0 -> 2 -> 4 -> 0
+        i = i + 1
+    }
+    out(sum(r))                               // 0 + 20 + 40
+    r.head = at(1)
+    out(sum(r))                               // 10 + 30 + 50
+
+    // A path to a path: follow one to find the next, then extend it.
+    let second = r[r[r.head].next].next       // 1 -> 3 -> 5
+    out(r[second].value)
+
+    // Two-index paths, built step by step.
+    let g = Grid { cells: [[0; 3]; 3] }
+    let row = path(Grid).cells[1]
+    let c = row[2]
+    g[c] = 7
+    g[path(Grid).cells[2][0]] = g[c] + 1
+    out(g.cells[1][2] * 10 + g.cells[2][0])   // 78
+    if c == path(Grid).cells[1][2] {
+        out(1)
+    }
+    return 0
+}

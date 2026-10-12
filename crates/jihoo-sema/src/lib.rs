@@ -23,6 +23,7 @@ mod floats;
 mod generic;
 mod hygiene;
 mod macros;
+mod paths;
 mod patterns;
 mod place;
 mod tasks;
@@ -206,6 +207,13 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
 
     for t in env.struct_instances() {
         define(t, Pos::new(1, 1), &mut errors);
+    }
+    for t in env.path_types() {
+        let def = env.path_def(&t).unwrap();
+        match env.path_steps(def.pos, &def) {
+            Ok(_) => define(t, def.pos, &mut errors),
+            Err(e) => errors.push(e),
+        }
     }
 
     // Only the C functions the program uses are part of it, so declaring a
@@ -1004,6 +1012,7 @@ impl<'a> FnCx<'a> {
                 let n = i64::try_from(n).map_err(|_| Error::new(e.pos, format!("{ty} is too large")))?;
                 self.konst(Type::I64, n)
             }
+            ExprKind::PathRoot(t) => self.path_root(e.pos, t)?,
             ExprKind::Slice(base, lo, hi) => self.slice(e.pos, base, lo.as_deref(), hi.as_deref())?,
             ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Deref(_) => {
                 // `Shape.Empty`: a variant without a payload.
