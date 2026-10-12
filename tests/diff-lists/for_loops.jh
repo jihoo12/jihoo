@@ -1,0 +1,64 @@
+// `for` loops over lists and strings walk the value they started with, also
+// when the body changes the list, and copy nothing when it does not.
+
+fn total(xs: [i64]) -> i64 {
+    let t = 0
+    for x in xs {
+        t += x
+    }
+    return t + len(xs)            // still usable after the loop
+}
+
+// Pushes to the list it walks: the loop sees the first three only.
+fn doubled(xs: [i64]) -> [i64] {
+    for i, x in xs {
+        push(xs, x * 2)
+        xs[i] = 0
+    }
+    return xs
+}
+
+fn lengths(words: [str]) -> i64 {
+    let s = 0
+    for i, w in words {
+        w += "!"                  // the loop variable is a copy
+        s += len(w) * (i + 1)
+    }
+    return s
+}
+
+fn vowels(s: str) -> i64 {
+    let n = 0
+    for b in s {
+        if b == 97 || b == 101 || b == 105 || b == 111 || b == 117 { n += 1 }
+    }
+    return n
+}
+
+fn grid() -> i64 {
+    let rows: [[i64]] = [[1, 2], [3], [4, 5, 6]]
+    let s = 0
+    for r, row in rows {
+        for x in row {
+            if x == 5 { break }
+            s += x
+        }
+        push(rows[r], 10)         // changes `rows`, which the loop copies
+    }
+    out(len(rows[2]))
+    return s                      // 1 + 2 + 3 + 4
+}
+
+fn entry() -> i64 {
+    let xs: [i64] = [1, 2, 3]
+    out(total(xs))
+    let ys = doubled(xs)
+    for y in ys { out(y) }
+    out(len(xs))
+    out(lengths(["a", "bcd"]))
+    out(vowels("for loops"))
+    out(grid())
+    let empty: [i64] = []
+    for e in empty { out(e) }
+    return len(ys)
+}

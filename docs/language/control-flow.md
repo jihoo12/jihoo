@@ -1,8 +1,8 @@
 # Variables and control flow
 
 Inside a function body, statements run in order. jihoo has one way to declare a
-variable, two branching forms (`if` and [`match`](patterns.md)), one loop
-(`while`, with `break` and `continue`), and `return`.
+variable, two branching forms (`if` and [`match`](patterns.md)), two loops
+(`while` and `for`, with `break` and `continue`), and `return`.
 
 ```jihoo
 fn collatz(n: i64) -> i64 {
@@ -105,21 +105,46 @@ A struct literal cannot appear directly in a condition, since
 
 ## `while`
 
-`while cond { body }` runs the body as long as the condition, a `bool`, holds.
-It is the only loop; count with a variable:
+`while cond { body }` runs the body as long as the condition, a `bool`, holds:
 
 ```jihoo
-let i = 0
-while i < len(xs) {
-    total = total + xs[i]
-    i = i + 1
+let n = 1
+while n < limit {
+    n = n * 2
 }
 ```
 
+## `for`
+
+`for` walks a range of integers, or the elements of a list, an array or a
+`str` (its bytes, as `u8`). With two names, the first is the index, an `i64`:
+
+```jihoo
+for i in 0..len(xs) { ... }        // 0, 1, ... len(xs) - 1
+for x in xs { total += x }
+for i, x in xs { print(i) }
+for b in "hi" { print(b) }         // 104, 105
+```
+
+- `lo..hi` counts up from `lo` to `hi - 1`, and is empty when `hi <= lo`. Both
+  are integers of the same type (a literal takes the other's type, so
+  `0..n` works for any integer `n`), and both are evaluated once, before the
+  loop starts. The counter never steps past `hi`, so a range may end at its
+  type's largest value.
+- `for x in xs` walks the value `xs` had when the loop started: `xs` is
+  evaluated once, and the body changing it (`push(xs, x)`, `xs[i] = 0`) does
+  not change what the loop sees, since [lists are values](lists.md#lists-are-values).
+  Neither the VM nor native code copies the list for this unless the body
+  does change it.
+- The names are new variables in each round, visible only in the body. `x` is
+  a copy of the element: assigning to it changes neither the list nor the next
+  round. Assigning to the index does not change the next round either.
+
 ## `break` and `continue`
 
-`break` leaves the innermost `while` at once, and `continue` skips the rest of
-its body and goes on with the next test of the condition:
+`break` leaves the innermost loop at once, and `continue` skips the rest of
+its body and goes on with the loop's next round (the next test of a `while`
+condition, the next element or number of a `for`):
 
 ```jihoo
 let i = 0

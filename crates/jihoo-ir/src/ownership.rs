@@ -20,6 +20,9 @@
 //!   use of a view as a use of its root, so the root is not freed or moved
 //!   away before the view's last use either). Otherwise a `clone` right after
 //!   the read makes it a value of its own. So `len(g.nodes)` copies nothing.
+//!   A `copy` of a value that is still used afterwards, or of a parameter,
+//!   is a view on the same terms, so the copy of a list that a `for` loop
+//!   walks costs nothing unless the body changes the list.
 //! - Where a register's value dies without being moved (after its last use, on
 //!   a branch that does not use it again, or right after it is made if it is
 //!   never used) a `drop` frees it.
@@ -103,6 +106,8 @@ fn cloned_params(f: &Function, owning: &mut Owning) -> Vec<usize> {
         return vec![];
     }
     let live_at_entry = liveness(f, &tracked, &HashMap::new())[0].clone();
+    // A copy that stays a view of the parameter does not consume it.
+    let roots = views(f, &tracked);
     (0..f.params.len())
         .filter(|&i| {
             let p = Reg(i as u32);
@@ -110,8 +115,11 @@ fn cloned_params(f: &Function, owning: &mut Owning) -> Vec<usize> {
                 && live_at_entry.contains(&p)
                 && f.blocks.iter().any(|b| {
                     b.insts.iter().any(|inst| {
+                        let alias = matches!(inst, Inst::Copy { dst, .. } if roots.contains_key(dst));
                         let mut i = inst.clone();
-                        consumed(&mut i).into_iter().any(|r| *r == p) || defined(inst).contains(&p) || changes(inst, p)
+                        (!alias && consumed(&mut i).into_iter().any(|r| *r == p))
+                            || defined(inst).contains(&p)
+                            || changes(inst, p)
                     }) || matches!(b.term, Terminator::Ret(r) if r == p)
                 })
         })
@@ -364,13 +372,20 @@ fn projection(inst: &Inst) -> Option<(Reg, Reg)> {
 /// Which owning registers can stay views, and the root of each. `borrowed`
 /// registers (parameters) are never written, so they are roots that stay.
 fn views(f: &Function, tracked: &HashSet<Reg>) -> HashMap<Reg, Reg> {
-    // Only a register written once, by a part read or a copy of a view, and
-    // never changed in place, can be a view.
+    // Only a register written once, by a part read or a copy, and never
+    // changed in place, can be a view. A part read starts one; so does a copy
+    // of a parameter, or of a value still used after the copy (such as the
+    // list a `for` loop walks), where a move is not possible anyway. Any other
+    // copy is a view only if its source is.
+    let params = f.params.len() as u32;
+    let base = liveness(f, tracked, &HashMap::new());
     let mut writes: HashMap<Reg, usize> = HashMap::new();
     let mut changed = HashSet::new();
     let mut source: HashMap<Reg, (Reg, bool)> = HashMap::new();
-    for b in &f.blocks {
-        for inst in &b.insts {
+    for (b, block) in f.blocks.iter().enumerate() {
+        let mut live = live_out(f, b, &base);
+        step_term(&block.term, &mut live, tracked, &HashMap::new());
+        for inst in block.insts.iter().rev() {
             for d in defined(inst) {
                 *writes.entry(d).or_default() += 1;
                 if changes(inst, d) {
@@ -381,22 +396,25 @@ fn views(f: &Function, tracked: &HashSet<Reg>) -> HashMap<Reg, Reg> {
                 source.insert(dst, (src, true));
             } else if let Inst::Copy { dst, src } = inst {
                 if dst != src {
-                    source.insert(*dst, (*src, false));
+                    source.insert(*dst, (*src, src.0 < params || live.contains(src)));
                 }
             }
+            step_back(inst, &mut live, tracked, &HashMap::new());
         }
     }
-    let params = f.params.len() as u32;
     source.retain(|d, _| tracked.contains(d) && writes.get(d) == Some(&1) && !changed.contains(d) && d.0 >= params);
     let mut excluded: HashSet<Reg> = HashSet::new();
     loop {
-        // A projection is a view unless excluded; a copy is one if its source is.
+        // A register that starts a view is one unless excluded; a copy is one
+        // if its source is.
         let mut is_view: HashSet<Reg> =
-            source.iter().filter(|(d, (_, proj))| *proj && !excluded.contains(d)).map(|(d, _)| *d).collect();
+            source.iter().filter(|(d, (_, starts))| *starts && !excluded.contains(d)).map(|(d, _)| *d).collect();
         loop {
             let more: Vec<Reg> = source
                 .iter()
-                .filter(|(d, (s, proj))| !*proj && !excluded.contains(d) && !is_view.contains(d) && is_view.contains(s))
+                .filter(|(d, (s, starts))| {
+                    !*starts && !excluded.contains(d) && !is_view.contains(d) && is_view.contains(s)
+                })
                 .map(|(d, _)| *d)
                 .collect();
             if more.is_empty() {

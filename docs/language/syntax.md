@@ -67,15 +67,15 @@ These words are reserved:
 
 ```text
 as      asm     break   cell      chan    comptime  const   continue
-else    enum    export  extern    false   fn        go      if
-import  let     macro   match     pub     quote     ref     return
-select  struct  true    while
+else    enum    export  extern    false   fn        for     go
+if      import  let     macro     match   pub       quote   ref
+return  select  struct  true      while
 ```
 
 A few more words have a meaning only in one place and are ordinary names
 elsewhere: `type` (in `comptime T: type`), `expr`, `stmts` and `items` (macro
-result types), `in`, `out`, `reg` and `clobber` (inside `asm`), and `_` (in
-patterns and `select`).
+result types), `in` (in `for` loops, and inside `asm` with `out`, `reg` and
+`clobber`), and `_` (in patterns and `select`).
 
 ## Literals
 

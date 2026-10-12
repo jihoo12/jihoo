@@ -20,6 +20,7 @@ pub enum Tok {
     If,
     Else,
     While,
+    For,
     Break,
     Continue,
     True,
@@ -52,6 +53,8 @@ pub enum Tok {
     Dot,
     /// `...`: the variable arguments of a C function.
     Ellipsis,
+    /// `..`: a range in a `for` loop, or the rest of a struct pattern.
+    DotDot,
     Comma,
     Colon,
     Semi,
@@ -232,6 +235,10 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 Tok::Ellipsis
             }
+            b'.' if self.peek() == b'.' => {
+                self.bump();
+                Tok::DotDot
+            }
             b'.' => Tok::Dot,
             b',' => Tok::Comma,
             b':' => Tok::Colon,
@@ -405,6 +412,7 @@ impl<'a> Lexer<'a> {
                     "if" => Tok::If,
                     "else" => Tok::Else,
                     "while" => Tok::While,
+                    "for" => Tok::For,
                     "break" => Tok::Break,
                     "continue" => Tok::Continue,
                     "true" => Tok::True,

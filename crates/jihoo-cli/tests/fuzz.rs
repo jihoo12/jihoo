@@ -4,12 +4,12 @@
 //! Each seed makes one program in the core language that every profile shares:
 //! integers of every width and signedness, bools and `f64`, casts, every
 //! operator, arrays and structs nested in each other, copied, updated in part,
-//! compared, and passed to and returned from functions; `if`, `match`, loops
-//! with `break` and `continue`, compound assignment. The program prints values
-//! with `out` as it goes and the state of its variables at the end (see
-//! `tests/common/mod.rs`). Programs never trap: divisors are made odd and
-//! indexes are taken modulo the length, so the VM and LLVM must agree on every
-//! value.
+//! compared, and passed to and returned from functions; `if`, `match`, `while`
+//! and `for` loops with `break` and `continue`, compound assignment. The
+//! program prints values with `out` as it goes and the state of its variables
+//! at the end (see `tests/common/mod.rs`). Programs never trap: divisors are
+//! made odd and indexes are taken modulo the length, so the VM and LLVM must
+//! agree on every value.
 //!
 //!   cargo test --test fuzz                                  # DEFAULT_SEEDS seeds
 //!   JIHOO_FUZZ_SEEDS=5000 cargo test --release --test fuzz  # more
@@ -726,6 +726,7 @@ impl Gen {
                 }
                 self.line("}");
             }
+            16 if depth > 0 && self.loops < 2 && self.rng.chance(50) => self.for_loop(depth),
             16 if depth > 0 && self.loops < 2 => {
                 // The counter goes up first, so `continue` cannot skip it.
                 let i = self.fresh("i");
@@ -781,6 +782,37 @@ impl Gen {
                 self.out(&e, &t);
             }
         }
+    }
+
+    /// A `for` loop over a range, or over an array, list or str variable with
+    /// the index, which the body may change: the loop walks the value the
+    /// variable had when it started.
+    fn for_loop(&mut self, depth: u32) {
+        let seqs: Vec<usize> =
+            (0..self.vars.len()).filter(|&v| matches!(self.vars[v].ty, Ty::Array(..) | Ty::List(_) | Ty::Str)).collect();
+        let scope = self.vars.len();
+        if seqs.is_empty() || self.rng.chance(30) {
+            let i = self.fresh("i");
+            let n = self.rng.below(4);
+            self.line(&format!("for {i} in 0..{n} {{"));
+            self.vars.push(Var { name: i, ty: Ty::I64, mutable: false });
+        } else {
+            let v = *self.rng.pick(&seqs);
+            let (seq, ty) = (self.vars[v].name.clone(), self.vars[v].ty.clone());
+            let el = match ty {
+                Ty::Array(el, _) | Ty::List(el) => *el,
+                _ => Ty::Int { bits: 8, signed: false },
+            };
+            let (i, x) = (self.fresh("i"), self.fresh("x"));
+            self.line(&format!("for {i}, {x} in {seq} {{"));
+            self.vars.push(Var { name: i, ty: Ty::I64, mutable: false });
+            self.vars.push(Var { name: x, ty: el, mutable: true });
+        }
+        self.loops += 1;
+        self.block(depth - 1);
+        self.loops -= 1;
+        self.vars.truncate(scope);
+        self.line("}");
     }
 
     /// Replaces what a cell somewhere in a variable holds, or pushes to the

@@ -1,0 +1,86 @@
+// `for` loops over ranges and arrays: bounds evaluated once, `continue` and
+// `break`, ranges of small and unsigned types up to their largest value.
+
+struct P { x: i64, y: i64 }
+
+fn calls(n: i64) -> i64 {
+    out(n)                        // printed once per loop, not per round
+    return n
+}
+
+fn sum_to(n: i64) -> i64 {
+    let s = 0
+    for i in 0..calls(n) {
+        s += i
+    }
+    return s
+}
+
+// The body changing the variable a bound came from changes nothing.
+fn moving_end() -> i64 {
+    let n = 4
+    let rounds = 0
+    for i in 0..n {
+        n = 0
+        rounds += 1
+    }
+    return rounds
+}
+
+fn skips() -> i64 {
+    let s = 0
+    for i in 0..10 {
+        if i % 3 == 0 { continue }
+        if i > 7 { break }
+        s += i                    // 1 + 2 + 4 + 5 + 7
+    }
+    return s
+}
+
+fn nested() -> i64 {
+    let count = 0
+    for i in 0..5 {
+        for j in i..5 {
+            if j == 3 { break }
+            count += 1
+        }
+    }
+    return count                  // 3 + 2 + 1
+}
+
+fn top_bytes() -> i64 {
+    let hi: u8 = 255
+    let s = 0
+    for b in 250..hi {            // a u8 range ending at its largest value
+        s += b as i64
+    }
+    for i in -3..-1 {
+        s += i
+    }
+    for i in 5..2 {               // empty
+        s += 1000
+    }
+    return s                      // 250 + ... + 254 - 3 - 2
+}
+
+fn arrays() -> i64 {
+    let ps = [P { x: 1, y: 2 }, P { x: 3, y: 4 }, P { x: 5, y: 6 }]
+    let s = 0
+    for i, p in ps {
+        p.x = 100                 // the loop variable is a copy
+        s += i * p.y
+        ps[i].y = 0               // the loop walks the array as it started
+    }
+    out(ps[0].x + ps[2].y)
+    return s                      // 0 * 2 + 1 * 4 + 2 * 6
+}
+
+fn entry() -> i64 {
+    out(sum_to(5))
+    out(moving_end())
+    out(skips())
+    out(nested())
+    out(top_bytes())
+    out(arrays())
+    return 7
+}

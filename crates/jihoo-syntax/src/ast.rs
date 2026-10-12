@@ -201,11 +201,21 @@ pub enum Stmt {
         cond: Expr,
         body: Block,
     },
-    /// `break`: leaves the innermost `while`.
+    /// `for x in iter { ... }`, or `for i, x in iter { ... }` with the index
+    /// too. `lo..hi` is `iter: lo, end: Some(hi)`.
+    For {
+        pos: Pos,
+        index: Option<String>,
+        name: String,
+        iter: Expr,
+        end: Option<Expr>,
+        body: Block,
+    },
+    /// `break`: leaves the innermost loop.
     Break {
         pos: Pos,
     },
-    /// `continue`: goes on with the innermost `while`'s next test.
+    /// `continue`: goes on with the innermost loop's next round.
     Continue {
         pos: Pos,
     },
@@ -606,6 +616,14 @@ pub fn set_stmt_pos(s: &mut Stmt, pos: Pos) {
             set_pos(cond, pos);
             set_block_pos(body, pos);
         }
+        Stmt::For { pos: p, iter, end, body, .. } => {
+            *p = pos;
+            set_pos(iter, pos);
+            if let Some(e) = end {
+                set_pos(e, pos);
+            }
+            set_block_pos(body, pos);
+        }
         Stmt::Break { pos: p } | Stmt::Continue { pos: p } => *p = pos,
         Stmt::Go { pos: p, call } => {
             *p = pos;
@@ -885,6 +903,17 @@ pub fn names_in_stmt(s: &mut Stmt, f: &mut dyn FnMut(&mut String, NameRole)) {
         }
         Stmt::While { cond, body } => {
             names_in_expr(cond, f);
+            names_in_block(body, f);
+        }
+        Stmt::For { index, name, iter, end, body, .. } => {
+            names_in_expr(iter, f);
+            if let Some(e) = end {
+                names_in_expr(e, f);
+            }
+            if let Some(i) = index {
+                f(i, NameRole::Binds);
+            }
+            f(name, NameRole::Binds);
             names_in_block(body, f);
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}

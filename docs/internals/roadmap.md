@@ -66,6 +66,11 @@
     attribute is native, `#![hosted]` asks for the VM, and `jihoo run`
     compiles and runs native and freestanding programs. Native tasks are
     threads and share no cells; `comptime` and macros still run on the VM.
+26. `for` loops in every profile: ranges `lo..hi`, and lists, arrays and
+    strings, with the index (`for i, x in xs`). The loop walks the value it
+    started with; natively that is a view of the list, which the ownership
+    pass now also makes of any copy whose original is still used, unless one
+    of them changes.
 
 ## Next
 
@@ -80,8 +85,8 @@
 - **Concurrency:** weaker memory orders (acquire/release) for code that needs
   the speed; threads in freestanding programs, over `clone`; tasks on more
   than one core in the VM, which needs a GC that threads can share.
-- **Hosted library:** a map keyed by `str`; files; parsing floats; `for`
-  loops over lists and ranges, so that library code needs fewer `while` loops.
+- **Hosted library:** a map keyed by `str`; files; parsing floats; library
+  code written with `for` instead of `while` loops.
 
 ## Library layers
 

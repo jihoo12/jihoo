@@ -45,7 +45,9 @@ stmt  = "let" NAME (":" type)? "=" expr
       | place ("+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=") expr
       | "if" expr block ("else" (block | if-stmt))?
       | "while" expr block
-      | "break" | "continue"                              ; inside a `while`
+      | "for" (NAME ",")? NAME "in" expr block            ; a list, array or str
+      | "for" NAME "in" expr ".." expr block              ; integers, end excluded
+      | "break" | "continue"                              ; inside a loop
       | "return" expr?
       | "match" expr "{" (pattern ("if" expr)? "=>" (block | stmt)) sep* "}"
       | "select" "{" select-arm sep* "}"
@@ -104,7 +106,7 @@ single  = "_" | NAME | INT | "-" INT | "true" | "false"
 
 ```text
 as      asm     break   cell      chan    comptime  const   continue
-else    enum    export  extern    false   fn        go      if
-import  let     macro   match     pub     quote     ref     return
-select  struct  true    while
+else    enum    export  extern    false   fn        for     go
+if      import  let     macro     match   pub       quote   ref
+return  select  struct  true      while
 ```

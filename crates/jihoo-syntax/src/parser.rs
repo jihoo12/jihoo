@@ -664,6 +664,31 @@ impl Parser {
                 let body = self.block()?;
                 Ok(Stmt::While { cond, body })
             }
+            Tok::For => {
+                let pos = self.bump().pos;
+                let (_, first) = self.ident("variable name")?;
+                self.mark();
+                let (index, name) = if self.eat(&Tok::Comma) {
+                    let (_, name) = self.ident("variable name")?;
+                    self.mark();
+                    (Some(first), name)
+                } else {
+                    (None, first)
+                };
+                match self.peek() {
+                    Tok::Ident(w) if w == "in" => {
+                        self.bump();
+                    }
+                    _ => return Err(self.unexpected("`in`")),
+                }
+                let (iter, end) = self.with_struct_lit(false, |p| {
+                    let iter = p.expr()?;
+                    let end = if p.eat(&Tok::DotDot) { Some(p.expr()?) } else { None };
+                    Ok((iter, end))
+                })?;
+                let body = self.block()?;
+                Ok(Stmt::For { pos, index, name, iter, end, body })
+            }
             _ => {
                 let e = self.expr()?;
                 if self.same_line(&Tok::Assign) {
@@ -832,8 +857,7 @@ impl Parser {
             if rest {
                 return Err(p.unexpected("`}` after `..`"));
             }
-            if p.eat(&Tok::Dot) {
-                p.expect(&Tok::Dot, "`..`")?;
+            if p.eat(&Tok::DotDot) {
                 rest = true;
                 return Ok(());
             }
@@ -1365,6 +1389,7 @@ fn punct(t: &Tok) -> &'static str {
         Tok::If => "if",
         Tok::Else => "else",
         Tok::While => "while",
+        Tok::For => "for",
         Tok::Break => "break",
         Tok::Continue => "continue",
         Tok::True => "true",
@@ -1389,6 +1414,7 @@ fn punct(t: &Tok) -> &'static str {
         Tok::Extern => "extern",
         Tok::Export => "export",
         Tok::Ellipsis => "...",
+        Tok::DotDot => "..",
         Tok::Dollar => "$",
         Tok::LParen => "(",
         Tok::RParen => ")",

@@ -22,6 +22,7 @@ mod env;
 mod floats;
 mod generic;
 mod hygiene;
+mod loops;
 mod macros;
 mod paths;
 mod patterns;
@@ -384,7 +385,7 @@ struct FnCx<'a> {
 
 #[derive(Clone, Copy)]
 struct Loop {
-    /// The block that tests the condition.
+    /// The block that tests the condition, where `continue` goes.
     next: BlockId,
     /// The block after the loop.
     end: BlockId,
@@ -900,13 +901,16 @@ impl<'a> FnCx<'a> {
 
                 self.switch_to(end_bb);
             }
+            Stmt::For { pos, index, name, iter, end, body } => {
+                self.for_stmt(*pos, index.as_deref(), name, iter, end.as_ref(), body)?
+            }
             Stmt::Break { pos } | Stmt::Continue { pos } => {
                 let is_break = matches!(s, Stmt::Break { .. });
                 let Some(l) = self.loops.last().copied() else {
                     let word = if is_break { "break" } else { "continue" };
                     // A closure body is a function of its own, so the loops
                     // around the closure do not count.
-                    return Err(Error::new(*pos, format!("`{word}` outside of a `while` loop")));
+                    return Err(Error::new(*pos, format!("`{word}` outside of a loop")));
                 };
                 self.terminate(Terminator::Jump(if is_break { l.end } else { l.next }));
                 // Anything after this goes into an unreachable block.

@@ -102,8 +102,8 @@ fn break_and_continue() {
     // `continue` jumps to the condition block, `break` past the loop.
     let main = m.func("main").unwrap().to_string();
     assert!(main.contains("jmp bb1"), "{main}");
-    assert_eq!(err("fn main() { break }"), "1:13: `break` outside of a `while` loop");
-    assert!(err("fn main() { if true { continue } }").contains("`continue` outside of a `while` loop"));
+    assert_eq!(err("fn main() { break }"), "1:13: `break` outside of a loop");
+    assert!(err("fn main() { if true { continue } }").contains("`continue` outside of a loop"));
     // A closure body is a function of its own: the loop around it does not count.
     assert!(err("fn main() { while true {\n  let f = fn() { break }\n  break\n} }").contains("`break` outside"));
     // Code after `break` is unreachable; what follows the loop is not.
@@ -111,6 +111,24 @@ fn break_and_continue() {
     check("fn f() -> i64 { while true { break\n return 2 }\n return 1 }\nfn main() {}").unwrap();
     // `break` and `continue` are keywords.
     assert!(err("fn main() { let break = 1 }").contains("variable name"));
+}
+
+#[test]
+fn for_loops() {
+    // A literal bound takes the other bound's type.
+    check("fn main() { let n: u8 = 3\n for i in 0..n { let b: u8 = i } }").unwrap();
+    check("fn main() { for i, c in \"ab\" { let b: u8 = c\n let k: i64 = i } }").unwrap();
+    check("fn main() { let xs: [str] = [\"a\"]\n for s in xs { print(s) }\n for x in [1, 2] { print(x) } }").unwrap();
+    assert!(err("fn main() { let n: u8 = 3\n let m: i32 = 1\n for i in m..n { } }").contains("end of the range must be i32, found u8"));
+    assert!(err("fn main() { for i in 0.5..2.0 { } }").contains("a range needs integers, found f64"));
+    assert!(err("fn main() { for i, x in 0..3 { } }").contains("a range gives one value"));
+    assert!(err("fn main() { for x in 3 { } }").contains("cannot loop over i64"));
+    assert!(err("fn main() { for x of [1] { } }").contains("expected `in`"));
+    // The loop's names are its own.
+    assert!(err("fn main() { for i in 0..3 { }\n print(i) }").contains("unknown"));
+    // `continue` goes to the test, after the counter has stepped.
+    check("fn main() { for i in 0..3 { if i == 1 { continue }\n print(i) } }").unwrap();
+    assert!(err("fn main() { let for = 1 }").contains("variable name"));
 }
 
 #[test]
@@ -1675,6 +1693,14 @@ fn native_lists_are_owned() {
     assert!(!body(&m, "main").contains("clone"), "{m}");
     // ...unless the value it was read from changes while the part is used.
     let m = ir("struct S { items: [i64] }\nfn main() -> i64 { let s = S { items: [1] }\n let x = s.items\n push(s.items, 2)\n return len(x) }");
+    assert!(body(&m, "main").contains("clone"), "{m}");
+    // A copy of a value still used afterwards is a view of it too: a `for`
+    // loop walks the list it was given without copying it...
+    let m = ir("fn t(xs: [i64]) -> i64 { let s = 0\n for x in xs { s += x }\n return s + len(xs) }\n\
+                fn main() -> i64 { let a: [i64] = [1]\n for x in a { print(x) }\n return t(a) + len(a) }");
+    assert!(!m.contains("clone"), "{m}");
+    // ...unless the body changes the list, since the loop walks its old value.
+    let m = ir("fn main() -> i64 { let a: [i64] = [1]\n for x in a { push(a, x) }\n return len(a) }");
     assert!(body(&m, "main").contains("clone"), "{m}");
     // `xs = f(xs)`: the argument is at its last use, so it moves into the
     // consuming version of `f`, which changes it in place.
