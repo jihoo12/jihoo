@@ -1,7 +1,8 @@
 # Lists
 
 `[T]` is a list: any number of values of type `T`, growing and shrinking as
-the program runs. Lists are hosted only; compiled programs use arrays, or
+the program runs. Lists work in hosted and native programs, with the same
+meaning; freestanding programs, which have no allocator, use arrays or
 `alloc.Vec(T)` ([Standard library](../reference/standard-library.md#alloc)).
 
 ```jihoo
@@ -93,9 +94,30 @@ copies the text so far each time.
 `fold`, `reverse`, `index_of`, `contains` and `range`
 ([Standard library](../reference/standard-library.md#lists)).
 
+## Lists in native programs
+
+Natively there is no GC. Since no two variables ever share a list, the
+compiler can tell from the program alone where each list is last used, and
+frees it there; nothing is counted or collected while the program runs.
+
+- Assigning or passing a list that is not used again afterwards moves it: no
+  copy. A copy is made only where the original is still used, as the
+  meaning of the program requires.
+- Reading a part, as `len(g.nodes[i].edges)`, copies nothing.
+- A function that only reads a list parameter never copies it. One that
+  changes it copies it once, as on the VM, unless the caller's list was at
+  its last use: then the function takes it over, so `xs = f(xs)` changes
+  `xs` in place.
+- A thread started with `go f(xs)` gets its own list, and frees it.
+
+A pointer cannot reach a list, or a value holding one: `&xs` is an error, as
+is reading such a value through a pointer, since only its variable may free
+its memory. To refer to a part of a value, use a [path](paths.md).
+
 ## Layout
 
-Lists live on the GC heap and have no fixed layout, so `size_of([T])` is an
-error, and they cannot be passed to C. In JIR a list is `[T]`, built with
-`array` or `repeat` and changed with `push` and `pop`
-([JIR](../jir.md#lists-and-strings-hosted-only)).
+Lists have no fixed layout, so `size_of([T])` is an error, and they cannot be
+passed to C. On the VM they live on the GC heap; natively a list is a
+pointer to its elements, from `malloc`, with its length and capacity. In JIR
+a list is `[T]`, built with `array` or `repeat` and changed with `push` and
+`pop` ([JIR](../jir.md#lists-and-strings-hosted-and-lists-natively)).

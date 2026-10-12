@@ -9,7 +9,8 @@ function value. A local variable of a non-function type does not hide them, so
 
 | builtin | result | description |
 |---------|--------|-------------|
-| `len(a)` | `i64` | the length of an array `a: [T; N]`, or of the array `a: *[T; N]` points to, a constant; in hosted programs also the bytes of a `str` or the elements of a list `[T]` |
+| `len(a)` | `i64` | the length of an array `a: [T; N]`, or of the array `a: *[T; N]` points to, a constant; the elements of a list `[T]`; in hosted programs also the bytes of a `str` |
+| `path_index(p)`, `path_index(p, k)` | `i64` | the index of the last element step of [path](../language/paths.md) `p`, or of step `k` (a constant) |
 | `size_of(T)` | `i64` | the size of type `T` in bytes, by C layout rules for 64-bit targets; a constant |
 | `align_of(T)` | `i64` | the alignment of type `T` in bytes; a constant |
 | `trap()` | never returns | stops the program: a runtime error on the VM, a trap (SIGILL) natively, as a failed bounds check does. Code after it is unreachable, so a function can end with it instead of a `return`. A module may take the name, as it may `sqrt` |
@@ -52,6 +53,8 @@ function called `sqrt` (or declares `extern fn sqrt`) calls its own `sqrt`.
 | builtin | result | description |
 |---------|--------|-------------|
 | `print(x)` | `unit` | writes a number, `bool` or text and a newline to stdout: a `str` on the VM, a NUL-terminated `*u8` (such as a string literal) natively |
+| `push(xs, v)` | `unit` | appends `v` to the [list](../language/lists.md) `xs`, which must be assignable |
+| `pop(xs)` | `T` | removes the last element of the list `xs: [T]` and gives it; the program stops if it is empty |
 
 `print` writes integers in decimal, bools as `true`/`false`, and floats as the
 shortest text that reads back as the same value (`0.1`, `1.0`, `1e100`, `inf`,
@@ -69,8 +72,6 @@ traps loses what is still buffered. Freestanding programs have no `print`; the
 | `to_str(x)` | `str` | a number or `bool` as text, as `print` would write it (also in macros) |
 | `from_bytes(b)` | `str` | the string of the bytes in `b: [u8]` |
 | `read_line()` | `str` | the next line of standard input with its `\n` (or without, for a last line that has none), or `""` at the end of the input; not at compile time |
-| `push(xs, v)` | `unit` | appends `v` to the [list](../language/lists.md) `xs`, which must be assignable |
-| `pop(xs)` | `T` | removes the last element of the list `xs: [T]` and gives it; the program stops if it is empty |
 | `ref e` | `ref T` | a new [reference](../language/references.md) to a copy of `e` |
 | `cell(v)` | `cell T` | a new [cell](../language/cells.md) holding a copy of `v` |
 | `chan(T)`, `chan(T, n)` | `chan T` | a new [channel](../language/tasks-and-channels.md), unbuffered or buffering `n` values |

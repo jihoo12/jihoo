@@ -53,8 +53,21 @@
     and `recv` are now names a module may take); `go f(x)` in native code,
     starting a detached thread (JIR version 8); `channel.wait_ms`, a Select
     with a timeout, and `thread.now_ns`.
+24. Memory safety without a GC or a borrow checker: paths
+    (`path(Root).a[_]`, `root[p]`, `path_index`), references that hold
+    indices instead of addresses; lists in native programs, freed by an
+    ownership pass over JIR that moves values at their last use, clones
+    them where the original is still used, reads parts as views, and makes
+    consuming versions of functions for `xs = f(xs)` (JIR version 9:
+    `clone` and `drop`). Checked by hosted-versus-native tests and a list
+    mode of the fuzzer, under valgrind.
 
 ## Next
+
+- **Memory:** a report of where native code copies lists (`jihoo build
+  --cost`), which needs source positions in JIR; moving a field out of a
+  value at its last use instead of copying it; `str` and capturing closures
+  in native programs, so that native can become the default profile.
 
 - **Floats:** `fma`, which IEEE also defines exactly, but freestanding code on
   x86_64 would need an exact software version.

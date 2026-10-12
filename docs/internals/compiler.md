@@ -93,6 +93,16 @@ parts: variables, fields, elements, `*p`, cells. A nested update such as
 `b.cells[r][c].v = x` becomes one `setpath` (or `cellset`), and a nested read one
 `getpath`, so the VM can update in place ([VM and GC](vm.md)).
 
+## Ownership
+
+Native lists have no GC. `crates/jihoo-ir/src/ownership.rs` runs on the
+finished JIR of a native module and decides, from liveness, where an owning
+value (a list, or a value holding one) moves, where it is cloned, and where
+it is dropped; it also makes the consuming versions of functions (`f.own`).
+It needs no borrow checker because values never share memory: pointers may
+not reach owning values (checked in `place.rs`), and references into values
+are [paths](../language/paths.md) (`paths.rs`), which hold indices.
+
 ## Other modules
 
 | file | what |
