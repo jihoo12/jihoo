@@ -74,6 +74,11 @@
 
 ## Next
 
+- **Code as data** ([design](code-as-data.md)), first: compile-time
+  functions that take and return code, macros with a variable number of code
+  arguments, `meta.node` to look inside code, then statement macros as
+  expressions and `type_of`. The measure is fusing list pipelines in a
+  library (`examples/pipe.jh`), three times as fast as `lists` today.
 - **Memory:** a report of where native code copies lists (`jihoo build
   --cost`), which needs source positions in JIR; moving a field out of a
   value at its last use instead of copying it.

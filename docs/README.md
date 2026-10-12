@@ -68,4 +68,5 @@ same on GitHub.
 - [VM and GC](internals/vm.md)
 - [LLVM backend](internals/llvm-backend.md)
 - [Testing](internals/testing.md)
+- [Design: code as data](internals/code-as-data.md)
 - [Roadmap](internals/roadmap.md)
