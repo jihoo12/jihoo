@@ -1591,6 +1591,10 @@ fn path_references() {
     assert!(e("let p = path(i64)").contains("a path starts at a struct, not i64"));
     assert!(e("let b = B { a: A { xs: [], r: ref 1 } }\n print(b[3])").contains("a struct is indexed with a path"));
     assert!(err("struct A { x: i64 }\nfn f(p: path(A).x[_]) {}\nfn main() {}").contains("a path cannot take an element of i64"));
+    // `path_index`: the last index, or index `k`.
+    check("struct G { rows: [[i64]] }\nfn main() { let p = path(G).rows[1][2]\n print(path_index(p) * 10 + path_index(p, 0)) }").unwrap();
+    assert!(e("print(path_index(path(A).xs[0], 1))").contains("must be a constant below 1"));
+    assert!(e("print(path_index(3))").contains("`path_index` needs a path"));
 }
 
 #[test]
@@ -1617,6 +1621,13 @@ fn native_lists_are_owned() {
     // ...unless the value it was read from changes while the part is used.
     let m = ir("struct S { items: [i64] }\nfn main() -> i64 { let s = S { items: [1] }\n let x = s.items\n push(s.items, 2)\n return len(x) }");
     assert!(body(&m, "main").contains("clone"), "{m}");
+    // `xs = f(xs)`: the argument is at its last use, so it moves into the
+    // consuming version of `f`, which changes it in place.
+    let m = ir("fn f(xs: [i64]) -> [i64] { push(xs, 1)\n return xs }\n\
+                fn main() -> i64 { let a: [i64] = [1]\n a = f(a)\n let b = f(a)\n return len(a) + len(b) }");
+    let main = body(&m, "main");
+    assert!(main.contains("call @f.own(") && main.contains("call @f("), "{main}");
+    assert!(!body(&m, "f.own").contains("clone"), "{m}");
     // Pointers never reach memory a value owns.
     let e = |src: &str| err(&format!("#![native]\n{src}"));
     assert!(e("fn main() { let a: [i64] = [1]\n let p = &a }").contains("cannot take the address of [i64]"));

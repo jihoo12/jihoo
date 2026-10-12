@@ -150,6 +150,30 @@ impl FnCx<'_> {
         Ok(Place::Reg { root, path: vec![], ty, readonly: Some("a temporary value") })
     }
 
+    /// `path_index(p)`: the index of the last element step of path `p`, an
+    /// `i64`; `path_index(p, k)` that of element step `k` (a constant, from 0).
+    pub(crate) fn path_index(&mut self, pos: Pos, args: &[Expr]) -> Result<Reg, Error> {
+        let (p, k) = match args {
+            [p] => (p, None),
+            [p, k] => (p, Some(k)),
+            _ => return Err(Error::new(pos, "`path_index` takes a path and, optionally, which index")),
+        };
+        let r = self.expr(p, None)?;
+        let Some(def) = self.env.path_def(self.ty(r)) else {
+            return Err(Error::new(p.pos, format!("`path_index` needs a path, found {}", self.ty(r))));
+        };
+        let holes = def.holes() as u64;
+        let k = match k {
+            None if holes > 0 => holes - 1,
+            None => return Err(Error::new(p.pos, format!("{} has no element steps", self.ty(r)))),
+            Some(k) => match &k.kind {
+                jihoo_syntax::ast::ExprKind::Int(n) if *n < holes => *n,
+                _ => return Err(Error::new(k.pos, format!("the index number must be a constant below {holes}"))),
+            },
+        };
+        Ok(self.emit_to(Type::I64, |dst| Inst::Field { dst, src: r, index: k as u32 }))
+    }
+
     /// Whether `r` holds a path.
     pub(crate) fn is_path(&self, r: Reg) -> bool {
         self.env.path_def(self.ty(r)).is_some()

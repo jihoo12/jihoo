@@ -330,6 +330,7 @@ fn is_builtin(name: &str) -> bool {
             | "to_str"
             | "unique"
             | "ident"
+            | "path_index"
     )
 }
 
@@ -1292,6 +1293,7 @@ impl<'a> FnCx<'a> {
                 Ok(self.unit())
             }
             "stringify" => self.stringify(pos, args),
+            "path_index" => self.path_index(pos, args),
             "to_str" => {
                 if self.profile() != Profile::Hosted && !self.in_macro {
                     return Err(Error::new(pos, "`to_str` makes a `str`, so it is only available in hosted programs and macros"));

@@ -405,7 +405,10 @@ In a native module:
   not be dropped. `clone %v, %v` makes a view a value of its own.
 - `pop` moves the element out of the list.
 - Call arguments are borrowed: the callee must not change, move or drop its
-  parameters (it clones one first), and the caller still owns its argument. A
+  parameters (it clones one first), and the caller still owns its argument.
+  The pass also makes a *consuming* version `@f.own` of a function that
+  clones parameters, which owns those parameters instead; a call whose
+  arguments for them are at their last use calls it and moves them. A
   thread started with `spawn` owns its arguments and frees them when the
   function returns.
 - `repeat`, `splat`, `slice` and `add` on lists copy the elements they take

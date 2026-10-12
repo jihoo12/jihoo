@@ -29,22 +29,88 @@
 //! first clones it on entry, as the VM copies a list the first time a
 //! function changes it. A thread started with `spawn` owns its arguments.
 //!
+//! Such a function `f` also gets a *consuming* version, `f.own`, that takes
+//! those parameters over instead of cloning them. A call whose arguments for
+//! them are values of the caller's own at their last use calls `f.own`, and
+//! the values move: so `xs = f(xs)` changes `xs` in place, copying nothing.
+//!
 //! No borrow checker is needed because nothing can refer to a value's memory:
 //! references into values are paths (indices), and pointers to owning values
 //! are refused by the frontend. Liveness is computed on registers, which
 //! already have value semantics, so a move is never visible: it only happens
 //! where nothing could tell the difference.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::{Block, BlockId, Function, Inst, Module, PathStep, Reg, Terminator, Type};
 
 /// Inserts `clone` and `drop` into every function of a native module.
 pub fn insert(m: &mut Module) {
     let mut owning = Owning::new(m);
-    for f in &mut m.funcs {
-        function(f, &mut owning);
+    // The parameters each function clones on entry, by position.
+    let mut cloning: HashMap<String, Vec<usize>> = HashMap::new();
+    for f in &m.funcs {
+        let c = cloned_params(f, &mut owning);
+        if !c.is_empty() {
+            cloning.insert(f.name.clone(), c);
+        }
     }
+    let originals: HashMap<String, Function> =
+        m.funcs.iter().filter(|f| cloning.contains_key(&f.name)).map(|f| (f.name.clone(), f.clone())).collect();
+    let mut wanted = BTreeSet::new();
+    let mut cx = Cx { owning: &mut owning, cloning: &cloning, wanted: &mut wanted };
+    for f in &mut m.funcs {
+        function(f, &mut cx, &[]);
+    }
+    // The consuming versions that calls asked for, and those they ask for.
+    let mut made = HashSet::new();
+    while let Some(name) = wanted.pop_first() {
+        if !made.insert(name.clone()) {
+            continue;
+        }
+        let mut f = originals[&name].clone();
+        f.name = consuming(&name);
+        f.export = None;
+        let mut cx = Cx { owning: &mut owning, cloning: &cloning, wanted: &mut wanted };
+        function(&mut f, &mut cx, &cloning[&name]);
+        m.funcs.push(f);
+    }
+}
+
+/// The name of the version of `f` that takes its cloned parameters over.
+fn consuming(f: &str) -> String {
+    format!("{f}.own")
+}
+
+struct Cx<'a> {
+    owning: &'a mut Owning,
+    /// The parameters each function clones on entry.
+    cloning: &'a HashMap<String, Vec<usize>>,
+    /// Functions whose consuming version a call uses.
+    wanted: &'a mut BTreeSet<String>,
+}
+
+/// The parameters (by position) that `f` must have values of its own of: it
+/// reads them and also changes, consumes or replaces them.
+fn cloned_params(f: &Function, owning: &mut Owning) -> Vec<usize> {
+    let tracked: HashSet<Reg> = (0..f.regs.len() as u32).map(Reg).filter(|&r| owning.owns(f.reg_type(r))).collect();
+    if tracked.is_empty() {
+        return vec![];
+    }
+    let live_at_entry = liveness(f, &tracked, &HashMap::new())[0].clone();
+    (0..f.params.len())
+        .filter(|&i| {
+            let p = Reg(i as u32);
+            tracked.contains(&p)
+                && live_at_entry.contains(&p)
+                && f.blocks.iter().any(|b| {
+                    b.insts.iter().any(|inst| {
+                        let mut i = inst.clone();
+                        consumed(&mut i).into_iter().any(|r| *r == p) || defined(inst).contains(&p) || changes(inst, p)
+                    }) || matches!(b.term, Terminator::Ret(r) if r == p)
+                })
+        })
+        .collect()
 }
 
 /// Whether values of a type own memory: lists, and structs, arrays and enums
@@ -360,30 +426,30 @@ fn views(f: &Function, tracked: &HashSet<Reg>) -> HashMap<Reg, Reg> {
     }
 }
 
-fn function(f: &mut Function, owning: &mut Owning) {
+/// Inserts clones and drops into `f`. The parameters at `given` are handed
+/// over by the caller (in a consuming version); the others are borrowed.
+fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
+    let owning = &mut *cx.owning;
     let tracked: HashSet<Reg> = (0..f.regs.len() as u32).map(Reg).filter(|&r| owning.owns(f.reg_type(r))).collect();
     if tracked.is_empty() {
         return;
     }
+    let cloned = cloned_params(f, owning);
     entry_without_predecessors(f);
 
     // Parameters are borrowed. One whose value the function changes, consumes
-    // or replaces while it still reads it gets a copy of its own on entry.
+    // or replaces while it still reads it gets a copy of its own on entry,
+    // unless the caller handed it over. One never read is never freed here:
+    // only later values, which the function owns.
     let live_at_entry = liveness(f, &tracked, &HashMap::new())[0].clone();
-    let params: Vec<Reg> = (0..f.params.len() as u32).map(Reg).filter(|r| tracked.contains(r)).collect();
     let mut borrowed_params = HashSet::new();
     let mut entry_clones = Vec::new();
-    for p in params {
-        if !live_at_entry.contains(&p) {
-            continue; // never read: only later values, which the function owns
+    for i in 0..f.params.len() {
+        let p = Reg(i as u32);
+        if !tracked.contains(&p) || !live_at_entry.contains(&p) || given.contains(&i) {
+            continue;
         }
-        let owned_use = f.blocks.iter().any(|b| {
-            b.insts.iter().any(|inst| {
-                let mut i = inst.clone();
-                consumed(&mut i).into_iter().any(|r| *r == p) || defined(inst).contains(&p) || changes(inst, p)
-            }) || matches!(b.term, Terminator::Ret(r) if r == p)
-        });
-        if owned_use {
+        if cloned.contains(&i) {
             entry_clones.push(Inst::Clone { dst: p, src: p });
         } else {
             borrowed_params.insert(p);
@@ -439,6 +505,25 @@ fn function(f: &mut Function, owning: &mut Owning) {
             let before = touched(&inst);
             let mut moved = HashSet::new();
             let mut clones = Vec::new();
+            // A call to a function that clones parameters on entry, with
+            // values of our own at their last use for all of them, hands them
+            // over to its consuming version instead.
+            if let Inst::Call { func, args, .. } = &mut inst {
+                if let Some(params) = cx.cloning.get(func.as_str()) {
+                    let gives = params.iter().all(|&i| {
+                        let a = args[i];
+                        owned.contains(&a)
+                            && !live_after.contains(&a)
+                            && args.iter().filter(|&&x| x == a).count() == 1
+                            && !roots.values().any(|r| *r == a && live_after.iter().any(|v| roots.get(v) == Some(&a)))
+                    });
+                    if gives {
+                        cx.wanted.insert(func.clone());
+                        *func = consuming(func);
+                        moved.extend(params.iter().map(|&i| args[i]));
+                    }
+                }
+            }
             // A view copied into a view is the same view.
             let alias = matches!(&inst, Inst::Copy { dst, .. } if roots.contains_key(dst));
             if !alias {
