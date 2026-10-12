@@ -1,7 +1,7 @@
 ; An exported function is also defined as a C symbol, taking and returning a
 ; struct the C way; the program can still call it as its own.
 ; expect: exit 42
-jir 12
+jir 13
 profile freestanding
 
 struct $P { x: i64, y: f64 } size 16 align 8

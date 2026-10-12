@@ -141,7 +141,7 @@ impl Owning {
     pub fn owns(&mut self, t: &Type) -> bool {
         match t {
             // A function value may be a closure, which owns what it captured.
-            Type::List(_) | Type::Str | Type::Fn(..) | Type::Ref(_) | Type::Cell(_) => true,
+            Type::List(_) | Type::Str | Type::Fn(..) | Type::Ref(_) | Type::Cell(_) | Type::Chan(_) => true,
             Type::Array(elem, _) => self.owns(elem),
             Type::Struct(name) | Type::Enum(name) => {
                 if let Some(&r) = self.memo.get(name) {

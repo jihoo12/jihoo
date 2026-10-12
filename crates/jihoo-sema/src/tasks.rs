@@ -1,11 +1,13 @@
 //! Tasks and channels: `go f(x)`, `chan(T, n)`, `send`, `recv` and `select`.
 //!
-//! They need the VM's scheduler (`crates/jihoo-vm/src/lib.rs`), so they are
-//! hosted only, except `go`: natively it starts a thread of the C library's
-//! (`backend-llvm/src/codegen.cpp`). A task shares nothing with the one that
-//! started it except what it is given: arguments are copied, closures capture
-//! by value, `ref`s are immutable. Channels are the only way for tasks to
-//! communicate.
+//! On the VM they run on its scheduler (`crates/jihoo-vm/src/lib.rs`).
+//! Natively `go` starts a thread of the C library's, and channels and
+//! `select` run on `lib/channel.jh`, which the loader adds to a native program
+//! that uses them (`backend-llvm/src/codegen.cpp` calls it). A task shares
+//! nothing with the one that started it except what it is given: arguments
+//! are copied, closures capture by value, `ref`s are immutable. Channels are
+//! the only way for tasks to communicate; natively, a cell never goes through
+//! one, since the receiving thread would share it.
 
 use jihoo_ir::{BinOp, Inst, Profile, Reg, SelectCase, Terminator, Type};
 use jihoo_syntax::ast::{Expr, ExprKind, SelectArm, SelectOp, TypeExpr};
@@ -14,11 +16,11 @@ use jihoo_syntax::{Error, Pos};
 use crate::FnCx;
 
 impl FnCx<'_> {
-    fn check_hosted(&self, pos: Pos, what: &str) -> Result<(), Error> {
-        if self.profile() == Profile::Hosted || self.in_macro {
+    fn check_tasks(&self, pos: Pos, what: &str) -> Result<(), Error> {
+        if self.profile() != Profile::Freestanding || self.in_macro {
             Ok(())
         } else {
-            Err(Error::new(pos, format!("{what} need the VM's scheduler and are only available in hosted mode")))
+            Err(Error::new(pos, format!("{what} need the VM's scheduler or the C library's threads: not freestanding")))
         }
     }
 
@@ -67,7 +69,7 @@ impl FnCx<'_> {
     /// `select { ... }`: evaluates every channel and value to send, in order,
     /// then lets the VM pick the case that goes ahead, and runs its arm.
     pub(crate) fn select_stmt(&mut self, pos: Pos, arms: &[SelectArm]) -> Result<(), Error> {
-        self.check_hosted(pos, "`select` statements")?;
+        self.check_tasks(pos, "`select` statements")?;
         if arms.is_empty() {
             return Err(Error::new(pos, "a `select` needs at least one arm"));
         }
@@ -93,6 +95,9 @@ impl FnCx<'_> {
                 }
                 SelectOp::Default => default = true,
             }
+        }
+        if self.profile() == Profile::Native && cases.len() > 16 {
+            return Err(Error::new(pos, "a native `select` has at most 16 cases (`channel.MAX_CASES`)"));
         }
 
         // Run the arm of the case the VM picked; `_` is the index after the cases.
@@ -148,8 +153,12 @@ impl FnCx<'_> {
 
     /// `chan(T)` or `chan(T, cap)`.
     pub(crate) fn new_chan(&mut self, pos: Pos, t: &TypeExpr, cap: Option<&Expr>) -> Result<Reg, Error> {
-        self.check_hosted(pos, "channels")?;
+        self.check_tasks(pos, "channels")?;
         let elem = self.resolve(t)?;
+        if self.profile() == Profile::Native && self.env.has_cell(&elem) {
+            let msg = format!("a channel cannot carry a cell, and this is {elem}: the receiving thread would share it");
+            return Err(Error::new(t.pos, msg));
+        }
         let cap = match cap {
             Some(c) => {
                 let r = self.expr(c, Some(&Type::I64))?;

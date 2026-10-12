@@ -42,9 +42,9 @@ fn _start() -> i64 {
 | C functions     | no                      | `extern fn`, `export fn`, C files, `-l` | `export fn`              |
 | pointers        | no                      | `*T`, `&x`, `*p`, `p[i]`       | `*T`, `&x`, `*p`, `p[i]`          |
 | syscalls / asm  | no                      | yes                            | yes                               |
-| concurrency     | `go` tasks, channels, `select` | `go` threads, atomics, locks (`sync`), channels (`channel`) | atomics, locks (`sync`) |
+| concurrency     | `go` tasks, channels, `select`, one thread | `go` threads, channels, `select`, atomics, locks (`sync`) | atomics, locks (`sync`) |
 | lists, `str`, `ref`, `cell`, capturing closures | yes | yes, freed by the compiler | no                  |
-| `chan`, `select`, tasks | yes             | no (threads and `channel`)     | no                                |
+| `chan`, `select`, tasks | yes             | yes, as threads; tasks share no cells | no                    |
 | entry point     | `fn main()`             | `fn main()` or `fn main(argc: i32, argv: **u8)` | `fn _start()`    |
 
 Everything else — integers and floats, structs, arrays, enums, `match`, function

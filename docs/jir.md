@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 12)
+# JIR — jihoo IR text format (version 13)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -42,6 +42,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 10 | `str` in native modules: string literals of type `str`, `strbyte`, `frombytes`, `to_str`, `readline` and comparisons |
 | 11 | `closure` in native modules; native function values are `{code, env}` (16 bytes) |
 | 12 | `ref` and `cell` in native modules, as counted boxes |
+| 13 | `chan`, `send`, `recv` and `select` in native modules, on lib/channel.jh |
 
 ## Example
 
@@ -94,7 +95,7 @@ bb3:
 ## Module
 
 ```
-jir 12                               ; format version, must come first
+jir 13                               ; format version, must come first
 profile hosted|native|freestanding   ; language profile
 target x86_64|aarch64                ; the machine, 64-bit Linux
 struct ...                           ; zero or more structs
@@ -161,7 +162,7 @@ cannot be a `funcref`.
 | `[T]`             | list of any number of `T`s, by value; hosted and native | `{ptr, i64, i64}` |
 | `fn(T, ...) -> R` | function value                           | `ptr`; native `{ptr, ptr}` |
 | `ref T`           | immutable shared reference to a `T`; hosted and native | `ptr` to `{i64, T}` |
-| `chan T`          | channel of `T` values between tasks, hosted only | —     |
+| `chan T`          | channel of `T` values between tasks; hosted and native | `ptr` |
 | `cell T`          | shared mutable `T`; hosted and native    | `ptr` to `{i64, T}` |
 
 `str` and `*T` are deliberately separate: GC references and raw pointers must never
@@ -331,7 +332,7 @@ containing `str`; natively each is a pointer (8 bytes).
 | `%d = cellget %c, (step, ...)`      | `cell T`, a path into `T` (may be empty) | type at the end of the path | read what the cell holds, or a part of it |
 | `cellset %c, (step, ...), %v`       | `cell T`, a path, the type at its end | | replace what the cell holds, or a part of it |
 
-### Tasks and channels (hosted only, but `spawn`)
+### Tasks and channels (hosted and native)
 
 | syntax                              | operands              | result | meaning |
 |-------------------------------------|-----------------------|--------|---------|
@@ -352,6 +353,19 @@ them, frees the memory and ends; the thread is detached (`pthread_detach`),
 so nothing waits for it, and returning from `main` ends the program with it.
 Running out of memory or threads traps. Freestanding modules have no
 `spawn`.
+
+Natively a `chan T` points to a channel of `lib/channel.jh` (its `Raw`),
+which the module must contain: `jihoo-llc` calls the functions that module
+exports as `jihoo_chan_new`, `jihoo_chan_send`, `jihoo_chan_recv`,
+`jihoo_chan_hold`, `jihoo_chan_release`, `jihoo_chan_take`,
+`jihoo_chan_free`, `jihoo_select_new`, `jihoo_select_on` and
+`jihoo_select_run` (the loader adds the module to a native program that uses
+channels). Values go in and out as bytes: `send` moves its value in, `recv`
+moves one out. A channel is counted like a ref (see
+[Ownership](#ownership-native-lists)), and the last copy to go frees the
+values still in it. A `select` send case sends a copy, which is freed if
+another case goes ahead; at most 16 cases. Natively a channel never carries a
+cell, which would then be shared by two threads.
 
 ### Arrays
 

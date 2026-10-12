@@ -388,8 +388,8 @@ impl Cx<'_> {
                         t => Err(format!("`recv` needs a channel, found {}", t.jir())),
                     },
                     Inst::Select { dst, cases, .. } => {
-                        if profile != Profile::Hosted {
-                            return Err(at("`select` needs the VM's scheduler; hosted only".into()));
+                        if profile == Profile::Freestanding {
+                            return Err(at("`select` needs the VM's scheduler or threads; not freestanding".into()));
                         }
                         for c in cases {
                             let (SelectCase::Recv { chan, .. } | SelectCase::Send { chan, .. }) = c;

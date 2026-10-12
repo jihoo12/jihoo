@@ -821,7 +821,10 @@ fn select() {
     assert!(s("let x = send(a, 1) => {}").contains("a `select` arm starts with"));
     assert!(s("let x = recv(a) => {}\nrecv(a) => print(x)").contains("unknown variable `x`"));
     assert!(err("fn main() { select {} }").contains("needs at least one arm"));
-    assert!(err(&fs("fn f() { select { _ => {} } }")).contains("only available in hosted mode"));
+    assert!(err(&fs("fn f() { select { _ => {} } }")).contains("not freestanding"));
+    // Natively, select runs on lib/channel.jh, which takes 16 cases at most.
+    let many: String = (0..17).map(|_| "recv(c) => {}\n").collect();
+    assert!(err(&native(&format!("fn f() {{ let c = chan(i64)\n select {{\n{many} }} }}"))).contains("at most 16 cases"));
 }
 
 // ---- comptime closures ----
@@ -871,9 +874,13 @@ fn tasks_and_channels() {
     assert!(err("fn main() { go 1 + 2 }").contains("`go` needs a function call"));
     assert!(err("fn main() { let c = chan(i64)\n print(c == c) }").contains("cannot apply `==`"));
     assert!(err("const C = chan(i64)\nfn main() {}").contains("channel cannot be computed at compile time"));
-    assert!(err(&fs("fn f() { let c = chan(i64) }")).contains("only available in hosted mode"));
+    assert!(err(&fs("fn f() { let c = chan(i64) }")).contains("not freestanding"));
     assert!(err(&fs("fn g() {}\nfn f() { go g() }")).contains("hosted and native only"));
-    assert!(err(&fs("fn f(c: chan u8) {}")).contains("only available in hosted mode"));
+    assert!(err(&fs("fn f(c: chan u8) {}")).contains("not freestanding"));
+    // Natively channels connect threads, so they carry no cells.
+    check(&native("fn f() -> i64 { let c = chan([str], 1)\n send(c, [\"a\"])\n return len(recv(c)) }")).unwrap();
+    let e = err(&native("fn f() { let c = chan(cell i64) }"));
+    assert!(e.contains("a channel cannot carry a cell"), "{e}");
 }
 
 // ---- inline asm ----

@@ -1,7 +1,8 @@
 # Tasks and channels
 
-Hosted programs can run many *tasks* at once, like goroutines, which talk to
-each other through *channels*.
+Programs can run many *tasks* at once, like goroutines, which talk to each
+other through *channels*: on the VM's scheduler in hosted programs, and as
+threads on every core in native ones.
 
 ```jihoo
 enum Msg { Item(i64), Done }
@@ -100,14 +101,26 @@ then the next ready task gets its turn.
   `deadlock: every task is waiting on a channel`.
 - An error in any task stops the whole run.
 
-## Hosted only
+## In native programs
 
-Tasks need the VM's scheduler, so they exist only in hosted programs, and
-run on one OS thread. In native programs `go f(x)` starts a
-[thread](threads.md) instead, which runs on any core, and the `channel`
-library has channels and `Select` for them; `chan`, `send`, `recv` and
-`select` themselves are hosted only. Native programs also have
-[coroutines](../reference/standard-library.md#coro).
+Natively `go f(x)` starts a [thread](threads.md), and `chan`, `send`,
+`recv` and `select` work as above, on the `channel` library, which the
+compiler adds to a native program that uses them. The differences:
+
+- Tasks run at the same time, on every core, so their order is not
+  deterministic: a program whose output must not depend on it waits for what
+  it prints, through channels, as a correct Go program does.
+- Tasks share no [cells](cells.md#in-each-profile): a cell in the arguments
+  of `go`, or in the values of a channel, is an error, and starting a
+  closure that captured one stops the program. Share state by sending
+  values instead.
+- A deadlock is not detected: the waiting threads wait forever.
+- A `select` has at most 16 cases.
+
+A value sent moves into the channel and then to the receiver, so sending a
+list copies nothing; values still in a channel when its last copy goes are
+freed with it. Freestanding programs have no tasks or channels, and native
+programs also have [coroutines](../reference/standard-library.md#coro).
 
 In JIR, tasks and channels are the `chan`, `send`, `recv`, `select` and
 `spawn` instructions.

@@ -76,6 +76,9 @@ struct Raw {
     receivers: i64
     // The selects waiting on this channel.
     waiters: *Waiter
+    // How many copies of a native program's `chan` hold this channel; the
+    // last to go frees it (see the end of this file).
+    holders: i64
 }
 
 pub struct Chan(T: type) {
@@ -134,6 +137,7 @@ fn raw_new(size: i64, cap: i64) -> *Raw {
         closed: false,
         receivers: 0,
         waiters: 0 as *Waiter,
+        holders: 1,
     }
     return s
 }
@@ -506,4 +510,83 @@ fn delist(sel: *Select, i: i64) {
         s.receivers = s.receivers - 1
     }
     sync.unlock(&s.lock)
+}
+
+// ---- The language's own channels ----
+//
+// A native program's `chan(T, n)`, `send`, `recv` and `select` run on these:
+// the compiler loads this module itself when a native program uses them, and
+// calls these by their C names. A `chan T` is a `*Raw` that its copies share,
+// counted in `holders`; the copy that takes the count to zero frees the
+// channel, after the compiler has freed the values left in it
+// (`jihoo_chan_take`). Values move in and out as bytes: the compiler hands
+// over values it owns, and owns the ones it receives. Such channels are never
+// closed.
+
+export fn jihoo_chan_new(size: i64, cap: i64) -> *u8 {
+    return raw_new(size, cap) as *u8
+}
+
+export fn jihoo_chan_send(c: *u8, src: *u8) {
+    raw_send(c as *Raw, src)
+}
+
+export fn jihoo_chan_recv(c: *u8, dst: *u8) {
+    raw_recv(c as *Raw, dst)
+}
+
+export fn jihoo_chan_hold(c: *u8) {
+    let s = c as *Raw
+    atomic_add(&s.holders, 1)
+}
+
+// Whether this was the last holder.
+export fn jihoo_chan_release(c: *u8) -> bool {
+    let s = c as *Raw
+    return atomic_sub(&s.holders, 1) == 1
+}
+
+// Moves a value left in a channel nothing holds any more to `dst`; false if
+// there is none.
+export fn jihoo_chan_take(c: *u8, dst: *u8) -> bool {
+    let s = c as *Raw
+    if s.len == 0 {
+        return false
+    }
+    take(s, dst)
+    return true
+}
+
+export fn jihoo_chan_free(c: *u8) {
+    let s = c as *Raw
+    libc.free(s.buf)
+    libc.free(c)
+}
+
+// A `select`: a new Select, its cases in order, then `jihoo_select_run`,
+// which frees it.
+export fn jihoo_select_new() -> *u8 {
+    let sel = libc.malloc(size_of(Select) as u64) as *Select
+    if sel == 0 as *Select {
+        trap()
+    }
+    *sel = select_new()
+    return sel as *u8
+}
+
+export fn jihoo_select_on(sel: *u8, c: *u8, data: *u8, sending: bool) {
+    add_case(sel as *Select, c as *Raw, data, sending)
+}
+
+// The case that went ahead; with `poll`, -1 if none could at once.
+export fn jihoo_select_run(sel: *u8, poll_only: bool) -> i64 {
+    let s = sel as *Select
+    let i = 0
+    if poll_only {
+        i = poll(s)
+    } else {
+        i = wait(s)
+    }
+    libc.free(sel)
+    return i
 }

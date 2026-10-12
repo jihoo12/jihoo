@@ -1,0 +1,101 @@
+// Tasks, channels and `select`: tasks on the VM, threads natively. The output
+// does not depend on how they interleave: every print waits for its value.
+
+struct Job {
+    id: i64
+    words: [str]
+}
+
+fn worker(jobs: chan Job, results: chan [i64]) {
+    let more = true
+    while more {
+        let j = recv(jobs)
+        if j.id < 0 {
+            more = false
+        } else {
+            let lens: [i64] = [j.id]
+            let i = 0
+            while i < len(j.words) {
+                push(lens, len(j.words[i]))
+                i = i + 1
+            }
+            send(results, lens)              // the list moves to the receiver
+        }
+    }
+}
+
+fn relay(from: chan str, to: chan str) {
+    let s = recv(from)
+    send(to, s + "!")
+}
+
+fn entry() -> i64 {
+    // A worker, unbuffered channels both ways: each send meets a receive.
+    let jobs = chan(Job)
+    let results = chan([i64])
+    go worker(jobs, results)
+    let k = 0
+    while k < 3 {
+        let all: [str] = ["a", "bb", "ccc"]
+        send(jobs, Job { id: k, words: all[k:] })
+        let r = recv(results)
+        out(r[0] * 100 + len(r))
+        k = k + 1
+    }
+    send(jobs, Job { id: -1, words: [] })
+
+    // A chain of tasks passing a string along.
+    let first = chan(str)
+    let a = first
+    let i = 0
+    while i < 4 {
+        let next = chan(str)
+        go relay(a, next)
+        a = next
+        i = i + 1
+    }
+    send(first, "hi")
+    out(len(recv(a)))                        // "hi!!!!": 6
+
+    // Buffered: values wait in the channel; the ones never received are
+    // freed with it.
+    let box = chan([i64], 4)
+    send(box, [1, 2, 3])
+    send(box, [4])
+    send(box, [5, 6])
+    out(len(recv(box)))
+
+    // select: the first ready case in source order; `_` if none is.
+    let quiet = chan(i64, 1)
+    let busy = chan(i64, 1)
+    send(busy, 7)
+    select {
+        let x = recv(quiet) => out(x)
+        let y = recv(busy) => out(y * 10)
+        _ => out(-1)
+    }
+    select {
+        let x = recv(quiet) => out(x)
+        _ => out(-2)
+    }
+    let lists = chan([str], 1)
+    select {
+        send(lists, ["sent", "once"]) => out(1)
+        _ => out(0)
+    }
+    select {
+        send(lists, ["full"]) => out(2)      // no room: the value is not sent
+        let got = recv(lists) => out(len(got) * 100 + len(got[0]))
+    }
+
+    // A channel of channels: a reply channel travels with the request.
+    let requests = chan(chan i64)
+    go fn() {
+        let reply = recv(requests)
+        send(reply, 42)
+    }()
+    let reply = chan(i64)
+    send(requests, reply)
+    out(recv(reply))
+    return 0
+}

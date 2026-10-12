@@ -58,12 +58,26 @@ pub fn load_with(
     target: &str,
     read: &dyn Fn(&Path) -> Option<String>,
 ) -> Result<Loaded, (Error, Vec<PathBuf>)> {
-    let mut l = Loader { search, target, read, files: Vec::new(), modules: Vec::new(), by_path: HashMap::new() };
-    match l.module(root.to_path_buf(), String::new()) {
+    let mut l = Loader {
+        search,
+        target,
+        read,
+        files: Vec::new(),
+        modules: Vec::new(),
+        by_path: HashMap::new(),
+        uses_channels: false,
+    };
+    match l.module(root.to_path_buf(), String::new()).and_then(|_| l.channel_runtime()) {
         Ok(_) => Ok(Loaded { modules: l.modules, files: l.files }),
         Err(e) => Err((e, l.files)),
     }
 }
+
+/// The module a native program's `chan`, `send`, `recv` and `select` run on
+/// (`lib/channel.jh`), which the loader adds to a native program that uses
+/// them, under an import name no program can write.
+pub const CHANNEL_RUNTIME: &str = "channel";
+const CHANNEL_ALIAS: &str = "#channel";
 
 struct Loader<'a> {
     search: &'a [PathBuf],
@@ -72,6 +86,8 @@ struct Loader<'a> {
     files: Vec<PathBuf>,
     modules: Vec<Module>,
     by_path: HashMap<PathBuf, usize>,
+    /// Whether a module loaded so far uses `chan` or `select`.
+    uses_channels: bool,
 }
 
 impl Loader<'_> {
@@ -83,6 +99,9 @@ impl Loader<'_> {
         self.files.push(path.clone());
         let src = (self.read)(&path).ok_or_else(|| Error::new(Default::default(), "cannot read this file"))?;
         let program = parse_file(&src, file)?;
+        if let Ok(toks) = crate::lexer::lex(&src, file) {
+            self.uses_channels |= toks.iter().any(|t| matches!(t.tok, crate::lexer::Tok::Chan | crate::lexer::Tok::Select));
+        }
 
         let index = self.modules.len();
         self.by_path.insert(path.clone(), index);
@@ -131,6 +150,24 @@ impl Loader<'_> {
         Ok(index)
     }
 
+    /// Loads the channel runtime for a native program that uses channels.
+    fn channel_runtime(&mut self) -> Result<(), Error> {
+        let native = self.modules[0].program.attrs.iter().any(|(_, a)| a == "native");
+        if !native || !self.uses_channels {
+            return Ok(());
+        }
+        let rel = PathBuf::from(format!("{CHANNEL_RUNTIME}.jh"));
+        let Some(found) = self.search.iter().map(|d| d.join(&rel)).find(|p| (self.read)(p).is_some()) else {
+            let msg = "this native program uses channels, which run on the `channel` library \
+                       (lib/channel.jh), and it is not on the search path";
+            return Err(Error::new(Default::default(), msg));
+        };
+        let name = self.module_name(&[CHANNEL_RUNTIME.to_string()]);
+        let m = self.module(found, name)?;
+        self.modules[0].imports.insert(CHANNEL_ALIAS.to_string(), m);
+        Ok(())
+    }
+
     /// `a.b` -> `a.b`, made unique if another file already took the name.
     fn module_name(&self, path: &[String]) -> String {
         let base = path.join(".");
@@ -173,6 +210,27 @@ mod tests {
         assert_eq!(l.modules[root.imports["util"]].imports["mem"], 3);
         assert_eq!(l.modules[3].imports["util"], 4);
         assert_eq!(l.files[4], Path::new("std/util.jh"));
+    }
+
+    #[test]
+    fn native_channels_load_their_runtime() {
+        let rt = ("lib/channel.jh", "fn rt() {}");
+        let names = |main: &str| -> Vec<String> {
+            let files = [("main.jh", main), rt, ("helper.jh", "fn h() { let c = chan(i64) }")];
+            let l = load_with(Path::new("main.jh"), &[PathBuf::from("lib")], "x86_64", &fs(&files)).map_err(|e| e.0).unwrap();
+            l.modules.iter().map(|m| m.name.clone()).collect()
+        };
+        // A native program that uses channels, itself or in a module it imports.
+        assert_eq!(names("#![native]\nfn main() { let c = chan(i64) }"), ["", "prelude", "channel"]);
+        assert_eq!(names("#![native]\nimport helper\nfn main() {}"), ["", "prelude", "helper", "channel"]);
+        // Not without channels, nor in a hosted program, whose VM has them.
+        assert_eq!(names("#![native]\nfn main() {}"), ["", "prelude"]);
+        assert_eq!(names("fn main() { let c = chan(i64) }"), ["", "prelude"]);
+        // A program that imports it itself gets the same module.
+        assert_eq!(names("#![native]\nimport channel\nfn main() { select { _ => {} } }"), ["", "prelude", "channel"]);
+        let files = [("main.jh", "#![native]\nfn main() { let c = chan(i64) }")];
+        let Err((e, _)) = load_with(Path::new("main.jh"), &[], "x86_64", &fs(&files)) else { panic!("loaded") };
+        assert!(e.msg.contains("lib/channel.jh"), "{}", e.msg);
     }
 
     #[test]

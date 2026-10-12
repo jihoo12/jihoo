@@ -134,7 +134,7 @@ std::vector<Tok> tokenize(int line, const std::string &src) {
       size_t j = i;
       while (i < src.size() && ident_char(src[i])) i++;
       out.push_back({TokKind::Word, src.substr(j, i - j)});
-    } else if (std::string("=,(){}:*[]").find(c) != std::string::npos) {
+    } else if (std::string("=,(){}:*[]|").find(c) != std::string::npos) {
       out.push_back({TokKind::Punct, std::string(1, c)});
       i++;
     } else {
@@ -234,6 +234,7 @@ struct Line {
       }
       if (w == "ref") return Type::boxed(Type::Ref, type());
       if (w == "cell") return Type::boxed(Type::Cell, type());
+      if (w == "chan") return Type::boxed(Type::Chan, type());
       if (w == "f32") return Type::floating(32);
       if (w == "f64") return Type::floating(64);
       if (w.size() >= 2 && (w[0] == 'i' || w[0] == 'u')) {
@@ -305,7 +306,7 @@ const std::unordered_map<std::string, Op> kUnOps = {
     {"load", Op::Load},   {"addr", Op::Addr},   {"splat", Op::Splat}, {"tag", Op::Tag},
     {"atomic_load", Op::AtomicLoad}, {"len", Op::Len}, {"clone", Op::Clone},
     {"frombytes", Op::FromBytes}, {"to_str", Op::ToStr},
-    {"ref", Op::Ref}, {"deref", Op::Deref}, {"cell", Op::NewCell},
+    {"ref", Op::Ref}, {"deref", Op::Deref}, {"cell", Op::NewCell}, {"chan", Op::NewChan}, {"recv", Op::Recv},
 };
 
 // `%d = <op> ...`
@@ -363,6 +364,33 @@ Inst parse_assign(Line &l) {
     uint32_t lo = l.reg();
     l.punct(",");
     inst.args = {a, lo, l.reg()};
+  } else if (w == "select") {
+    // `select [recv %c -> %v | send %c, %v | default]`
+    inst.op = Op::Select;
+    l.punct("[");
+    while (!l.peek_punct("]")) {
+      const Tok &k = l.next("`recv`, `send` or `default`");
+      if (k.kind == TokKind::Word && k.text == "recv") {
+        uint32_t c = l.reg();
+        l.punct("->");
+        inst.args.push_back(c);
+        inst.args.push_back(l.reg());
+        inst.sending.push_back(false);
+      } else if (k.kind == TokKind::Word && k.text == "send") {
+        uint32_t c = l.reg();
+        l.punct(",");
+        inst.args.push_back(c);
+        inst.args.push_back(l.reg());
+        inst.sending.push_back(true);
+      } else if (k.kind == TokKind::Word && k.text == "default") {
+        inst.imm = 1;
+      } else {
+        fail(l.no, "expected a select case");
+      }
+      if (!l.peek_punct("|")) break;
+      l.i++;
+    }
+    l.punct("]");
   } else if (w == "cellget") {
     // `cellget %c, (step, ...)`
     inst.op = Op::CellGet;
@@ -672,6 +700,16 @@ Module parse(const std::string &text) {
         inst.op = Op::Spawn;
         inst.args = {l.reg()};
         for (uint32_t r : l.reg_list()) inst.args.push_back(r);
+        block->insts.push_back(inst);
+        l.end();
+        continue;
+      }
+      if (w == "send") {
+        Inst inst{};
+        inst.op = Op::Send;
+        uint32_t c = l.reg();
+        l.punct(",");
+        inst.args = {c, l.reg()};
         block->insts.push_back(inst);
         l.end();
         continue;

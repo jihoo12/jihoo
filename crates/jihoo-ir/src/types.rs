@@ -216,7 +216,7 @@ impl Type {
             Type::List(inner) => profile != Profile::Freestanding && inner.available_in(profile),
             // Native refs and cells are boxes counted by their holders.
             Type::Ref(inner) | Type::Cell(inner) => profile != Profile::Freestanding && inner.available_in(profile),
-            Type::Chan(inner) => profile == Profile::Hosted && inner.available_in(profile),
+            Type::Chan(inner) => profile != Profile::Freestanding && inner.available_in(profile),
             Type::Expr | Type::Stmts | Type::Items => false,
             Type::Unit | Type::Bool | Type::Int(_) | Type::Float(_) | Type::Struct(_) | Type::Enum(_) => true,
         }

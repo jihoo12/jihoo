@@ -83,6 +83,8 @@ class Types {
       case jir::Type::Ptr: return PointerType::get(ctx_, 0);
       // A pointer to the counted box `{ i64 count, T value }`; see `Glue`.
       case jir::Type::Ref: case jir::Type::Cell: return PointerType::get(ctx_, 0);
+      // The channel in lib/channel.jh (`Raw`), counted in its `holders`.
+      case jir::Type::Chan: return PointerType::get(ctx_, 0);
       // Natively `{ code, env }`: a closure's code takes the memory holding
       // what it captured first; other functions have no env (null).
       case jir::Type::Fn:
@@ -273,6 +275,10 @@ class Types {
 // never does (the frontend refuses it), so its count is a plain integer; a
 // cell that holds itself, through other cells, is never freed.
 //
+// A `chan T` points to a channel of lib/channel.jh, whose copies share it:
+// the runtime there counts them, and the last to go frees the values left in
+// it and the channel.
+//
 // A `str` is a list of bytes that never changes. One whose `cap` is 0 holds
 // the bytes of a literal, in the program's constant data: freeing it does
 // nothing and copying it copies the header, so literals cost no memory.
@@ -291,7 +297,7 @@ class Glue {
     switch (t.kind) {
       case jir::Type::List: case jir::Type::Str: return true;
       case jir::Type::Fn: return types_.fat_fns();  // a closure owns what it captured
-      case jir::Type::Ref: case jir::Type::Cell: return true;
+      case jir::Type::Ref: case jir::Type::Cell: case jir::Type::Chan: return true;
       case jir::Type::Array: return owns(*t.pointee);
       case jir::Type::Struct: {
         auto memo = owns_.find(t.name);
@@ -403,6 +409,18 @@ class Glue {
     }
   }
 
+  // The program's functions by the C name they are exported as.
+  void set_exports(std::unordered_map<std::string, Function *> exports) { exports_ = std::move(exports); }
+
+  // A function of the channel runtime, lib/channel.jh, which the loader adds to
+  // a native program that uses channels.
+  Function *rt(const std::string &sym) const {
+    auto it = exports_.find(sym);
+    if (it == exports_.end())
+      throw CodegenError("channels need the runtime in lib/channel.jh (`" + sym + "` is missing)");
+    return it->second;
+  }
+
   Function *closure_drop(const std::string &name) const { return drop_fns_.at(name); }
   Function *closure_clone(const std::string &name) const { return clone_fns_.at(name); }
 
@@ -474,6 +492,7 @@ class Glue {
   std::unordered_map<std::string, Function *> drops_, clones_;
   std::unordered_map<std::string, ClosureCode> closures_;
   std::unordered_map<std::string, Function *> drop_fns_, clone_fns_;
+  std::unordered_map<std::string, Function *> exports_;
 
   Type *ptr() const { return PointerType::get(ctx_, 0); }
 
@@ -559,6 +578,33 @@ class Glue {
   }
 
   void drop_body(IRBuilder<> &b, Function *fn, const jir::Type &t, Value *v) {
+    if (t.kind == jir::Type::Chan) {
+      Value *c = b.CreateLoad(ptr(), v);
+      auto *held = BasicBlock::Create(ctx_, "held", fn), *last = BasicBlock::Create(ctx_, "last", fn);
+      auto *done = BasicBlock::Create(ctx_, "done", fn);
+      b.CreateCondBr(b.CreateIsNotNull(c), held, done);
+      b.SetInsertPoint(held);
+      b.CreateCondBr(b.CreateCall(rt("jihoo_chan_release"), {c}), last, done);
+      b.SetInsertPoint(last);
+      const jir::Type &elem = *t.pointee;
+      if (owns(elem)) {
+        // The values nobody received.
+        Value *tmp = b.CreateAlloca(types_.lower(elem));
+        auto *more = BasicBlock::Create(ctx_, "left", fn), *drop_one = BasicBlock::Create(ctx_, "left.drop", fn);
+        auto *empty = BasicBlock::Create(ctx_, "left.done", fn);
+        b.CreateBr(more);
+        b.SetInsertPoint(more);
+        b.CreateCondBr(b.CreateCall(rt("jihoo_chan_take"), {c, tmp}), drop_one, empty);
+        b.SetInsertPoint(drop_one);
+        b.CreateCall(drop(elem), {tmp});
+        b.CreateBr(more);
+        b.SetInsertPoint(empty);
+      }
+      b.CreateCall(rt("jihoo_chan_free"), {c});
+      b.CreateBr(done);
+      b.SetInsertPoint(done);
+      return;
+    }
     if (t.kind == jir::Type::Ref || t.kind == jir::Type::Cell) {
       Value *box = b.CreateLoad(ptr(), v);
       StructType *box_ty = types_.box(t);
@@ -623,6 +669,17 @@ class Glue {
 
   void clone_body(IRBuilder<> &b, Function *fn, const jir::Type &t, Value *dst, Value *src) {
     const DataLayout &dl = m_.getDataLayout();
+    if (t.kind == jir::Type::Chan) {
+      Value *c = b.CreateLoad(ptr(), src);
+      auto *held = BasicBlock::Create(ctx_, "held", fn), *done = BasicBlock::Create(ctx_, "done", fn);
+      b.CreateCondBr(b.CreateIsNotNull(c), held, done);
+      b.SetInsertPoint(held);
+      b.CreateCall(rt("jihoo_chan_hold"), {c});
+      b.CreateBr(done);
+      b.SetInsertPoint(done);
+      b.CreateStore(c, dst);
+      return;
+    }
     if (t.kind == jir::Type::Ref || t.kind == jir::Type::Cell) {
       // Copies share the box.
       Value *box = b.CreateLoad(ptr(), src);
@@ -1547,6 +1604,52 @@ class FnGen {
         for (size_t i = 1; i < inst.args.size(); i++) args.push_back(agg(inst.args[i]) ? slot(inst.args[i]) : load(inst.args[i]));
         Value *r = types_.call_value(b_, arg(0), t, args);
         if (!sret) store(inst.dst, r);
+        return;
+      }
+      case Op::NewChan: {
+        const jir::Type &t = type(inst.dst);
+        if (t.kind != jir::Type::Chan) fail(f_.name, "`chan` result is not a channel");
+        Value *c = b_.CreateCall(glue_.rt("jihoo_chan_new"), {b_.getInt64(glue_.size(*t.pointee)), arg(0)});
+        check(b_.CreateIsNotNull(c), "chan.alloc");
+        store(inst.dst, c);
+        return;
+      }
+      // The value's bytes go in and out: the ownership pass has handed over
+      // what is sent, and owns what is received.
+      case Op::Send: b_.CreateCall(glue_.rt("jihoo_chan_send"), {arg(0), slot(arg_reg(1))}); return;
+      case Op::Recv: b_.CreateCall(glue_.rt("jihoo_chan_recv"), {arg(0), slot(inst.dst)}); return;
+      case Op::Select: {
+        Value *sel = b_.CreateCall(glue_.rt("jihoo_select_new"), {});
+        size_t n = inst.sending.size();
+        // A value to send is copied: only the case that goes ahead takes it.
+        std::vector<Value *> copies(n, nullptr);
+        for (size_t k = 0; k < n; k++) {
+          uint32_t c = inst.args[2 * k], r = inst.args[2 * k + 1];
+          const jir::Type &t = type(r);
+          Value *data = slot(r);
+          if (inst.sending[k] && glue_.owns(t)) {
+            copies[k] = temp(types_.lower(t), t);
+            b_.CreateCall(glue_.clone(t), {copies[k], slot(r)});
+            data = copies[k];
+          } else if (!inst.sending[k] && glue_.owns(t)) {
+            // Empty unless this case goes ahead, so dropping it frees nothing.
+            b_.CreateMemSet(slot(r), b_.getInt8(0), glue_.size(t), slot(r)->getAlign());
+          }
+          b_.CreateCall(glue_.rt("jihoo_select_on"), {sel, load(c), data, b_.getInt1(inst.sending[k])});
+        }
+        Value *picked = b_.CreateCall(glue_.rt("jihoo_select_run"), {sel, b_.getInt1(inst.imm != 0)});
+        // With a default case, none ready (-1) picks the index after the cases.
+        if (inst.imm) picked = b_.CreateSelect(b_.CreateICmpSLT(picked, b_.getInt64(0)), b_.getInt64(n), picked);
+        for (size_t k = 0; k < n; k++) {
+          if (!copies[k]) continue;
+          auto *unused = BasicBlock::Create(ctx_, "select.unsent", fn_), *next = BasicBlock::Create(ctx_, "select.next", fn_);
+          b_.CreateCondBr(b_.CreateICmpNE(picked, b_.getInt64(k)), unused, next);
+          b_.SetInsertPoint(unused);
+          b_.CreateCall(glue_.drop(type(inst.args[2 * k + 1])), {copies[k]});
+          b_.CreateBr(next);
+          b_.SetInsertPoint(next);
+        }
+        store(inst.dst, picked);
         return;
       }
       case Op::Ref: case Op::NewCell: {
@@ -2581,6 +2684,10 @@ std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, co
   if (entry == m.funcs.end()) throw CodegenError(std::string(native ? "native" : "freestanding") + " module needs @" + entry_name);
   if (!entry->params.empty() && !native) throw CodegenError("@_start must take no parameters");
 
+  std::unordered_map<std::string, Function *> exports;
+  for (const auto &f : m.funcs)
+    if (!f.export_name.empty()) exports[f.export_name] = fns[f.name];
+  glue.set_exports(std::move(exports));
   for (const auto &f : m.funcs)
     FnGen(f, fns[f.name], *mod, types, fns, externs, triple, !native && f.name == "_start", native, glue).run();
   for (const auto &f : m.funcs)

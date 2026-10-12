@@ -334,8 +334,8 @@ impl<'p> Env<'p> {
                 Ok(Type::List(Box::new(self.resolve_in(inner, b, in_macro)?)))
             }
             TypeExprKind::Chan(inner) => {
-                if self.profile != Profile::Hosted && !in_macro {
-                    return Err(Error::new(t.pos, "channels need the VM's scheduler and are only available in hosted mode"));
+                if self.profile == Profile::Freestanding && !in_macro {
+                    return Err(Error::new(t.pos, "channels need the VM's scheduler or the C library's threads: not freestanding"));
                 }
                 Ok(Type::Chan(Box::new(self.resolve_in(inner, b, in_macro)?)))
             }
@@ -662,7 +662,7 @@ impl<'p> Env<'p> {
     /// in the IR crate).
     pub fn owns(&self, t: &Type) -> bool {
         match t {
-            Type::List(_) | Type::Str | Type::Ref(_) | Type::Cell(_) => true,
+            Type::List(_) | Type::Str | Type::Ref(_) | Type::Cell(_) | Type::Chan(_) => true,
             Type::Array(elem, _) => self.owns(elem),
             Type::Struct(name) => {
                 self.struct_fields(Pos::default(), name).is_ok_and(|fs| fs.iter().any(|(_, t)| self.owns(t)))

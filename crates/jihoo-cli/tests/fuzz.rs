@@ -19,10 +19,12 @@
 //! hold lists `[T]` and strings in variables, fields and elements, push to and
 //! pop from lists, slice, join and compare them, make text with `to_str`, and
 //! pass them to functions that change their copy; they also hold `ref`s and
-//! `cell`s, whose copies share (and, for cells, see each other's changes). Lists never become empty, so indexes (taken modulo the length) are in
+//! `cell`s, whose copies share (and, for cells, see each other's changes).
+//! Lists never become empty, so indexes (taken modulo the length) are in
 //! bounds. Those run on the VM and natively only, where the ownership pass
 //! decides where lists are copied and freed; with `JIHOO_VALGRIND` set to
-//! valgrind's path, any leak or invalid access fails the seed.
+//! valgrind's path, any leak or invalid access fails the seed (memory C threads
+//! keep until they finish is not a leak).
 //!
 //!   JIHOO_FUZZ_LIST_SEEDS=500 cargo test --release --test fuzz lists
 //!
@@ -922,7 +924,7 @@ fn check_with(seed: u64, work: &std::path::Path, lists: bool) -> Result<(), Stri
             &[Profile::Freestanding]
         };
         let valgrind: Option<Vec<String>> = std::env::var("JIHOO_VALGRIND").ok().filter(|_| lists).map(|v| {
-            [v.as_str(), "-q", "--leak-check=full", "--errors-for-leak-kinds=all", "--error-exitcode=99"]
+            [v.as_str(), "-q", "--leak-check=full", "--show-leak-kinds=definite,indirect", "--errors-for-leak-kinds=definite,indirect", "--error-exitcode=99"]
                 .map(String::from)
                 .to_vec()
         });

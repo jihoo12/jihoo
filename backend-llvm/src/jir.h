@@ -12,12 +12,12 @@ namespace jir {
 
 // The one JIR version this backend reads, from the `jir N` header. It must
 // equal JIR_VERSION in crates/jihoo-ir/src/lib.rs (a Rust test checks this).
-constexpr int64_t kVersion = 12;
+constexpr int64_t kVersion = 13;
 
 enum class Profile { Hosted, Native, Freestanding };
 
 struct Type {
-  enum Kind { Unit, Bool, Int, Float, Str, Ptr, Struct, Array, Fn, List, Ref, Cell } kind = Unit;
+  enum Kind { Unit, Bool, Int, Float, Str, Ptr, Struct, Array, Fn, List, Ref, Cell, Chan } kind = Unit;
   unsigned bits = 0;               // Int, Float (32 or 64)
   bool is_signed = false;          // Int
   std::shared_ptr<Type> pointee;   // Ptr, Ref, Cell: the pointee; Array, List: the element type; Fn: the result
@@ -78,7 +78,7 @@ struct Type {
     switch (kind) {
       case Int: return bits == o.bits && is_signed == o.is_signed;
       case Float: return bits == o.bits;
-      case Ptr: case List: case Ref: case Cell: return *pointee == *o.pointee;
+      case Ptr: case List: case Ref: case Cell: case Chan: return *pointee == *o.pointee;
       case Array: return count == o.count && *pointee == *o.pointee;
       case Struct: return name == o.name;
       case Fn: return params == o.params && *pointee == *o.pointee;
@@ -100,6 +100,7 @@ struct Type {
       case List: return "[" + pointee->str() + "]";
       case Ref: return "ref " + pointee->str();
       case Cell: return "cell " + pointee->str();
+      case Chan: return "chan " + pointee->str();
       case Fn: {
         std::string s = "fn(";
         for (size_t i = 0; i < params.size(); i++) s += (i ? ", " : "") + params[i].str();
@@ -151,6 +152,8 @@ enum class Op {
   Closure,
   // Native `ref` and `cell`: counted boxes.
   Ref, Deref, NewCell, CellGet, CellSet,
+  // Native channels, on lib/channel.jh.
+  NewChan, Send, Recv, Select,
   Spawn,
   AtomicLoad, AtomicStore, AtomicSwap, AtomicAdd, AtomicSub, AtomicAnd, AtomicOr, AtomicXor, AtomicCas, Fence,
 };
@@ -171,6 +174,10 @@ struct Inst {
   std::string text;            // Str bytes, Call/FuncRef function, Struct name, or Asm template
   std::string constraints;     // Asm only: LLVM constraint string
   std::vector<PathStep> path;  // GetPath / SetPath / Push / Pop: the steps, outside in
+  // Select: whether each case sends (`args` holds a channel and a register per
+  // case: the value sent, or where the one received goes); `imm` is 1 with a
+  // default case.
+  std::vector<bool> sending;
 };
 
 enum class TermKind { Jump, Branch, Ret, Unreachable };
