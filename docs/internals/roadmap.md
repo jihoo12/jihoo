@@ -70,7 +70,7 @@
     strings, with the index (`for i, x in xs`). The loop walks the value it
     started with; natively that is a view of the list, which the ownership
     pass now also makes of any copy whose original is still used, unless one
-    of them changes.
+    of them changes. The libraries use `for` where it fits.
 
 ## Next
 
@@ -85,8 +85,7 @@
 - **Concurrency:** weaker memory orders (acquire/release) for code that needs
   the speed; threads in freestanding programs, over `clone`; tasks on more
   than one core in the VM, which needs a GC that threads can share.
-- **Hosted library:** a map keyed by `str`; files; parsing floats; library
-  code written with `for` instead of `while` loops.
+- **Hosted library:** a map keyed by `str`; files; parsing floats.
 
 ## Library layers
 

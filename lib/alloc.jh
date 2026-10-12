@@ -152,10 +152,8 @@ pub fn push(comptime T: type, v: *Vec(T), x: T) -> bool {
         if p == 0 as *T {
             return false
         }
-        let i = 0
-        while i < v.len {
+        for i in 0..v.len {
             p[i] = v.data[i]
-            i = i + 1
         }
         v.data = p
         v.cap = cap

@@ -348,10 +348,8 @@ pub fn off(sel: *Select, i: i64) {
 // would wait forever, so it stops the program instead.
 pub fn wait(sel: *Select) -> i64 {
     let any = false
-    let k = 0
-    while k < sel.n {
+    for k in 0..sel.n {
         any = any || sel.cases[k].on
-        k = k + 1
     }
     if !any {
         trap()
@@ -379,10 +377,8 @@ pub fn wait_ms(sel: *Select, ms: i64) -> i64 {
 fn run(sel: *Select, deadline: i64) -> i64 {
     // Wait on every channel first, so that no change after the look below
     // goes unnoticed.
-    let i = 0
-    while i < sel.n {
+    for i in 0..sel.n {
         enlist(sel, i)
-        i = i + 1
     }
     let chosen = -1
     let late = false
@@ -403,10 +399,8 @@ fn run(sel: *Select, deadline: i64) -> i64 {
             }
         }
     }
-    i = 0
-    while i < sel.n {
+    for i in 0..sel.n {
         delist(sel, i)
-        i = i + 1
     }
     return chosen
 }
@@ -425,11 +419,9 @@ pub fn received(sel: *Select) -> bool {
 
 // Tries the cases in order; does the first that can go ahead.
 fn first_ready(sel: *Select) -> i64 {
-    let i = 0
-    while i < sel.n {
+    for i in 0..sel.n {
         let c = &sel.cases[i]
         if !c.on {
-            i = i + 1
             continue
         }
         let s = c.s
@@ -460,7 +452,6 @@ fn first_ready(sel: *Select) -> i64 {
         if done {
             return i
         }
-        i = i + 1
     }
     return -1
 }

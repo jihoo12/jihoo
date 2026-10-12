@@ -10,12 +10,10 @@
 
 // Where `x` first is in `xs`, or -1.
 pub fn index_of(comptime T: type, xs: [T], x: T) -> i64 {
-    let i = 0
-    while i < len(xs) {
-        if xs[i] == x {
+    for i, y in xs {
+        if y == x {
             return i
         }
-        i += 1
     }
     return -1
 }
@@ -27,10 +25,8 @@ pub fn contains(comptime T: type, xs: [T], x: T) -> bool {
 // `xs` back to front.
 pub fn reverse(comptime T: type, xs: [T]) -> [T] {
     let out: [T] = []
-    let i = len(xs) - 1
-    while i >= 0 {
-        push(out, xs[i])
-        i -= 1
+    for i in 0..len(xs) {
+        push(out, xs[len(xs) - 1 - i])
     }
     return out
 }
@@ -38,10 +34,8 @@ pub fn reverse(comptime T: type, xs: [T]) -> [T] {
 // `f` of each element, in order.
 pub fn map(comptime T: type, comptime U: type, xs: [T], f: fn(T) -> U) -> [U] {
     let out: [U] = []
-    let i = 0
-    while i < len(xs) {
-        push(out, f(xs[i]))
-        i += 1
+    for x in xs {
+        push(out, f(x))
     }
     return out
 }
@@ -49,12 +43,10 @@ pub fn map(comptime T: type, comptime U: type, xs: [T], f: fn(T) -> U) -> [U] {
 // The elements for which `keep` is true, in order.
 pub fn filter(comptime T: type, xs: [T], keep: fn(T) -> bool) -> [T] {
     let out: [T] = []
-    let i = 0
-    while i < len(xs) {
-        if keep(xs[i]) {
-            push(out, xs[i])
+    for x in xs {
+        if keep(x) {
+            push(out, x)
         }
-        i += 1
     }
     return out
 }
@@ -62,10 +54,8 @@ pub fn filter(comptime T: type, xs: [T], keep: fn(T) -> bool) -> [T] {
 // `f(... f(f(init, xs[0]), xs[1]) ..., xs[n - 1])`.
 pub fn fold(comptime T: type, comptime A: type, xs: [T], init: A, f: fn(A, T) -> A) -> A {
     let acc = init
-    let i = 0
-    while i < len(xs) {
-        acc = f(acc, xs[i])
-        i += 1
+    for x in xs {
+        acc = f(acc, x)
     }
     return acc
 }
@@ -107,10 +97,8 @@ pub fn sort(comptime T: type, xs: [T], less: fn(T, T) -> bool) -> [T] {
 // The integers from `lo` up to but not including `hi`.
 pub fn range(lo: i64, hi: i64) -> [i64] {
     let out: [i64] = []
-    let i = lo
-    while i < hi {
+    for i in lo..hi {
         push(out, i)
-        i += 1
     }
     return out
 }

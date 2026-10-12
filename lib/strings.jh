@@ -16,12 +16,10 @@
 // Where `sub` first occurs in `s` at or after byte `from`, or -1.
 pub fn index_from(s: str, sub: str, from: i64) -> i64 {
     let n = len(sub)
-    let i = from
-    while i + n <= len(s) {
+    for i in from..len(s) - n + 1 {
         if s[i:i + n] == sub {
             return i
         }
-        i += 1
     }
     return -1
 }
@@ -107,13 +105,11 @@ pub fn fields(s: str) -> [str] {
 pub fn lines(s: str) -> [str] {
     let out: [str] = []
     let start = 0
-    let i = 0
-    while i < len(s) {
-        if s[i] == 10 {
+    for i, b in s {
+        if b == 10 {
             push(out, trim_cr(s[start:i]))
             start = i + 1
         }
-        i += 1
     }
     if start < len(s) {
         push(out, trim_cr(s[start:]))
@@ -134,18 +130,15 @@ pub fn join(parts: [str], sep: str) -> str {
     // proportion to the result, where adding up the parts with `+` would copy
     // the text so far for each one.
     let out: [u8] = []
-    let i = 0
-    while i < len(parts) {
-        let part = parts[i]
+    for i, part in parts {
         if i > 0 {
-            part = sep + part
+            for b in sep {
+                push(out, b)
+            }
         }
-        let j = 0
-        while j < len(part) {
-            push(out, part[j])
-            j += 1
+        for b in part {
+            push(out, b)
         }
-        i += 1
     }
     return from_bytes(out)
 }
@@ -153,10 +146,10 @@ pub fn join(parts: [str], sep: str) -> str {
 // `s` written `n` times.
 pub fn repeat(s: str, n: i64) -> str {
     let out: [u8] = []
-    let i = 0
-    while i < n * len(s) {
-        push(out, s[i % len(s)])
-        i += 1
+    for i in 0..n {
+        for b in s {
+            push(out, b)
+        }
     }
     return from_bytes(out)
 }
@@ -194,10 +187,8 @@ pub fn trim_end(s: str) -> str {
 // The bytes of `s`.
 pub fn bytes(s: str) -> [u8] {
     let out: [u8] = []
-    let i = 0
-    while i < len(s) {
-        push(out, s[i])
-        i += 1
+    for b in s {
+        push(out, b)
     }
     return out
 }
@@ -210,12 +201,10 @@ pub fn from_byte(b: u8) -> str {
 // `s` with ASCII letters made upper case.
 pub fn to_upper(s: str) -> str {
     let out = bytes(s)
-    let i = 0
-    while i < len(out) {
+    for i in 0..len(out) {
         if out[i] >= 97 && out[i] <= 122 {
             out[i] -= 32
         }
-        i += 1
     }
     return from_bytes(out)
 }
@@ -223,12 +212,10 @@ pub fn to_upper(s: str) -> str {
 // `s` with ASCII letters made lower case.
 pub fn to_lower(s: str) -> str {
     let out = bytes(s)
-    let i = 0
-    while i < len(out) {
+    for i in 0..len(out) {
         if out[i] >= 65 && out[i] <= 90 {
             out[i] += 32
         }
-        i += 1
     }
     return from_bytes(out)
 }
@@ -263,16 +250,15 @@ pub fn parse_int(s: str) -> Option(i64) {
     }
     // Counted negative, so that the most negative i64 fits.
     let n = 0
-    while i < len(t) {
-        if !is_digit(t[i]) {
+    for k in i..len(t) {
+        if !is_digit(t[k]) {
             return Option.None
         }
-        let d = (t[i] - 48) as i64
+        let d = (t[k] - 48) as i64
         if n < (-9223372036854775807 - 1 + d) / 10 {
             return Option.None
         }
         n = n * 10 - d
-        i += 1
     }
     if neg {
         return Option.Some(n)
