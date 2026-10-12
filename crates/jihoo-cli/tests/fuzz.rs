@@ -18,7 +18,8 @@
 //! With lists (`vm_and_native_agree_on_random_list_programs`), programs also
 //! hold lists `[T]` and strings in variables, fields and elements, push to and
 //! pop from lists, slice, join and compare them, make text with `to_str`, and
-//! pass them to functions that change their copy. Lists never become empty, so indexes (taken modulo the length) are in
+//! pass them to functions that change their copy; they also hold `ref`s and
+//! `cell`s, whose copies share (and, for cells, see each other's changes). Lists never become empty, so indexes (taken modulo the length) are in
 //! bounds. Those run on the VM and natively only, where the ownership pass
 //! decides where lists are copied and freed; with `JIHOO_VALGRIND` set to
 //! valgrind's path, any leak or invalid access fails the seed.
@@ -74,13 +75,15 @@ enum Ty {
     /// Never empty.
     List(Box<Ty>),
     Str,
+    Ref(Box<Ty>),
+    Cell(Box<Ty>),
 }
 
 impl Ty {
     const I64: Ty = Ty::Int { bits: 64, signed: true };
 
     fn is_aggregate(&self) -> bool {
-        matches!(self, Ty::Array(..) | Ty::Struct(_) | Ty::List(_))
+        matches!(self, Ty::Array(..) | Ty::Struct(_) | Ty::List(_) | Ty::Ref(_) | Ty::Cell(_))
     }
 }
 
@@ -209,6 +212,14 @@ impl Gen {
         match self.rng.below(10) {
             0..=2 if depth > 0 && self.lists && self.rng.chance(50) => Ty::List(Box::new(self.any_ty(depth - 1))),
             4 if self.lists => Ty::Str,
+            5 if self.lists && depth > 0 && self.rng.chance(50) => {
+                let inner = Box::new(self.any_ty(depth - 1));
+                if self.rng.chance(50) {
+                    Ty::Ref(inner)
+                } else {
+                    Ty::Cell(inner)
+                }
+            }
             0..=2 if depth > 0 => Ty::Array(Box::new(self.any_ty(depth - 1)), 1 + self.rng.below(4)),
             3 if !self.structs.is_empty() => Ty::Struct(self.rng.below(self.structs.len())),
             _ => self.scalar_ty(),
@@ -224,6 +235,8 @@ impl Gen {
             Ty::Struct(k) => format!("S{k}"),
             Ty::List(e) => format!("[{}]", self.ty_name(e)),
             Ty::Str => "str".into(),
+            Ty::Ref(e) => format!("ref {}", self.ty_name(e)),
+            Ty::Cell(e) => format!("cell {}", self.ty_name(e)),
         }
     }
 
@@ -296,14 +309,28 @@ impl Gen {
         out
     }
 
-    /// A read of some variable, or part of one, of type `t`.
+    /// A read of some variable, or part of one, of type `t`, possibly what a
+    /// `ref` or `cell` holds.
     fn projection(&mut self, t: &Ty) -> Option<String> {
-        let places = self.places(t, false);
-        if places.is_empty() {
+        let direct = self.places(t, false);
+        let boxed: Vec<(usize, Vec<Step>)> = if self.lists {
+            let (r, c) = (Ty::Ref(Box::new(t.clone())), Ty::Cell(Box::new(t.clone())));
+            self.places(&r, false).into_iter().chain(self.places(&c, false)).collect()
+        } else {
+            Vec::new()
+        };
+        let n = direct.len() + boxed.len();
+        if n == 0 {
             return None;
         }
-        let (v, path) = places[self.rng.below(places.len())].clone();
-        Some(self.place(v, &path, false))
+        let k = self.rng.below(n);
+        if k < direct.len() {
+            let (v, path) = direct[k].clone();
+            Some(self.place(v, &path, false))
+        } else {
+            let (v, path) = boxed[k - direct.len()].clone();
+            Some(format!("(*{})", self.place(v, &path, false)))
+        }
     }
 
     /// Prints every scalar in `e`, a `t`: the length and each element of a list.
@@ -331,6 +358,7 @@ impl Gen {
                 self.indent -= 1;
                 self.line("}");
             }
+            Ty::Ref(el) | Ty::Cell(el) => self.dump(&format!("(*{e})"), el),
             Ty::List(el) => {
                 self.out(&format!("len({e})"), &Ty::I64);
                 let i = self.fresh("d");
@@ -418,7 +446,9 @@ impl Gen {
                 3 => format!("(!{})", self.expr(t, d)),
                 4 => {
                     // Equality of whole structs and arrays, by value.
-                    let aggregates: Vec<Ty> = self.vars.iter().map(|v| v.ty.clone()).filter(Ty::is_aggregate).collect();
+                    // Cells are not compared: two cells are two, whatever they hold.
+                    let aggregates: Vec<Ty> =
+                        self.vars.iter().map(|v| v.ty.clone()).filter(|t| t.is_aggregate() && !self.has_cell(t)).collect();
                     if aggregates.is_empty() {
                         return self.leaf(t, depth);
                     }
@@ -481,6 +511,15 @@ impl Gen {
                 },
                 _ => self.leaf(t, d),
             },
+            Ty::Ref(e) => match self.projection(t) {
+                Some(p) if self.rng.chance(40) => p,
+                _ => format!("ref {}", self.expr(e, d)),
+            },
+            // A copy of an existing cell shares it.
+            Ty::Cell(e) => match self.projection(t) {
+                Some(p) if self.rng.chance(40) => p,
+                _ => format!("cell({})", self.expr(e, d)),
+            },
             // Never empty. Literals only where a list type is expected, which
             // is everywhere `expr` is used for one.
             Ty::List(e) => match self.rng.below(6) {
@@ -512,9 +551,19 @@ impl Gen {
         format!("[{}]", xs.join(", "))
     }
 
+    fn has_cell(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Cell(_) => true,
+            Ty::Array(e, _) | Ty::List(e) | Ty::Ref(e) => self.has_cell(e),
+            Ty::Struct(k) => self.structs[*k].iter().any(|f| self.has_cell(f)),
+            _ => false,
+        }
+    }
+
     fn has_list(&self, t: &Ty) -> bool {
         match t {
             Ty::List(_) => true,
+            Ty::Ref(e) | Ty::Cell(e) => self.has_list(e),
             Ty::Array(e, _) => self.has_list(e),
             Ty::Struct(k) => self.structs[*k].iter().any(|f| self.has_list(f)),
             _ => false,
@@ -604,6 +653,9 @@ impl Gen {
 
     fn stmt(&mut self, depth: u32) {
         if self.lists && self.rng.chance(25) && self.list_stmt() {
+            return;
+        }
+        if self.lists && self.rng.chance(15) && self.cell_stmt() {
             return;
         }
         match self.rng.below(24) {
@@ -727,6 +779,35 @@ impl Gen {
                 self.out(&e, &t);
             }
         }
+    }
+
+    /// Replaces what a cell somewhere in a variable holds, or pushes to the
+    /// list one holds, if there is one: every copy of the cell sees it.
+    fn cell_stmt(&mut self) -> bool {
+        let mut cells = Vec::new();
+        for (v, var) in self.vars.iter().enumerate() {
+            for (path, end) in self.paths(&var.ty, 3) {
+                if let Ty::Cell(e) = end {
+                    cells.push((v, path, *e));
+                }
+            }
+        }
+        if cells.is_empty() {
+            return false;
+        }
+        let (v, path, e) = cells[self.rng.below(cells.len())].clone();
+        let target = self.place(v, &path, true);
+        match e {
+            Ty::List(item) if self.rng.chance(50) => {
+                let x = self.expr(&item, 2);
+                self.line(&format!("push(*{target}, {x})"));
+            }
+            _ => {
+                let x = self.expr(&e, 2);
+                self.line(&format!("*{target} = {x}"));
+            }
+        }
+        true
     }
 
     /// Pushes to or pops from a list somewhere in a variable, if there is one.

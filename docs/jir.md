@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 11)
+# JIR — jihoo IR text format (version 12)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -41,6 +41,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 9 | lists in native modules, and `clone` and `drop` |
 | 10 | `str` in native modules: string literals of type `str`, `strbyte`, `frombytes`, `to_str`, `readline` and comparisons |
 | 11 | `closure` in native modules; native function values are `{code, env}` (16 bytes) |
+| 12 | `ref` and `cell` in native modules, as counted boxes |
 
 ## Example
 
@@ -93,7 +94,7 @@ bb3:
 ## Module
 
 ```
-jir 11                               ; format version, must come first
+jir 12                               ; format version, must come first
 profile hosted|native|freestanding   ; language profile
 target x86_64|aarch64                ; the machine, 64-bit Linux
 struct ...                           ; zero or more structs
@@ -159,9 +160,9 @@ cannot be a `funcref`.
 | `[N x T]`         | array of `N` `T`s, by value              | `[N x T]`     |
 | `[T]`             | list of any number of `T`s, by value; hosted and native | `{ptr, i64, i64}` |
 | `fn(T, ...) -> R` | function value                           | `ptr`; native `{ptr, ptr}` |
-| `ref T`           | immutable GC reference to a `T`, hosted only | —         |
+| `ref T`           | immutable shared reference to a `T`; hosted and native | `ptr` to `{i64, T}` |
 | `chan T`          | channel of `T` values between tasks, hosted only | —     |
-| `cell T`          | shared mutable `T`, hosted only          | —             |
+| `cell T`          | shared mutable `T`; hosted and native    | `ptr` to `{i64, T}` |
 
 `str` and `*T` are deliberately separate: GC references and raw pointers must never
 mix. That separation is what will later allow GC-enabled native builds.
@@ -304,7 +305,16 @@ object exists).
 | `%d = tag %e`                       | an enum               | `u32`  | the index of the variant `%e` holds |
 | `%d = payload %e, K, N`             | an enum               | type of value N of variant K | read a payload value; `%e` must hold variant K (the VM checks; natively it is undefined) |
 
-### References (hosted only)
+### References and cells (hosted and native)
+
+On the VM refs and cells are GC objects. Natively each points to a box
+`{ i64 count, T value }` from `malloc` that its copies share: `clone` adds one
+to the count, `drop` takes one away and frees the box at zero (see
+[Ownership](#ownership-native-lists)). A ref's count changes atomically, since
+refs may reach other threads; a cell's does not, since cells may not. `deref`
+gives a view of the value; `cellget` gives a value the ownership pass copies,
+since other holders of the cell can change it. A cell that holds itself
+(through other cells) is never freed.
 
 | syntax                              | operands              | result | meaning |
 |-------------------------------------|-----------------------|--------|---------|
@@ -312,9 +322,8 @@ object exists).
 | `%d = deref %r`                     | `ref T`               | `T`    | the value `%r` refers to |
 
 A `ref` field breaks the rule that a struct or enum may not contain itself.
-Types containing a `ref` have no fixed layout, like those containing `str`.
-
-### Cells (hosted only)
+On the VM, types containing a `ref` or `cell` have no fixed layout, like those
+containing `str`; natively each is a pointer (8 bytes).
 
 | syntax                              | operands              | result | meaning |
 |-------------------------------------|-----------------------|--------|---------|

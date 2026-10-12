@@ -57,8 +57,16 @@ A type cannot contain itself by value, since its size would be infinite. A
 `ref` breaks that rule, which is what makes lists and trees possible: a
 `ref List` field holds a reference to a list, not the list itself.
 
-## Hosted only
+## In each profile
 
-Like `str`, refs need the GC, which owns the value. Native and freestanding code
-uses [pointers](pointers.md) instead. On the VM a ref is a one-element heap
-object; in JIR it is the type `ref T`, made with `ref` and read with `deref`.
+On the VM a ref is a one-element heap object. Natively it points to memory
+that all its copies share, with a count of them: copying a ref adds one, and
+the memory is freed when the last copy goes. Refs never change, so they never
+form a cycle and every one is freed. Reading through a ref copies nothing, and
+refs may be passed to other threads (the count changes atomically).
+Freestanding programs have no allocator, so no refs; they use
+[pointers](pointers.md). In JIR a ref is the type `ref T`, made with `ref` and
+read with `deref`.
+
+Freeing a long chain of refs (a list of a million `Cons`) frees one after the
+other recursively, which takes stack in proportion to the length.

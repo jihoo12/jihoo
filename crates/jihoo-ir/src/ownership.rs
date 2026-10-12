@@ -39,6 +39,11 @@
 //! are refused by the frontend. Liveness is computed on registers, which
 //! already have value semantics, so a move is never visible: it only happens
 //! where nothing could tell the difference.
+//!
+//! `ref` and `cell` are the values whose copies do share: natively a counted
+//! box, where `clone` counts one more holder and `drop` one fewer. What a ref
+//! holds never changes, so `deref` is a view like a part read. What a cell
+//! holds can change through any holder, so `cellget` is always copied.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -136,7 +141,7 @@ impl Owning {
     pub fn owns(&mut self, t: &Type) -> bool {
         match t {
             // A function value may be a closure, which owns what it captured.
-            Type::List(_) | Type::Str | Type::Fn(..) => true,
+            Type::List(_) | Type::Str | Type::Fn(..) | Type::Ref(_) | Type::Cell(_) => true,
             Type::Array(elem, _) => self.owns(elem),
             Type::Struct(name) | Type::Enum(name) => {
                 if let Some(&r) = self.memo.get(name) {
@@ -349,7 +354,9 @@ fn projection(inst: &Inst) -> Option<(Reg, Reg)> {
         Inst::Field { dst, src, .. }
         | Inst::Elem { dst, src, .. }
         | Inst::GetPath { dst, src, .. }
-        | Inst::Payload { dst, src, .. } => Some((*dst, *src)),
+        | Inst::Payload { dst, src, .. }
+        // What a `ref` refers to never changes, and lives while the ref does.
+        | Inst::Deref { dst, src } => Some((*dst, *src)),
         _ => None,
     }
 }
@@ -433,7 +440,7 @@ fn views(f: &Function, tracked: &HashSet<Reg>) -> HashMap<Reg, Reg> {
 /// over by the caller (in a consuming version); the others are borrowed.
 fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
     let owning = &mut *cx.owning;
-    let tracked: HashSet<Reg> = (0..f.regs.len() as u32).map(Reg).filter(|&r| owning.owns(f.reg_type(r))).collect();
+    let mut tracked: HashSet<Reg> = (0..f.regs.len() as u32).map(Reg).filter(|&r| owning.owns(f.reg_type(r))).collect();
     if tracked.is_empty() {
         return;
     }
@@ -462,18 +469,41 @@ fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
 
     // Parts read out of values are views where that cannot be told apart from
     // a copy; the others become copies right after the read.
-    let roots = views(f, &tracked);
+    //
+    // The read goes to a view of its own, which the copy is made from, so the
+    // value read from stays alive until the copy is made.
+    let mut roots = views(f, &tracked);
+    let mut new_regs = Vec::new();
+    let mut next = f.regs.len() as u32;
     for b in &mut f.blocks {
         let mut insts = Vec::with_capacity(b.insts.len());
-        for inst in std::mem::take(&mut b.insts) {
-            let copy = projection(&inst).filter(|(d, _)| tracked.contains(d) && !roots.contains_key(d));
-            insts.push(inst);
-            if let Some((d, _)) = copy {
-                insts.push(Inst::Clone { dst: d, src: d });
+        for mut inst in std::mem::take(&mut b.insts) {
+            // What a cell holds can change through any other holder of the
+            // cell, so a part read out of it is always a copy.
+            let read_from_cell = match &inst {
+                Inst::CellGet { dst, cell, .. } => Some((*dst, *cell)),
+                _ => None,
+            };
+            let copy = projection(&inst)
+                .filter(|(d, _)| tracked.contains(d) && !roots.contains_key(d))
+                .or(read_from_cell.filter(|(d, _)| tracked.contains(d)));
+            match copy {
+                Some((d, src)) => {
+                    let view = Reg(next);
+                    next += 1;
+                    new_regs.push(f.regs[d.0 as usize].clone());
+                    *inst.regs_mut()[0] = view;
+                    roots.insert(view, roots.get(&src).copied().unwrap_or(src));
+                    tracked.insert(view);
+                    insts.push(inst);
+                    insts.push(Inst::Clone { dst: d, src: view });
+                }
+                None => insts.push(inst),
             }
         }
         b.insts = insts;
     }
+    f.regs.extend(new_regs);
     // Neither borrowed parameters nor views are ever freed: their memory is
     // someone else's. Consuming one copies it. A value read through a pointer
     // (a function value; nothing else that owns memory can be) is borrowed

@@ -691,8 +691,14 @@ fn cells() {
     assert!(err("fn main() { let c = cell(1)\n print(c == c) }").contains("cells (cell i64) cannot be compared; compare what they hold"));
     assert!(err("fn main() { let c = cell(1)\n *c = true }").contains("must be i64, found bool"));
     assert!(err("const C = cell(1)\nfn main() {}").contains("a cell cannot be computed at compile time"));
-    assert!(err(&fs("fn f() { let c = cell(1) }")).contains("only available in hosted mode"));
-    assert!(err(&fs("fn f(c: cell i64) {}")).contains("only available in hosted mode"));
+    assert!(err(&fs("fn f() { let c = cell(1) }")).contains("which freestanding programs cannot"));
+    assert!(err(&fs("fn f(c: cell i64) {}")).contains("not available in freestanding mode"));
+    // Natively a cell is a counted box; one never reaches another thread.
+    check(&native("fn f() -> i64 { let c = cell(1)\n *c = *c + 1\n return *c }")).unwrap();
+    let e = err(&native("struct S { c: cell i64 }\nfn w(s: S) {}\nfn f() { go w(S { c: cell(0) }) }"));
+    assert!(e.contains("a thread cannot share a cell"), "{e}");
+    // A recursive type through `ref` is fine to check.
+    check(&native("enum L { Cons(i64, ref L)\n Nil }\nfn w(l: ref L) {}\nfn f() { go w(ref L.Nil) }")).unwrap();
 }
 
 // ---- equality ----
@@ -741,7 +747,8 @@ fn refs() {
     assert!(err("fn main() { let r = ref 1\n *r = 2 }").contains("behind a `ref`"));
     // Refs compare by value: which object a ref is cannot be observed.
     check("fn main() { let r = ref 1\n print(r == ref 1) }").unwrap();
-    assert!(err(&fs("fn f() { let r = ref 1 }")).contains("only available in hosted mode"));
+    assert!(err(&fs("fn f() { let r = ref 1 }")).contains("which freestanding programs cannot"));
+    check(&native("fn f() -> i64 { let r = ref [1, 2]\n return r[1] }")).unwrap();
     assert!(err(&fs("fn f(r: ref i64) {}")).contains("use a pointer (`*T`)"));
     assert!(err("fn main() { let r = ref [1, 2]\n r[0] = 5 }").contains("behind a `ref`"));
     assert!(err("fn main() { let x = 1\n let r = ref x\n print(r + 1) }").contains("cannot apply `+` to ref i64 and i64"));

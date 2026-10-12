@@ -12,15 +12,15 @@ namespace jir {
 
 // The one JIR version this backend reads, from the `jir N` header. It must
 // equal JIR_VERSION in crates/jihoo-ir/src/lib.rs (a Rust test checks this).
-constexpr int64_t kVersion = 11;
+constexpr int64_t kVersion = 12;
 
 enum class Profile { Hosted, Native, Freestanding };
 
 struct Type {
-  enum Kind { Unit, Bool, Int, Float, Str, Ptr, Struct, Array, Fn, List } kind = Unit;
+  enum Kind { Unit, Bool, Int, Float, Str, Ptr, Struct, Array, Fn, List, Ref, Cell } kind = Unit;
   unsigned bits = 0;               // Int, Float (32 or 64)
   bool is_signed = false;          // Int
-  std::shared_ptr<Type> pointee;   // Ptr: the pointee; Array, List: the element type; Fn: the result
+  std::shared_ptr<Type> pointee;   // Ptr, Ref, Cell: the pointee; Array, List: the element type; Fn: the result
   uint64_t count = 0;              // Array
   std::string name;                // Struct: a struct or enum name
   std::vector<Type> params;        // Fn
@@ -52,6 +52,13 @@ struct Type {
     t.pointee = std::make_shared<Type>(std::move(ret));
     return t;
   }
+  // `ref T` or `cell T`: a counted box, natively.
+  static Type boxed(Kind k, Type inner) {
+    Type t;
+    t.kind = k;
+    t.pointee = std::make_shared<Type>(std::move(inner));
+    return t;
+  }
   static Type list(Type elem) {
     Type t;
     t.kind = List;
@@ -71,7 +78,7 @@ struct Type {
     switch (kind) {
       case Int: return bits == o.bits && is_signed == o.is_signed;
       case Float: return bits == o.bits;
-      case Ptr: case List: return *pointee == *o.pointee;
+      case Ptr: case List: case Ref: case Cell: return *pointee == *o.pointee;
       case Array: return count == o.count && *pointee == *o.pointee;
       case Struct: return name == o.name;
       case Fn: return params == o.params && *pointee == *o.pointee;
@@ -91,6 +98,8 @@ struct Type {
       case Struct: return "$" + name;
       case Array: return "[" + std::to_string(count) + " x " + pointee->str() + "]";
       case List: return "[" + pointee->str() + "]";
+      case Ref: return "ref " + pointee->str();
+      case Cell: return "cell " + pointee->str();
       case Fn: {
         std::string s = "fn(";
         for (size_t i = 0; i < params.size(); i++) s += (i ? ", " : "") + params[i].str();
@@ -140,6 +149,8 @@ enum class Op {
   StrByte, FromBytes, ToStr, ReadLine,
   // A function value that captured values: native only.
   Closure,
+  // Native `ref` and `cell`: counted boxes.
+  Ref, Deref, NewCell, CellGet, CellSet,
   Spawn,
   AtomicLoad, AtomicStore, AtomicSwap, AtomicAdd, AtomicSub, AtomicAnd, AtomicOr, AtomicXor, AtomicCas, Fence,
 };

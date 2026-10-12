@@ -43,7 +43,8 @@ fn _start() -> i64 {
 | pointers        | no                      | `*T`, `&x`, `*p`, `p[i]`       | `*T`, `&x`, `*p`, `p[i]`          |
 | syscalls / asm  | no                      | yes                            | yes                               |
 | concurrency     | `go` tasks, channels, `select` | `go` threads, atomics, locks (`sync`), channels (`channel`) | atomics, locks (`sync`) |
-| `ref`, `cell`, `chan`, capturing closures | yes | no                 | no                                |
+| lists, `str`, `ref`, `cell`, capturing closures | yes | yes, freed by the compiler | no                  |
+| `chan`, `select`, tasks | yes             | no (threads and `channel`)     | no                                |
 | entry point     | `fn main()`             | `fn main()` or `fn main(argc: i32, argv: **u8)` | `fn _start()`    |
 
 Everything else — integers and floats, structs, arrays, enums, `match`, function

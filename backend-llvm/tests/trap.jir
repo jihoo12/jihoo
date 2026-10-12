@@ -1,6 +1,6 @@
 ; `trap` stops the program; the block ends with `unreachable` after it.
 ; expect: trap
-jir 11
+jir 12
 profile freestanding
 
 fn @_start() -> i64 {

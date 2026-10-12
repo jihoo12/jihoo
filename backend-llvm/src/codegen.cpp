@@ -81,6 +81,8 @@ class Types {
       case jir::Type::Int: return Type::getIntNTy(ctx_, t.bits);
       case jir::Type::Float: return t.bits == 32 ? Type::getFloatTy(ctx_) : Type::getDoubleTy(ctx_);
       case jir::Type::Ptr: return PointerType::get(ctx_, 0);
+      // A pointer to the counted box `{ i64 count, T value }`; see `Glue`.
+      case jir::Type::Ref: case jir::Type::Cell: return PointerType::get(ctx_, 0);
       // Natively `{ code, env }`: a closure's code takes the memory holding
       // what it captured first; other functions have no env (null).
       case jir::Type::Fn:
@@ -122,6 +124,11 @@ class Types {
 
   // Whether function values are `{ code, env }` (native modules).
   bool fat_fns() const { return fat_fns_; }
+
+  // The box a `ref T` or `cell T` points to: how many hold it, and the value.
+  StructType *box(const jir::Type &t) const {
+    return StructType::get(ctx_, {Type::getInt64Ty(ctx_), lower(*t.pointee)});
+  }
 
   // Calls the function value `fat` (of JIR type `ft`) with `args`, which
   // start with the `sret` pointer if the result is an aggregate: the code
@@ -258,6 +265,14 @@ class Types {
 // a view that shares the elements, which the pass clones where it must; the
 // backend drops the old part where it writes one.
 //
+// A `ref T` or `cell T` points to a box `{ i64 count, T value }` from
+// `malloc`, which every copy shares: a clone adds one to the count and a drop
+// takes one away, freeing the box (and what the value owns) at zero. A ref's
+// value never changes, so refs never form a cycle and the count is exact; its
+// count changes atomically, since a ref may reach another thread. A cell
+// never does (the frontend refuses it), so its count is a plain integer; a
+// cell that holds itself, through other cells, is never freed.
+//
 // A `str` is a list of bytes that never changes. One whose `cap` is 0 holds
 // the bytes of a literal, in the program's constant data: freeing it does
 // nothing and copying it copies the header, so literals cost no memory.
@@ -276,6 +291,7 @@ class Glue {
     switch (t.kind) {
       case jir::Type::List: case jir::Type::Str: return true;
       case jir::Type::Fn: return types_.fat_fns();  // a closure owns what it captured
+      case jir::Type::Ref: case jir::Type::Cell: return true;
       case jir::Type::Array: return owns(*t.pointee);
       case jir::Type::Struct: {
         auto memo = owns_.find(t.name);
@@ -308,7 +324,10 @@ class Glue {
   ClosureCode closure(const std::string &name, Function *target, const std::vector<jir::Type> &captured,
                       const jir::Type &ft) {
     if (auto it = closures_.find(name); it != closures_.end()) return it->second;
-    std::vector<Type *> fields{ptr(), ptr()};
+    // `{ drop, clone, local, captured... }`: `local` is 1 if a captured value
+    // holds a cell or a function value (which may be a closure holding one),
+    // so the closure must not run on another thread.
+    std::vector<Type *> fields{ptr(), ptr(), Type::getInt64Ty(ctx_)};
     for (const auto &t : captured) fields.push_back(types_.lower(t));
     StructType *env_ty = StructType::get(ctx_, fields);
     const DataLayout &dl = m_.getDataLayout();
@@ -325,7 +344,7 @@ class Glue {
       Value *env = code->getArg(sret ? 1 : 0);
       // The captured values are borrowed from the env, as arguments are.
       for (unsigned k = 0; k < captured.size(); k++) {
-        Value *at = b.CreateStructGEP(env_ty, env, k + 2);
+        Value *at = b.CreateStructGEP(env_ty, env, k + 3);
         args.push_back(Types::is_agg(captured[k]) ? at : b.CreateLoad(types_.lower(captured[k]), at));
       }
       for (unsigned i = (sret ? 2 : 1); i < code->arg_size(); i++) args.push_back(code->getArg(i));
@@ -339,7 +358,7 @@ class Glue {
       IRBuilder<> b(BasicBlock::Create(ctx_, "entry", drop_env));
       Value *env = drop_env->getArg(0);
       for (unsigned k = 0; k < captured.size(); k++)
-        if (owns(captured[k])) b.CreateCall(drop(captured[k]), {b.CreateStructGEP(env_ty, env, k + 2)});
+        if (owns(captured[k])) b.CreateCall(drop(captured[k]), {b.CreateStructGEP(env_ty, env, k + 3)});
       b.CreateCall(free_fn(), {env});
       b.CreateRetVoid();
     }
@@ -354,12 +373,34 @@ class Glue {
       b.CreateMemCpy(copy, a, env, a, bytes);
       for (unsigned k = 0; k < captured.size(); k++)
         if (owns(captured[k]))
-          b.CreateCall(clone(captured[k]), {b.CreateStructGEP(env_ty, copy, k + 2), b.CreateStructGEP(env_ty, env, k + 2)});
+          b.CreateCall(clone(captured[k]), {b.CreateStructGEP(env_ty, copy, k + 3), b.CreateStructGEP(env_ty, env, k + 3)});
       b.CreateRet(copy);
     }
     drop_fns_[name] = drop_env;
     clone_fns_[name] = clone_env;
     return closures_[name] = {env_ty, code};
+  }
+
+  // Whether values of `t` may hold a cell, directly or through a closure.
+  bool local(const jir::Type &t) {
+    switch (t.kind) {
+      case jir::Type::Cell: case jir::Type::Fn: return true;
+      case jir::Type::Array: case jir::Type::List: case jir::Type::Ref: return local(*t.pointee);
+      case jir::Type::Struct: {
+        auto memo = local_.find(t.name);
+        if (memo != local_.end()) return memo->second;
+        local_[t.name] = false;
+        bool r = false;
+        if (auto s = structs_.find(t.name); s != structs_.end()) {
+          for (const auto &f : s->second->fields) r = r || local(f.second);
+        } else if (auto e = enums_.find(t.name); e != enums_.end()) {
+          for (const auto &v : e->second->variants)
+            for (const auto &p : v.second) r = r || local(p);
+        }
+        return local_[t.name] = r;
+      }
+      default: return false;
+    }
   }
 
   Function *closure_drop(const std::string &name) const { return drop_fns_.at(name); }
@@ -429,7 +470,7 @@ class Glue {
   LLVMContext &ctx_;
   std::unordered_map<std::string, const jir::StructDef *> structs_;
   std::unordered_map<std::string, const jir::EnumDef *> enums_;
-  std::unordered_map<std::string, bool> owns_;
+  std::unordered_map<std::string, bool> owns_, local_;
   std::unordered_map<std::string, Function *> drops_, clones_;
   std::unordered_map<std::string, ClosureCode> closures_;
   std::unordered_map<std::string, Function *> drop_fns_, clone_fns_;
@@ -518,6 +559,29 @@ class Glue {
   }
 
   void drop_body(IRBuilder<> &b, Function *fn, const jir::Type &t, Value *v) {
+    if (t.kind == jir::Type::Ref || t.kind == jir::Type::Cell) {
+      Value *box = b.CreateLoad(ptr(), v);
+      StructType *box_ty = types_.box(t);
+      auto *held = BasicBlock::Create(ctx_, "held", fn), *last = BasicBlock::Create(ctx_, "last", fn);
+      auto *done = BasicBlock::Create(ctx_, "done", fn);
+      b.CreateCondBr(b.CreateIsNotNull(box), held, done);
+      b.SetInsertPoint(held);
+      Value *count = b.CreateStructGEP(box_ty, box, 0);
+      Value *before;
+      if (t.kind == jir::Type::Ref) {
+        before = b.CreateAtomicRMW(AtomicRMWInst::Sub, count, b.getInt64(1), Align(8), AtomicOrdering::AcquireRelease);
+      } else {
+        before = b.CreateLoad(b.getInt64Ty(), count);
+        b.CreateStore(b.CreateSub(before, b.getInt64(1)), count);
+      }
+      b.CreateCondBr(b.CreateICmpEQ(before, b.getInt64(1)), last, done);
+      b.SetInsertPoint(last);
+      if (owns(*t.pointee)) b.CreateCall(drop(*t.pointee), {b.CreateStructGEP(box_ty, box, 1)});
+      b.CreateCall(free_fn(), {box});
+      b.CreateBr(done);
+      b.SetInsertPoint(done);
+      return;
+    }
     if (t.kind == jir::Type::Fn) {
       // A closure's env starts with the functions that free and copy it.
       Value *env = b.CreateLoad(ptr(), b.CreateStructGEP(types_.lower(t), v, 1));
@@ -559,6 +623,23 @@ class Glue {
 
   void clone_body(IRBuilder<> &b, Function *fn, const jir::Type &t, Value *dst, Value *src) {
     const DataLayout &dl = m_.getDataLayout();
+    if (t.kind == jir::Type::Ref || t.kind == jir::Type::Cell) {
+      // Copies share the box.
+      Value *box = b.CreateLoad(ptr(), src);
+      auto *held = BasicBlock::Create(ctx_, "held", fn), *done = BasicBlock::Create(ctx_, "done", fn);
+      b.CreateCondBr(b.CreateIsNotNull(box), held, done);
+      b.SetInsertPoint(held);
+      Value *count = b.CreateStructGEP(types_.box(t), box, 0);
+      if (t.kind == jir::Type::Ref) {
+        b.CreateAtomicRMW(AtomicRMWInst::Add, count, b.getInt64(1), Align(8), AtomicOrdering::Monotonic);
+      } else {
+        b.CreateStore(b.CreateAdd(b.CreateLoad(b.getInt64Ty(), count), b.getInt64(1)), count);
+      }
+      b.CreateBr(done);
+      b.SetInsertPoint(done);
+      b.CreateStore(box, dst);
+      return;
+    }
     if (t.kind == jir::Type::Fn) {
       Type *fat = types_.lower(t);
       Value *code = b.CreateLoad(ptr(), b.CreateStructGEP(fat, src, 0));
@@ -895,6 +976,19 @@ class FnGen {
     }
     StructType *env_ty = StructType::get(ctx_, fields);
     uint64_t size = mod_.getDataLayout().getTypeAllocSize(env_ty);
+    // A closure that captured a cell (or a function value, which may be one)
+    // stays on its thread: its cell would change under two threads at once.
+    // The frontend refuses cells in the arguments.
+    if (types_.fat_fns()) {
+      Value *cenv = b_.CreateExtractValue(load(inst.args[0]), 1);
+      auto *closure = BasicBlock::Create(ctx_, "spawn.closure", fn_), *ok = BasicBlock::Create(ctx_, "spawn.ok", fn_);
+      b_.CreateCondBr(b_.CreateIsNotNull(cenv), closure, ok);
+      b_.SetInsertPoint(closure);
+      Value *flag = b_.CreateLoad(i64_, b_.CreateConstGEP1_64(ptr, cenv, 2));
+      check(b_.CreateICmpEQ(flag, b_.getInt64(0)), "spawn.not_local");
+      b_.CreateBr(ok);
+      b_.SetInsertPoint(ok);
+    }
 
     FunctionCallee malloc_fn = mod_.getOrInsertFunction("malloc", FunctionType::get(ptr, {i64_}, false));
     Value *env = b_.CreateCall(malloc_fn, {b_.getInt64(size)});
@@ -1147,6 +1241,13 @@ class FnGen {
   Value *list_field(Value *header, unsigned k) {
     Type *ty = k == 0 ? static_cast<Type *>(PointerType::get(ctx_, 0)) : i64_;
     return b_.CreateLoad(ty, b_.CreateStructGEP(glue_.header(), header, k));
+  }
+
+  // The part at `path` in register `r`, or in what `r` holds if it is a cell.
+  std::pair<Value *, const jir::Type *> root_path(uint32_t r, const std::vector<jir::PathStep> &path) {
+    const jir::Type &t = type(r);
+    if (t.kind == jir::Type::Cell) return path_addr(*t.pointee, b_.CreateStructGEP(types_.box(t), load(r), 1), path);
+    return path_addr(t, slot(r), path);
   }
 
   // Address of element `index` of the array at `base`, after a bounds check.
@@ -1448,6 +1549,38 @@ class FnGen {
         if (!sret) store(inst.dst, r);
         return;
       }
+      case Op::Ref: case Op::NewCell: {
+        // A new box, held once, that the value moves into.
+        const jir::Type &t = type(inst.dst);
+        StructType *box_ty = types_.box(t);
+        Value *box = b_.CreateCall(glue_.malloc_fn(), {b_.getInt64(mod_.getDataLayout().getTypeAllocSize(box_ty))});
+        check(b_.CreateIsNotNull(box), "box.alloc");
+        b_.CreateStore(b_.getInt64(1), b_.CreateStructGEP(box_ty, box, 0));
+        write_mem(b_.CreateStructGEP(box_ty, box, 1), arg_reg(0));
+        store(inst.dst, box);
+        return;
+      }
+      case Op::Deref: {
+        // A view of the value: it lives while the ref does, and never changes.
+        const jir::Type &t = type(arg_reg(0));
+        if (t.kind != jir::Type::Ref) fail(f_.name, "`deref` needs a ref");
+        read_mem(inst.dst, b_.CreateStructGEP(types_.box(t), arg(0), 1));
+        return;
+      }
+      case Op::CellGet: case Op::CellSet: {
+        const jir::Type &t = type(arg_reg(0));
+        if (t.kind != jir::Type::Cell) fail(f_.name, "`cellget` and `cellset` need a cell");
+        Value *value = b_.CreateStructGEP(types_.box(t), arg(0), 1);
+        auto [addr, part] = path_addr(*t.pointee, value, inst.path);
+        if (inst.op == Op::CellGet) {
+          if (*part != type(inst.dst)) fail(f_.name, "`cellget` result has the wrong type");
+          read_mem(inst.dst, addr);  // the ownership pass clones what owns memory
+        } else {
+          if (*part != type(arg_reg(1))) fail(f_.name, "`cellset` value has the wrong type");
+          write_part(addr, arg_reg(1));
+        }
+        return;
+      }
       case Op::Closure: {
         if (!types_.fat_fns()) fail(f_.name, "closures that capture values are only available in native modules");
         auto it = fns_.find(inst.text);
@@ -1459,8 +1592,10 @@ class FnGen {
         check(b_.CreateIsNotNull(env), "closure.alloc");
         b_.CreateStore(glue_.closure_drop(inst.text), b_.CreateStructGEP(c.env, env, 0));
         b_.CreateStore(glue_.closure_clone(inst.text), b_.CreateStructGEP(c.env, env, 1));
+        bool local = std::any_of(captured.begin(), captured.end(), [&](const jir::Type &t) { return glue_.local(t); });
+        b_.CreateStore(b_.getInt64(local), b_.CreateStructGEP(c.env, env, 2));
         // The captured values move into the env.
-        for (unsigned k = 0; k < inst.args.size(); k++) write_mem(b_.CreateStructGEP(c.env, env, k + 2), inst.args[k]);
+        for (unsigned k = 0; k < inst.args.size(); k++) write_mem(b_.CreateStructGEP(c.env, env, k + 3), inst.args[k]);
         Value *fat = UndefValue::get(types_.lower(type(inst.dst)));
         fat = b_.CreateInsertValue(fat, c.code, 0);
         fat = b_.CreateInsertValue(fat, env, 1);
@@ -1774,7 +1909,7 @@ class FnGen {
         return;
       }
       case Op::Push: {
-        auto [header, t] = path_addr(type(arg_reg(0)), slot(arg_reg(0)), inst.path);
+        auto [header, t] = root_path(arg_reg(0), inst.path);
         if (t->kind != jir::Type::List) fail(f_.name, "`push` needs a list");
         const jir::Type &elem = *t->pointee;
         if (elem != type(arg_reg(1))) fail(f_.name, "pushed value has the wrong type");
@@ -1798,7 +1933,7 @@ class FnGen {
         return;
       }
       case Op::Pop: {
-        auto [header, t] = path_addr(type(arg_reg(0)), slot(arg_reg(0)), inst.path);
+        auto [header, t] = root_path(arg_reg(0), inst.path);
         if (t->kind != jir::Type::List) fail(f_.name, "`pop` needs a list");
         if (*t->pointee != type(inst.dst)) fail(f_.name, "`pop` result has the wrong type");
         Value *len = list_field(header, 1);

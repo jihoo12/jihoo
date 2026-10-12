@@ -1,5 +1,5 @@
 ; Each header comes once.
 ; expect: error a second `profile` header
-jir 11
+jir 12
 profile freestanding
 profile native

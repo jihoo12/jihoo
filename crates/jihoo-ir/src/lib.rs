@@ -24,7 +24,7 @@ pub use verify::verify;
 /// module instead of compiling it with other rules. Bump it whenever the
 /// format or the meaning of anything in it changes (see "Versions" in
 /// `docs/jir.md`); the `version` tests check that both sides and the spec agree.
-pub const JIR_VERSION: u32 = 11;
+pub const JIR_VERSION: u32 = 12;
 
 /// Language profile, selected with `#![native]` or `#![freestanding]` at the
 /// top of a source file.

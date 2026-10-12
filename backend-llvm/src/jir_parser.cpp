@@ -232,6 +232,8 @@ struct Line {
         s.kind = Type::Str;
         return s;
       }
+      if (w == "ref") return Type::boxed(Type::Ref, type());
+      if (w == "cell") return Type::boxed(Type::Cell, type());
       if (w == "f32") return Type::floating(32);
       if (w == "f64") return Type::floating(64);
       if (w.size() >= 2 && (w[0] == 'i' || w[0] == 'u')) {
@@ -303,6 +305,7 @@ const std::unordered_map<std::string, Op> kUnOps = {
     {"load", Op::Load},   {"addr", Op::Addr},   {"splat", Op::Splat}, {"tag", Op::Tag},
     {"atomic_load", Op::AtomicLoad}, {"len", Op::Len}, {"clone", Op::Clone},
     {"frombytes", Op::FromBytes}, {"to_str", Op::ToStr},
+    {"ref", Op::Ref}, {"deref", Op::Deref}, {"cell", Op::NewCell},
 };
 
 // `%d = <op> ...`
@@ -360,6 +363,12 @@ Inst parse_assign(Line &l) {
     uint32_t lo = l.reg();
     l.punct(",");
     inst.args = {a, lo, l.reg()};
+  } else if (w == "cellget") {
+    // `cellget %c, (step, ...)`
+    inst.op = Op::CellGet;
+    inst.args = {l.reg()};
+    l.punct(",");
+    inst.path = l.path();
   } else if (w == "pop") {
     // `pop %r, (step, ...)`
     inst.op = Op::Pop;
@@ -667,12 +676,12 @@ Module parse(const std::string &text) {
         l.end();
         continue;
       }
-      // `push %r, (step, ...), %v` and `drop %r`
-      if (w == "push" || w == "drop") {
+      // `push %r, (step, ...), %v`, `cellset %c, (step, ...), %v` and `drop %r`
+      if (w == "push" || w == "cellset" || w == "drop") {
         Inst inst{};
-        inst.op = w == "push" ? Op::Push : Op::Drop;
+        inst.op = w == "push" ? Op::Push : w == "cellset" ? Op::CellSet : Op::Drop;
         inst.args = {l.reg()};
-        if (inst.op == Op::Push) {
+        if (inst.op != Op::Drop) {
           l.punct(",");
           inst.path = l.path();
           l.punct(",");

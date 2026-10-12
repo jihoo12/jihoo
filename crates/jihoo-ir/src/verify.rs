@@ -368,8 +368,8 @@ impl Cx<'_> {
                         }
                     }
                     Inst::Ref { dst, src } => {
-                        if profile != Profile::Hosted {
-                            Err("`ref` needs the GC and is only available in hosted mode".into())
+                        if profile == Profile::Freestanding {
+                            Err("`ref` needs an allocator; not freestanding".into())
                         } else {
                             expect(dst, &Type::Ref(Box::new(ty(src)?.clone())))
                         }

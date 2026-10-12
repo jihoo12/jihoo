@@ -214,9 +214,9 @@ impl Type {
             Type::Fn(params, ret) => params.iter().chain([&**ret]).all(|t| t.available_in(profile)),
             // Native lists own their memory, which the ownership pass frees.
             Type::List(inner) => profile != Profile::Freestanding && inner.available_in(profile),
-            Type::Ref(inner) | Type::Chan(inner) | Type::Cell(inner) => {
-                profile == Profile::Hosted && inner.available_in(profile)
-            }
+            // Native refs and cells are boxes counted by their holders.
+            Type::Ref(inner) | Type::Cell(inner) => profile != Profile::Freestanding && inner.available_in(profile),
+            Type::Chan(inner) => profile == Profile::Hosted && inner.available_in(profile),
             Type::Expr | Type::Stmts | Type::Items => false,
             Type::Unit | Type::Bool | Type::Int(_) | Type::Float(_) | Type::Struct(_) | Type::Enum(_) => true,
         }

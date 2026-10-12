@@ -159,6 +159,10 @@ threads use it: a copy is an unrelated second one.
 
 ## Channels
 
+A thread never gets a [cell](cells.md): `go f(c)` with a cell in the
+arguments is an error. Lists, strings and refs may go to a thread: a list
+or string is the thread's own copy, and a ref's count changes atomically.
+
 Threads can also share nothing and pass values instead, as hosted tasks do:
 the [`channel`](../reference/standard-library.md#channel) library has
 channels between threads, with `close` to say that no more values will come

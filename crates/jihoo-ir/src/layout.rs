@@ -43,6 +43,8 @@ pub fn of(t: &Type, profile: Profile, members: &Members<'_>) -> Option<Layout> {
         // Natively, a function value is code and the memory a closure captured.
         Type::Fn(..) if profile == Profile::Native => Layout { size: 16, align: 8 },
         Type::Ptr(_) | Type::Fn(..) => Layout { size: 8, align: 8 },
+        // Natively, a pointer to the counted box.
+        Type::Ref(_) | Type::Cell(_) if profile == Profile::Native => Layout { size: 8, align: 8 },
         Type::Str | Type::List(_) | Type::Ref(_) | Type::Chan(_) | Type::Cell(_) | Type::Expr | Type::Stmts | Type::Items => {
             return None
         }

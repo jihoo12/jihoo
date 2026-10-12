@@ -1,0 +1,111 @@
+// `ref` (immutable, shared) and `cell` (shared, mutable), the same on the VM
+// and natively, where they are counted boxes.
+
+enum List {
+    Cons(i64, ref List)
+    Nil
+}
+
+enum Tree {
+    Leaf
+    Node(ref Tree, [i64], ref Tree)
+}
+
+struct Account {
+    owner: str
+    history: [i64]
+    balance: i64
+}
+
+fn sum(l: List) -> i64 {
+    match l {
+        Cons(x, rest) => return x + sum(*rest)
+        Nil => return 0
+    }
+}
+
+fn range(lo: i64, hi: i64) -> List {
+    if lo >= hi {
+        return List.Nil
+    }
+    return List.Cons(lo, ref range(lo + 1, hi))
+}
+
+// Shares the untouched subtrees with the old tree.
+fn insert(t: Tree, v: i64) -> Tree {
+    match t {
+        Leaf => return Tree.Node(ref Tree.Leaf, [v], ref Tree.Leaf)
+        Node(l, xs, r) => {
+            if v < xs[0] {
+                return Tree.Node(ref insert(*l, v), xs, r)
+            }
+            if v == xs[0] {
+                return Tree.Node(l, xs + [v], r)
+            }
+            return Tree.Node(l, xs, ref insert(*r, v))
+        }
+    }
+}
+
+fn count(t: Tree) -> i64 {
+    match t {
+        Leaf => return 0
+        Node(l, xs, r) => return count(*l) + len(xs) + count(*r)
+    }
+}
+
+fn deposit(a: cell Account, amount: i64) {
+    push(a.history, amount)
+    a.balance = a.balance + amount
+}
+
+fn entry() -> i64 {
+    let l = range(1, 11)
+    let longer = List.Cons(100, ref l)     // shares l
+    out(sum(l))
+    out(sum(longer))
+    let t = Tree.Leaf
+    let xs: [i64] = [5, 2, 8, 2, 9, 1, 5]
+    let i = 0
+    while i < len(xs) {
+        t = insert(t, xs[i])
+        i = i + 1
+    }
+    let before = t
+    t = insert(t, 7)
+    out(count(before) * 100 + count(t))    // 7, 8
+    let r = ref Account { owner: "ann", history: [1], balance: 1 }
+    let r2 = r
+    if r == r2 {
+        out(len(r.history))
+    }
+
+    let acct = cell(Account { owner: "bo", history: [], balance: 0 })
+    let same = acct                         // the same cell
+    deposit(acct, 50)
+    deposit(same, 25)
+    out(acct.balance)                       // 75
+    let snapshot = *acct                    // a copy of what it holds now
+    deposit(acct, 5)
+    out(len(snapshot.history) * 10 + len(acct.history))   // 2, 3
+    acct.history[0] = 1000
+    out(same.history[0])
+    let n = cell(0)
+    let next = fn() -> i64 {
+        *n = *n + 1
+        return *n
+    }
+    next()
+    next()
+    out(next() * 10 + *n)                   // 3, 3
+    let start: [[i64]] = [[1], [2, 3]]
+    let lists = cell(start)
+    push(lists[1], 4)
+    push(*lists, [5])
+    out(len(*lists) * 10 + len(lists[1]))   // 3, 3
+    let boxes: [cell i64] = [cell(1), cell(2)]
+    let copy = boxes                        // copies the list; the cells are shared
+    *copy[0] = 10
+    out(*boxes[0])
+    return 0
+}

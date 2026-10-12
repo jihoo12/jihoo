@@ -1,7 +1,7 @@
 ; `spawn` starts a thread of the C library's, which freestanding modules do
 ; not have.
 ; expect: error `spawn` starts a thread of the C library's; it is only available in native modules
-jir 11
+jir 12
 profile freestanding
 
 fn @idle() -> unit {

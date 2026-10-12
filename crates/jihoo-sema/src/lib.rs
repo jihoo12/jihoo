@@ -1037,8 +1037,8 @@ impl<'a> FnCx<'a> {
                 self.read(place)
             }
             ExprKind::NewCell(inner) => {
-                if self.profile() != Profile::Hosted && !self.in_macro {
-                    return Err(Error::new(e.pos, "`cell` allocates on the GC heap; it is only available in hosted mode"));
+                if self.profile() == Profile::Freestanding && !self.in_macro {
+                    return Err(Error::new(e.pos, "`cell` allocates memory, which freestanding programs cannot"));
                 }
                 let hint = match expected {
                     Some(Type::Cell(t)) => Some(&**t),
@@ -1049,8 +1049,8 @@ impl<'a> FnCx<'a> {
                 self.emit_to(ty, |dst| Inst::NewCell { dst, value })
             }
             ExprKind::NewRef(inner) => {
-                if self.profile() != Profile::Hosted && !self.in_macro {
-                    return Err(Error::new(e.pos, "`ref` allocates on the GC heap; it is only available in hosted mode"));
+                if self.profile() == Profile::Freestanding && !self.in_macro {
+                    return Err(Error::new(e.pos, "`ref` allocates memory, which freestanding programs cannot"));
                 }
                 let hint = match expected {
                     Some(Type::Ref(t)) => Some(&**t),

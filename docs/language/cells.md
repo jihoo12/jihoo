@@ -68,7 +68,19 @@ recv(lock)              // release it
 Cells cannot be compared: two cells holding equal values are still two cells.
 Compare what they hold, `*a == *b`.
 
-## Hosted only
+## In each profile
 
-The GC owns what a cell holds, so cells exist only in hosted programs. Native
-and freestanding code shares state through [pointers](pointers.md).
+On the VM the GC owns what a cell holds. Natively a cell points to memory its
+copies share, with a count of them, freed when the last copy goes. Reading
+what a cell holds makes a copy (another holder could change it while it is
+read), so read the part you need: `c.items[i]` copies one element, `*c` copies
+everything.
+
+A cell never reaches another thread, where two threads could change it at
+once: `go f(c)` with a cell in the arguments is an error, and starting a
+closure that captured a cell with `go` stops the program. Threads share state
+through [channels and locks](threads.md) instead.
+
+A cell that holds itself, through other cells, is never freed natively: the
+count of its copies never reaches zero. Freestanding programs have no cells;
+they share state through [pointers](pointers.md).

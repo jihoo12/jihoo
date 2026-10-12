@@ -48,6 +48,17 @@ impl FnCx<'_> {
         let Type::Fn(params, _) = self.ty(callee).clone() else {
             return Err(Error::new(call.pos, format!("{what} is not a function; it has type {}", self.ty(callee))));
         };
+        // A thread shares nothing with the one that started it: a cell would
+        // be changed by both at once. (A closure that captured one stops the
+        // program when started; its type does not say what it captured.)
+        if self.profile() == Profile::Native {
+            for (p, a) in params.iter().zip(args) {
+                if self.env.has_cell(p) {
+                    let msg = format!("a thread cannot share a cell, and this is {p}; send values over a channel instead");
+                    return Err(Error::new(a.pos, msg));
+                }
+            }
+        }
         let args = self.call_args(call.pos, &what, &params, args)?;
         self.emit(Inst::Spawn { callee, args });
         Ok(())

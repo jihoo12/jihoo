@@ -340,19 +340,19 @@ impl<'p> Env<'p> {
                 Ok(Type::Chan(Box::new(self.resolve_in(inner, b, in_macro)?)))
             }
             TypeExprKind::Cell(inner) => {
-                if self.profile != Profile::Hosted && !in_macro {
+                if self.profile == Profile::Freestanding && !in_macro {
                     return Err(Error::new(
                         t.pos,
-                        "cells are garbage collected and only available in hosted mode; use a pointer (`*T`)",
+                        "cells need an allocator and are not available in freestanding mode; use a pointer (`*T`)",
                     ));
                 }
                 Ok(Type::Cell(Box::new(self.resolve_in(inner, b, in_macro)?)))
             }
             TypeExprKind::Ref(inner) => {
-                if self.profile != Profile::Hosted && !in_macro {
+                if self.profile == Profile::Freestanding && !in_macro {
                     return Err(Error::new(
                         t.pos,
-                        "`ref` types are garbage collected and only available in hosted mode; use a pointer (`*T`)",
+                        "`ref` types need an allocator and are not available in freestanding mode; use a pointer (`*T`)",
                     ));
                 }
                 Ok(Type::Ref(Box::new(self.resolve_in(inner, b, in_macro)?)))
@@ -662,7 +662,7 @@ impl<'p> Env<'p> {
     /// in the IR crate).
     pub fn owns(&self, t: &Type) -> bool {
         match t {
-            Type::List(_) | Type::Str => true,
+            Type::List(_) | Type::Str | Type::Ref(_) | Type::Cell(_) => true,
             Type::Array(elem, _) => self.owns(elem),
             Type::Struct(name) => {
                 self.struct_fields(Pos::default(), name).is_ok_and(|fs| fs.iter().any(|(_, t)| self.owns(t)))
@@ -670,6 +670,28 @@ impl<'p> Env<'p> {
             Type::Enum(name) => self
                 .enum_variants(Pos::default(), name)
                 .is_ok_and(|vs| vs.iter().flat_map(|(_, ts)| ts).any(|t| self.owns(t))),
+            _ => false,
+        }
+    }
+
+    /// Whether values of `t` hold a `cell`, which must not reach another
+    /// thread: its contents would change under two threads at once.
+    pub fn has_cell(&self, t: &Type) -> bool {
+        self.has_cell_in(t, &mut HashSet::new())
+    }
+
+    /// `seen`: the named types on the way, since a `ref` lets a type hold itself.
+    fn has_cell_in(&self, t: &Type, seen: &mut HashSet<String>) -> bool {
+        match t {
+            Type::Cell(_) => true,
+            Type::Array(elem, _) | Type::List(elem) | Type::Ref(elem) => self.has_cell_in(elem, seen),
+            Type::Struct(name) | Type::Enum(name) if !seen.insert(name.clone()) => false,
+            Type::Struct(name) => self
+                .struct_fields(Pos::default(), name)
+                .is_ok_and(|fs| fs.iter().any(|(_, t)| self.has_cell_in(t, seen))),
+            Type::Enum(name) => self
+                .enum_variants(Pos::default(), name)
+                .is_ok_and(|vs| vs.iter().flat_map(|(_, ts)| ts).any(|t| self.has_cell_in(t, seen))),
             _ => false,
         }
     }

@@ -33,7 +33,7 @@ same on GitHub.
 - [Function values](language/function-values.md)
 - [Closures](language/closures.md)
 
-### Hosted programs
+### Shared values and tasks
 
 - [References](language/references.md)
 - [Cells](language/cells.md)
