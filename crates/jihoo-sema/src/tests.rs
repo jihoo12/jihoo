@@ -1,8 +1,13 @@
 use super::*;
 use jihoo_ir::FloatTy;
 
+/// Checks `src`, as a hosted program unless it names a profile: most tests
+/// here are about the language itself, and run what they compile on the VM.
 fn check(src: &str) -> Result<ir::Module, String> {
-    let prog = jihoo_syntax::parse(src).map_err(|e| e.to_string())?;
+    let mut prog = jihoo_syntax::parse(src).map_err(|e| e.to_string())?;
+    if prog.attrs.is_empty() {
+        prog.attrs.push((Default::default(), "hosted".to_string()));
+    }
     let m = analyze(&prog).map_err(|es| es[0].to_string())?;
     if let Err(e) = ir::verify(&m) {
         panic!("sema produced invalid IR: {e}\n{m}");
@@ -118,6 +123,21 @@ fn profile_rules() {
     assert!(err(&fs("fn f(p: ptr) {}")).contains("written `*u8`"));
     assert!(err("fn start() {}").contains("needs `fn main()`"));
     assert!(err("fn main() -> bool { return true }").contains("must return nothing or i64"));
+    assert!(err("#![hosted]\n#![native]\nfn main() {}").contains("already hosted; it cannot also be native"));
+}
+
+#[test]
+fn programs_are_native_by_default() {
+    // Not through `check`, which makes programs without an attribute hosted.
+    let prog = jihoo_syntax::parse("fn main() { let x = 1\n let p = &x }").unwrap();
+    assert_eq!(analyze(&prog).unwrap().profile, Profile::Native);
+    let prog = jihoo_syntax::parse("#![hosted]\nfn main() {}").unwrap();
+    assert_eq!(analyze(&prog).unwrap().profile, Profile::Hosted);
+    // A hosted library needs a hosted program.
+    let e = check_files(&[("main.jh", "#![native]\nimport vm\nfn main() {}"), ("vm.jh", "#![hosted]\npub fn f() {}")])
+        .unwrap_err();
+    assert!(e.contains("module `vm` is hosted-only, but the program is native"), "{e}");
+    check_files(&[("main.jh", "import vm\nfn main() {}"), ("vm.jh", "#![hosted]\npub fn f() {}")]).unwrap();
 }
 
 #[test]
@@ -1040,10 +1060,14 @@ fn generic_struct_errors() {
 
 // ---- modules ----
 
-/// Checks a program made of in-memory files; `main.jh` is the root.
+/// Checks a program made of in-memory files; `main.jh` is the root, hosted
+/// unless it names a profile (written on its first line, so line numbers stay).
 fn check_files(files: &[(&str, &str)]) -> Result<ir::Module, String> {
     use std::path::{Path, PathBuf};
-    let read = |p: &Path| files.iter().find(|(n, _)| Path::new(n) == p).map(|(_, s)| s.to_string());
+    let read = |p: &Path| {
+        let (name, text) = files.iter().find(|(n, _)| Path::new(n) == p)?;
+        Some(if *name == "main.jh" && !text.starts_with("#![") { format!("#![hosted] {text}") } else { text.to_string() })
+    };
     let loaded = jihoo_syntax::loader::load_with(Path::new("main.jh"), &[PathBuf::from("lib")], "x86_64", &read)
         .map_err(|(e, files)| format!("{}:{e}", files[e.pos.file as usize].display()))?;
     let m = analyze_modules(&loaded.modules)

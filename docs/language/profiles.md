@@ -1,22 +1,25 @@
 # Profiles
 
 A program chooses where it runs with a *profile*, set by an attribute at the top
-of its root file. There are three, one per place a program can run: on the jihoo
-VM, on an operating system, or on bare metal.
+of its root file. There are three, one per place a program can run: on an
+operating system, on the jihoo VM, or on bare metal. Without an attribute, a
+program is native.
 
 ```jihoo
-// hosted: no attribute
+// native: no attribute (or `#![native]`)
+import libc
+
 fn main() {
-    print("on the VM")
+    print("an ordinary program, compiled with LLVM")
+    libc.printf("and linked with libc\n")
 }
 ```
 
 ```jihoo
-#![native]
-import libc
+#![hosted]
 
 fn main() {
-    libc.printf("an ordinary program, linked with libc\n")
+    print("on the VM, with a GC")
 }
 ```
 
@@ -31,10 +34,10 @@ fn _start() -> i64 {
 
 ## What each profile has
 
-|                 | hosted (default)        | native (`#![native]`)          | freestanding (`#![freestanding]`) |
+|                 | hosted (`#![hosted]`)   | native (default)               | freestanding (`#![freestanding]`) |
 |-----------------|-------------------------|--------------------------------|-----------------------------------|
 | runs on         | the jihoo VM            | an OS, as a normal program     | anything: no OS libraries at all  |
-| command         | `jihoo run`             | `jihoo build`                  | `jihoo build`                     |
+| command         | `jihoo run`             | `jihoo run`, or `jihoo build` for an executable | `jihoo run`, `jihoo build` |
 | backend         | VM                      | LLVM, linked by `cc` with libc | LLVM, static binary via `ld.lld`  |
 | memory          | GC, managed by the VM   | lists and `str` freed by the compiler; pointers manual (`malloc`, or `alloc`) | manual (`alloc` over `mmap`) |
 | string literals | `str`                   | `str`, or `*u8` where one is expected | `*u8`, NUL-terminated     |
@@ -49,6 +52,16 @@ fn _start() -> i64 {
 
 Everything else — integers and floats, structs, arrays, enums, `match`, function
 values, generics, `comptime` and macros — is the same in every profile.
+
+The one thing a hosted program can do that a native one cannot is share a
+`cell` between tasks: hosted tasks take turns on one thread, while native tasks
+are threads, and cells are not locked. Natively, a task that would get a cell is
+a compile error, or a trap where the compiler cannot see it (a closure that
+captured a cell, started with `go`). Tasks pass values over channels instead;
+see [Cells](cells.md#cells-and-tasks).
+
+`comptime` and macros run on the VM in every profile, so the VM stays part of
+the compiler even for programs that never use it at run time.
 
 ## Native and freestanding
 
@@ -99,5 +112,6 @@ error: hello.jh:3:5: `print` needs the VM or the C library, so it is not availab
 A library module may state what it needs with the same attributes. A library
 marked `#![freestanding]` needs neither GC nor libc, so native and freestanding
 programs can import it; one marked `#![native]` (such as `libc`) only native
-programs. A library without an attribute can be imported by any program, and
+programs, and one marked `#![hosted]` only hosted programs. In a library an
+attribute is a requirement, so a library without one is not native-only. A library without an attribute can be imported by any program, and
 each use is checked against the importing program's profile.

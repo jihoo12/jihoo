@@ -5,7 +5,7 @@
 
 const COUNT = 10
 const PRIMES = primes()                  // a [i64; 10] lookup table
-const GREETING = repeat("ab", 3) + "!"   // strings work too (hosted only)
+const GREETING = repeat("ab", 3) + "!"   // strings work too
 
 fn primes() -> [i64; COUNT] {
     let out = [0; COUNT]

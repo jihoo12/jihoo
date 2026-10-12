@@ -152,7 +152,8 @@ impl Loader<'_> {
 
     /// Loads the channel runtime for a native program that uses channels.
     fn channel_runtime(&mut self) -> Result<(), Error> {
-        let native = self.modules[0].program.attrs.iter().any(|(_, a)| a == "native");
+        // Native is the default: no attribute, or `#![native]`.
+        let native = !self.modules[0].program.attrs.iter().any(|(_, a)| a == "hosted" || a == "freestanding");
         if !native || !self.uses_channels {
             return Ok(());
         }
@@ -223,9 +224,11 @@ mod tests {
         // A native program that uses channels, itself or in a module it imports.
         assert_eq!(names("#![native]\nfn main() { let c = chan(i64) }"), ["", "prelude", "channel"]);
         assert_eq!(names("#![native]\nimport helper\nfn main() {}"), ["", "prelude", "helper", "channel"]);
+        // Native is the default.
+        assert_eq!(names("fn main() { let c = chan(i64) }"), ["", "prelude", "channel"]);
         // Not without channels, nor in a hosted program, whose VM has them.
         assert_eq!(names("#![native]\nfn main() {}"), ["", "prelude"]);
-        assert_eq!(names("fn main() { let c = chan(i64) }"), ["", "prelude"]);
+        assert_eq!(names("#![hosted]\nfn main() { let c = chan(i64) }"), ["", "prelude"]);
         // A program that imports it itself gets the same module.
         assert_eq!(names("#![native]\nimport channel\nfn main() { select { _ => {} } }"), ["", "prelude", "channel"]);
         let files = [("main.jh", "#![native]\nfn main() { let c = chan(i64) }")];

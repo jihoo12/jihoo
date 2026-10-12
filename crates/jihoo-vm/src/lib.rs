@@ -1434,8 +1434,11 @@ fn type_name(v: Value) -> &'static str {
 mod tests {
     use super::*;
 
+    /// `src` as a hosted program (no attribute would make it native).
     fn compile(src: &str) -> Module {
-        let m = jihoo_sema::analyze(&jihoo_syntax::parse(src).unwrap()).unwrap();
+        let mut prog = jihoo_syntax::parse(src).unwrap();
+        prog.attrs.push((Default::default(), "hosted".to_string()));
+        let m = jihoo_sema::analyze(&prog).unwrap();
         jihoo_ir::verify(&m).unwrap();
         m
     }

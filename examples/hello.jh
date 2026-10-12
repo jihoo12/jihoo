@@ -1,4 +1,5 @@
-// Hosted program: runs on the VM with the GC.
+// A program without a profile attribute is native: `jihoo run` compiles it with
+// LLVM and runs it. With `#![hosted]` at the top it would run on the VM instead.
 //   jihoo run examples/hello.jh
 
 fn greet(name: str) -> str {

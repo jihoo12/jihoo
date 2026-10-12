@@ -1,5 +1,5 @@
 // Counts the words of standard input and prints the most common ones, with
-// the hosted standard library: `read_line`, lists, `strings` and `lists`.
+// the standard library: `read_line`, lists, `strings` and `lists`.
 //   jihoo run examples/words.jh < README.md
 
 import lists

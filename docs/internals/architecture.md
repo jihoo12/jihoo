@@ -42,9 +42,10 @@ by a VM or compiled by LLVM.
 3. **Verify** (`crates/jihoo-ir/src/verify.rs`). The JIR module is checked on its
    own: register types, operand types, terminators, and that the profile allows
    every instruction. This catches frontend bugs before a backend sees them.
-4. **Run or compile.** A hosted module runs on the VM ([VM and GC](vm.md)). A
-   native or freestanding one is printed as text, compiled by `jihoo-llc`
-   ([LLVM backend](llvm-backend.md)) and linked by `jihoo build`.
+4. **Run or compile.** A native module (the default) or a freestanding one is
+   printed as text, compiled by `jihoo-llc`
+   ([LLVM backend](llvm-backend.md)) and linked by `jihoo build` (which `jihoo run`
+   uses, then runs the result). A hosted module runs on the VM ([VM and GC](vm.md)).
 
 ## Why the IR is a text file
 

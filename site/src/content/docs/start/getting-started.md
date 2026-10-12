@@ -52,8 +52,9 @@ cargo run -- run examples/hello.jh
 
 ## Your first program
 
-Programs are *hosted* unless they say otherwise: they start at `main`, run on
-the VM, and have a garbage collector and `str`.
+Programs are *native* unless they say otherwise: they start at `main`, and
+`jihoo run` compiles them through LLVM and runs them. Strings, lists and
+closures are freed by the compiler; there is no garbage collector.
 
 ```jihoo title="hello.jh"
 fn fib(n: i64) -> i64 {
@@ -74,15 +75,13 @@ fn main() {
 jihoo run hello.jh
 ```
 
-## A native program
+## Calling C
 
-Add `#![native]` and the same language compiles, through LLVM, to an ordinary
-program for your operating system: no GC, linked with libc, and able to call any
-C function. `main` may take C's `argc` and `argv`, and what it returns is the
-exit status.
+A native program is an ordinary program for your operating system, linked with
+libc, and able to call any C function. `main` may take C's `argc` and `argv`,
+and what it returns is the exit status.
 
 ```jihoo title="args.jh"
-#![native]
 import libc                            // printf, malloc, qsort, ...
 
 extern fn labs(n: i64) -> i64          // any other C function
@@ -98,11 +97,27 @@ fn main(argc: i32, argv: **u8) -> i64 {
 ```
 
 ```sh
-jihoo build args.jh -o args
+jihoo run args.jh -- hello; echo $?    # 7
+jihoo build args.jh -o args            # or keep the executable
 ./args hello; echo $?                  # 7
 ```
 
 C files and libraries can be linked in too: `jihoo build main.jh util.c -lz`.
+
+## A hosted program
+
+Add `#![hosted]` and the program runs on the jihoo VM instead, with a garbage
+collector, and needs no LLVM or C compiler. Its tasks take turns on one thread,
+so they may share a [`cell`](../../language/cells/); native tasks are threads
+and pass values over channels instead.
+
+```jihoo title="vm.jh"
+#![hosted]
+
+fn main() {
+    print("on the VM")
+}
+```
 
 ## A freestanding program
 
@@ -140,7 +155,7 @@ native program instead.
 
 | Command | What it does |
 |---|---|
-| `jihoo run file.jh` | Run a hosted program on the VM; its exit status is what `main` returns. |
+| `jihoo run file.jh [-- args]` | Compile and run a program (a hosted one on the VM); its exit status is what `main` returns. |
 | `jihoo build file.jh -o out` | Compile a native program (linked with libc), or a freestanding one to a static binary. |
 | `jihoo emit-ir file.jh` | Print the program's [JIR](../../reference/jir/), the IR both backends share. |
 

@@ -42,7 +42,7 @@ impl Profile {
 pub fn wrap(body: &str, profile: Profile) -> String {
     match profile {
         Profile::Hosted => {
-            format!("{body}\nfn out(x: i64) {{ print(x) }}\nfn main() -> i64 {{ return entry() }}\n")
+            format!("#![hosted]\n{body}\nfn out(x: i64) {{ print(x) }}\nfn main() -> i64 {{ return entry() }}\n")
         }
         Profile::Native => format!(
             "#![native]\nimport libc\n{body}\nfn out(x: i64) {{ libc.printf(\"%ld\\n\", x) }}\n\

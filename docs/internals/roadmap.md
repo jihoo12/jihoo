@@ -61,13 +61,17 @@
     consuming versions of functions for `xs = f(xs)` (JIR version 9:
     `clone` and `drop`). Checked by hosted-versus-native tests and a list
     mode of the fuzzer, under valgrind.
+25. `str`, capturing closures, `ref`, `cell`, tasks, channels and `select` in
+    native programs, then native as the default profile: a program without an
+    attribute is native, `#![hosted]` asks for the VM, and `jihoo run`
+    compiles and runs native and freestanding programs. Native tasks are
+    threads and share no cells; `comptime` and macros still run on the VM.
 
 ## Next
 
 - **Memory:** a report of where native code copies lists (`jihoo build
   --cost`), which needs source positions in JIR; moving a field out of a
-  value at its last use instead of copying it; `str` and capturing closures
-  in native programs, so that native can become the default profile.
+  value at its last use instead of copying it.
 
 - **Floats:** `fma`, which IEEE also defines exactly, but freestanding code on
   x86_64 would need an exact software version.

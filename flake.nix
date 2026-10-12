@@ -129,7 +129,8 @@
       });
 
       # `nix flake check`: the installed toolchain, used from outside the source
-      # tree, runs a hosted example and builds and runs native ones.
+      # tree, runs examples (native unless they say otherwise, and one hosted)
+      # and builds and runs native and freestanding ones.
       checks = forAllSystems (pkgs:
         let
           jihoo = self.packages.${pkgs.stdenv.hostPlatform.system}.jihoo;
@@ -144,6 +145,11 @@
             grep -qx "Hello, jihoo!" hello.out
             jihoo run floats.jh > floats.out
             grep -qx 0.33333334 floats.out
+            printf "#![hosted]\nfn main() { print(\"on the VM\") }\n" > vm.jh
+            jihoo run vm.jh > vm.out
+            grep -qx "on the VM" vm.out
+            jihoo run native.jh -- one > native-run.out && status=0 || status=$?
+            test "$status" = 49
             jihoo build native.jh -o native
             ./native one > native.out && status=0 || status=$?
             test "$status" = 49

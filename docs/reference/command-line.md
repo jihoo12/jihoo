@@ -1,24 +1,32 @@
 # Command line
 
-`jihoo` runs hosted programs on the VM and compiles native and freestanding
-ones. Run `jihoo help` for a summary.
+`jihoo` compiles native and freestanding programs and runs hosted ones on the
+VM. Programs are native unless their root file says otherwise
+([Profiles](../language/profiles.md)). Run `jihoo help` for a summary.
 
 ```sh
-jihoo run hello.jh                   # hosted: run on the VM
-jihoo build args.jh -o args          # native or freestanding: compile
+jihoo run hello.jh                   # compile and run
+jihoo run args.jh -- one two         # with arguments for `main(argc, argv)`
+jihoo build args.jh -o args          # compile to an executable
 jihoo emit-ir fib.jh                 # print the program's JIR
 ```
 
 ## Commands
 
-### `jihoo run <file.jh>`
+### `jihoo run <file.jh> [link inputs] [-- args]`
 
-Compiles a hosted program and runs it on the VM. Its exit status is what
-`main` returns (modulo 256), or 0 if `main` returns nothing; a runtime error
-(such as an out-of-bounds index, division by zero or a deadlock) is printed as
-`error: runtime error in @function: message` and exits with status 1.
+Compiles a program and runs it on this machine, with `args` as its arguments.
+Its exit status is the program's: what `main` returns (modulo 256), or 0 if
+`main` returns nothing.
 
-Native and freestanding programs are refused: they need `jihoo build`.
+- A **native** or **freestanding** program is built as `jihoo build` would,
+  into a temporary directory that is removed afterwards, and run. A program
+  that traps (an out-of-bounds index, division by zero, `trap()`) is killed by
+  a signal; `jihoo run` says so and exits with 128 plus the signal's number, as
+  a shell reports it. What the program printed before is not lost.
+- A **hosted** program (`#![hosted]`) runs on the VM. It takes no arguments
+  and no link inputs. A runtime error (also a deadlock) is printed as
+  `error: runtime error in @function: message` and exits with status 1.
 
 ### `jihoo build <file.jh> [-o out] [link inputs]`
 
@@ -36,9 +44,9 @@ The steps are:
 With `--target`, a program can be built for the other machine: a freestanding
 one needs nothing more (`ld.lld` links for both), a native one a C compiler for
 that machine in `JIHOO_CC`. The intermediate files are removed afterwards. Hosted programs are refused,
-since they run with `jihoo run`.
+since they run on the VM with `jihoo run`.
 
-Link inputs (native programs only) are passed on to the C compiler:
+Link inputs (native programs only, for `build` and `run`) are passed on to the C compiler:
 
 | input | meaning |
 |-------|---------|
@@ -55,7 +63,7 @@ generics, expanded macros, folded constants.
 ### JIR files
 
 Every command also takes a JIR file, `file.jir`, in place of a source file:
-`jihoo run file.jir` runs a hosted module on the VM, `jihoo build file.jir`
+`jihoo run file.jir` runs it (a hosted module on the VM), `jihoo build file.jir`
 compiles a native or freestanding one, and `jihoo emit-ir file.jir` prints it
 again. The module is read as it is ([JIR](../jir.md)), checked by the same
 verifier the compiler's output passes, and must be of the JIR version this

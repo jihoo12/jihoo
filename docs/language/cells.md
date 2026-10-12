@@ -1,6 +1,6 @@
 # Cells
 
-`cell T` is the one kind of shared, mutable state in hosted code. Copies of a
+`cell T` is the one kind of shared, mutable state outside pointers. Copies of a
 cell are the same cell, so a change made through one is seen through all.
 
 ```jihoo
@@ -48,7 +48,11 @@ holding a large array has O(1) element writes.
 
 ## Cells and tasks
 
-[Tasks](tasks-and-channels.md) may share cells. A task is only interrupted at a
+Natively, the default, [tasks](tasks-and-channels.md) are threads and share no
+cells (see [In each profile](#in-each-profile)): each task keeps its own, and
+tasks pass values over channels.
+
+In a hosted program (`#![hosted]`) tasks may share cells. A task is only interrupted at a
 call or where a loop goes round, so a statement without calls, such as
 `*n = *n + 1` or `c.count = c.count + 1`, never interleaves with another task.
 

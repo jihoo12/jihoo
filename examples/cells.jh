@@ -39,27 +39,28 @@ fn main() {
     next()
     print(next())                       // 3
 
-    // Tasks share a cell. A task is only interrupted at a call or a loop's
-    // jump back, so `*hits = *hits + 1` is never interrupted between its read
-    // and its write.
-    let hits = cell(0)
-    let done = chan(bool)
+    // A cell is shared by what holds it in one task; tasks do not share cells
+    // (natively they are threads). Each task counts on its own and sends its
+    // count back over a channel.
+    let counts = chan(i64)
     let w = 0
     while w < 8 {
         go fn() {
+            let hits = cell(0)
             let i = 0
             while i < 1000 {
                 *hits = *hits + 1
                 i = i + 1
             }
-            send(done, true)
+            send(counts, *hits)
         }()
         w = w + 1
     }
+    let total = 0
     let k = 0
     while k < 8 {
-        recv(done)
+        total = total + recv(counts)
         k = k + 1
     }
-    print(*hits)                        // 8000
+    print(total)                        // 8000
 }

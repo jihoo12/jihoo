@@ -1,6 +1,7 @@
-// Tasks (`go`) and channels. Tasks run on one thread, taking turns: a task runs
-// until it waits on a channel or has used its time slice, so the output is the
-// same on every run. Tasks share nothing but channels.
+// Tasks (`go`) and channels. Natively each task is a thread, and they run at
+// the same time; the output is still the same on every run, because `main`
+// prints only what it receives, in the order the channels give it. Tasks share
+// nothing but channels. (In a `#![hosted]` program they take turns on the VM.)
 //   jihoo run examples/tasks.jh
 
 enum Msg {

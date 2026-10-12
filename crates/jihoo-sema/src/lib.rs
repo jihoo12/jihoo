@@ -53,9 +53,11 @@ pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
 pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
     let mut errors = Vec::new();
 
-    let mut profile = Profile::Hosted;
+    // Without an attribute, a program is native.
+    let mut profile: Option<Profile> = None;
     for (pos, attr) in &mods[0].program.attrs {
         let chosen = match attr.as_str() {
+            "hosted" => Profile::Hosted,
             "native" => Profile::Native,
             "freestanding" => Profile::Freestanding,
             other => {
@@ -63,18 +65,20 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
                 continue;
             }
         };
-        if profile != Profile::Hosted {
-            let msg = format!("the program is already {}; it cannot also be {}", profile.as_str(), chosen.as_str());
+        if let Some(p) = profile {
+            let msg = format!("the program is already {}; it cannot also be {}", p.as_str(), chosen.as_str());
             errors.push(Error::new(*pos, msg));
         }
-        profile = chosen;
+        profile = Some(chosen);
     }
+    let profile = profile.unwrap_or(Profile::Native);
     // A library may say what it needs; it cannot choose the mode. A
     // freestanding library (no GC, no libc) also works in native programs; a
-    // native one needs libc.
+    // native one needs libc; a hosted one needs the VM.
     for m in &mods[1..] {
         for (pos, attr) in &m.program.attrs {
             let ok = match attr.as_str() {
+                "hosted" => profile == Profile::Hosted,
                 "freestanding" => profile.is_compiled(),
                 "native" => profile == Profile::Native,
                 other => {

@@ -50,6 +50,34 @@ namespace {
   throw CodegenError("@" + fn + ": " + msg);
 }
 
+// Defines `void jihoo.trap()`, which every trap calls. In a native module it
+// first flushes C's stdio, so what the program printed before the trap is not
+// lost in a buffer when its output goes to a pipe or a file.
+void define_trap_fn(Module &m, bool native) {
+  LLVMContext &ctx = m.getContext();
+  auto *fn = Function::Create(FunctionType::get(Type::getVoidTy(ctx), false), GlobalValue::InternalLinkage,
+                              "jihoo.trap", m);
+  fn->addFnAttr(Attribute::NoReturn);
+  fn->addFnAttr(Attribute::Cold);
+  fn->addFnAttr(Attribute::NoInline);
+  fn->addFnAttr(Attribute::NoUnwind);
+  IRBuilder<> b(BasicBlock::Create(ctx, "entry", fn));
+  if (native) {
+    auto *ptr = PointerType::get(ctx, 0);
+    b.CreateCall(m.getOrInsertFunction("fflush", FunctionType::get(Type::getInt32Ty(ctx), {ptr}, false)),
+                 {ConstantPointerNull::get(ptr)});
+  }
+  b.CreateCall(Intrinsic::getOrInsertDeclaration(&m, Intrinsic::trap));
+  b.CreateUnreachable();
+}
+
+// Stops the program: calls `jihoo.trap` and ends the block.
+void emit_trap(IRBuilder<> &b) {
+  Function *trap = b.GetInsertBlock()->getModule()->getFunction("jihoo.trap");
+  b.CreateCall(trap)->setDoesNotReturn();
+  b.CreateUnreachable();
+}
+
 // Module-wide type information.
 //
 // An enum is `{ i32 tag, [N x iA] payload }`, where A is the largest alignment of
@@ -516,8 +544,7 @@ class Glue {
     auto *trap = BasicBlock::Create(ctx, "trap", fn);
     b.CreateCondBr(ok, next, trap);
     IRBuilder<> tb(trap);
-    tb.CreateCall(Intrinsic::getOrInsertDeclaration(trap->getModule(), Intrinsic::trap));
-    tb.CreateUnreachable();
+    emit_trap(tb);
     b.SetInsertPoint(next);
   }
 
@@ -1127,8 +1154,7 @@ class FnGen {
     if (!trap_) {
       trap_ = BasicBlock::Create(ctx_, "trap", fn_);
       IRBuilder<> tb(trap_);
-      tb.CreateCall(Intrinsic::getOrInsertDeclaration(&mod_, Intrinsic::trap));
-      tb.CreateUnreachable();
+      emit_trap(tb);
     }
     auto *next = BasicBlock::Create(ctx_, name, fn_);
     b_.CreateCondBr(ok, next, trap_);
@@ -2609,8 +2635,7 @@ void define_export(Module &m, const Types &types, const Triple &triple, const ji
     auto *bad = BasicBlock::Create(ctx, "closure", fn), *ok = BasicBlock::Create(ctx, "ok", fn);
     b.CreateCondBr(b.CreateIsNull(env), ok, bad);
     b.SetInsertPoint(bad);
-    b.CreateCall(Intrinsic::getOrInsertDeclaration(&m, Intrinsic::trap));
-    b.CreateUnreachable();
+    emit_trap(b);
     b.SetInsertPoint(ok);
     b.CreateRet(b.CreateExtractValue(result, 0));
   } else
@@ -2648,6 +2673,7 @@ std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, co
     mod->setPICLevel(PICLevel::BigPIC);
     mod->setPIELevel(PIELevel::Large);
   }
+  define_trap_fn(*mod, native);
   Types types(ctx, m, dl);
   Glue glue(*mod, types, m);
 

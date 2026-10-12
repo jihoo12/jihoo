@@ -91,7 +91,7 @@ fn fails_on_both_backends(name: &str, body: &str, vm_error: &str) {
     std::fs::create_dir_all(&work).unwrap();
 
     let hosted = work.join(format!("{name}.hosted.jh"));
-    std::fs::write(&hosted, format!("{body}fn main() -> i64 {{ return entry() }}\n")).unwrap();
+    std::fs::write(&hosted, format!("#![hosted]\n{body}fn main() -> i64 {{ return entry() }}\n")).unwrap();
     let out = Command::new(JIHOO).arg("run").arg(&hosted).output().unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains(vm_error), "{}", String::from_utf8_lossy(&out.stderr));
@@ -220,7 +220,7 @@ fn builds_for_the_other_target() {
     assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), machine, "ELF e_machine");
 
     let out = Command::new(JIHOO).args(["run", "--target", other]).arg(repo_root().join("examples/hello.jh")).output().unwrap();
-    assert!(String::from_utf8_lossy(&out.stderr).contains("the VM runs on this machine"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("runs programs on this machine"));
 }
 
 /// Errors in an imported module name that module's file.
@@ -314,7 +314,7 @@ fn native_programs_link_c_files() {
     // Freestanding programs link nothing else.
     std::fs::write(dir.join("fs.jh"), "#![freestanding]\nfn _start() {}\n").unwrap();
     let out = Command::new(JIHOO).arg("build").arg(dir.join("fs.jh")).arg(dir.join("ffi.c")).output().unwrap();
-    assert!(String::from_utf8_lossy(&out.stderr).contains("use `#![native]` to link with C"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("a native program (without `#![freestanding]`) links with C"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -365,13 +365,37 @@ fn native_floats_cross_into_c() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A program without a profile attribute is native, and `jihoo run` compiles
+/// and runs it: arguments after `--` reach `main`, and the exit status is the
+/// program's. A trap keeps what was printed before it, even through a pipe.
 #[test]
-fn native_programs_do_not_run_on_the_vm() {
-    let dir = std::env::temp_dir().join(format!("jihoo-native-vm-{}", std::process::id()));
+fn jihoo_run_runs_native_programs() {
+    let dir = std::env::temp_dir().join(format!("jihoo-run-native-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("n.jh"), "#![native]\nfn main() {}\n").unwrap();
-    let out = Command::new(JIHOO).arg("run").arg(dir.join("n.jh")).output().unwrap();
-    assert!(String::from_utf8_lossy(&out.stderr).contains("native programs do not run on the VM"));
+    let src = dir.join("n.jh");
+    std::fs::write(&src, "fn main(argc: i32, argv: **u8) -> i64 {\n let p = &argc\n print(*p)\n return 40 + argc as i64 }\n")
+        .unwrap();
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        // Without the backend, a native program cannot run; the error says why.
+        let out = Command::new(JIHOO).arg("run").arg(&src).output().unwrap();
+        assert!(String::from_utf8_lossy(&out.stderr).contains("`#![hosted]`"));
+        std::fs::remove_dir_all(&dir).unwrap();
+        return;
+    }
+    let out = Command::new(JIHOO).arg("run").arg(&src).args(["--", "a", "b"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "3\n");
+    assert_eq!(out.status.code(), Some(43), "{}", String::from_utf8_lossy(&out.stderr));
+
+    std::fs::write(&src, "fn main() { print(1)\n trap() }\n").unwrap();
+    let out = Command::new(JIHOO).arg("run").arg(&src).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1\n");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("was killed by signal"));
+    assert!(matches!(out.status.code(), Some(132 | 133)), "{:?}", out.status); // SIGILL, or SIGTRAP on aarch64
+
+    // Hosted programs still run on the VM, which has no arguments for them.
+    std::fs::write(&src, "#![hosted]\nfn main() { print(1) }\n").unwrap();
+    let out = Command::new(JIHOO).arg("run").arg(&src).args(["--", "a"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("hosted programs take no arguments"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

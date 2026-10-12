@@ -1,6 +1,7 @@
-// Recursive data with `ref`: an immutable reference to a value on the GC heap.
-// A type cannot contain itself, but it can contain a `ref` to itself.
-// Hosted only; freestanding code uses pointers.
+// Recursive data with `ref`: an immutable reference to a shared value (on the
+// GC heap on the VM, counted and freed with its last copy natively). A type
+// cannot contain itself, but it can contain a `ref` to itself. Freestanding
+// code has no refs; it uses pointers.
 //   jihoo run examples/linked_lists.jh
 
 enum List(T: type) {

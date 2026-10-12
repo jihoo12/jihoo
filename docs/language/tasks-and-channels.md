@@ -54,9 +54,10 @@ The result of the call is dropped; send it over a channel to get it back.
 - There is no `close`. To say "no more values", send a value that says so, as
   `Msg.Done` above; `match` then handles both cases.
 
-Tasks share nothing but channels and [cells](cells.md): arguments are copies,
-closures capture by value, and [refs](references.md) are immutable. So there
-are no data races to worry about.
+Tasks share nothing but channels: arguments are copies, closures capture by
+value, and [refs](references.md) are immutable. So there are no data races to
+worry about. (Hosted tasks may also share [cells](cells.md#cells-and-tasks);
+native ones, the default, may not.)
 
 ## `select`
 
@@ -83,7 +84,8 @@ select {
 
 ## Scheduling
 
-Tasks run on one OS thread. The VM's scheduler is round-robin and
+In a hosted program (`#![hosted]`), tasks run on one OS thread. The VM's
+scheduler is round-robin and
 deterministic: a task runs until it waits on a channel, finishes, or has run
 1000 instructions and reaches a *safepoint* (a call, or a loop going round);
 then the next ready task gets its turn.

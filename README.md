@@ -2,9 +2,10 @@
 
 An easy programming language with three profiles:
 
-- **hosted** (default): runs on a VM with a garbage collector.
-- **native** (`#![native]`): no GC; compiled through LLVM into a normal program
-  for the operating system, linked with libc. Calls C directly (`extern fn`).
+- **native** (default): no GC; compiled through LLVM into a normal program for
+  the operating system, linked with libc. Lists, strings and closures are freed
+  by the compiler; calls C directly (`extern fn`).
+- **hosted** (`#![hosted]`): runs on a VM with a garbage collector.
 - **freestanding** (`#![freestanding]`): no GC, no libc, raw syscalls. Compiled
   through LLVM into tiny static binaries.
 
@@ -25,8 +26,7 @@ fn main() {
 ```
 
 ```jihoo
-#![native]
-import libc
+import libc                  // native, the default: C is right there
 
 fn main(argc: i32, argv: **u8) -> i64 {
     libc.printf("hello, %s\n", argv[0])
@@ -69,16 +69,18 @@ nix develop                 # or `direnv allow`
 # frontend + VM
 cargo build
 cargo test
-cargo run -- run examples/hello.jh
-cargo run -- emit-ir examples/fib.jh
 
-# LLVM backend
+# LLVM backend, which native programs (the default) need
 cmake -S backend-llvm -B backend-llvm/build -G Ninja
 cmake --build backend-llvm/build
-
-# native builds: a native program (linked with libc by `cc`) and a freestanding one
-mkdir -p out
 export JIHOO_LLC=$PWD/backend-llvm/build/jihoo-llc
+
+cargo run -- run examples/hello.jh
+cargo run -- run examples/native.jh -- a b; echo $?
+cargo run -- emit-ir examples/fib.jh
+
+# executables: a native program (linked with libc by `cc`) and a freestanding one
+mkdir -p out
 cargo run -- build examples/native.jh -o out/native && ./out/native a b; echo $?
 cargo run -- build examples/freestanding.jh -o out/hello && ./out/hello; echo $?
 ```
@@ -114,10 +116,12 @@ function values; generic functions and structs; modules with private items and
 fields; compile-time evaluation (`const`, `comptime`) and macros, both run on
 the VM.
 
-- **hosted:** `str` (bytes, slices, ordering), lists `[T]` with `push` and
-  `pop`, `print` and `read_line`, `ref` for recursive data, `cell` for shared
-  state, closures, tasks with channels and `select`; the `strings` and `lists`
-  libraries.
+- **native and hosted:** `str` (bytes, slices, ordering), lists `[T]` with
+  `push` and `pop`, `print` and `read_line`, `ref` for recursive data, `cell`
+  for shared state, closures, tasks with channels and `select`; the `strings`
+  and `lists` libraries. Natively these are freed by the compiler and tasks are
+  threads, which share no cells; on the VM a GC frees them and tasks take
+  turns on one thread.
 - **native and freestanding:** pointers, `syscall` and inline asm, for x86_64
   and aarch64 Linux (`--target` builds for either, and modules can have one
   file per target); closures passed to `comptime` parameters; functions C can

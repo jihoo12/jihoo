@@ -7,10 +7,15 @@ use jihoo_ir::{Module, Profile, Target};
 
 const USAGE: &str = "\
 usage:
-  jihoo run <file.jh>                 run a hosted program on the VM
+  jihoo run <file.jh> [link inputs] [-- args]
+                                      compile and run a program (a hosted
+                                      one on the VM), passing it args
   jihoo emit-ir <file.jh> [-o out]    print JIR (text format)
   jihoo build <file.jh> [-o out] [link inputs]
                                       compile a native or freestanding program
+
+Programs are native unless their root file says `#![hosted]` (run on the VM
+with a GC) or `#![freestanding]` (no libc).
 
 Each command also takes a JIR file (<file.jir>), such as `emit-ir` writes,
 in place of a source file.
@@ -20,7 +25,8 @@ options:
   --target <t>  compile for x86_64 or aarch64 Linux (emit-ir, build;
               default: this machine)
 
-link inputs (native programs only, passed on to the C compiler):
+link inputs (native programs only, passed on to the C compiler; `run` and
+`build`):
   -l <lib>    link with lib<lib> (also -l<lib>)
   -L <dir>    look for libraries in <dir> (also -L<dir>)
   <file>      a .c, .o, .a or .so file to compile or link in
@@ -67,6 +73,8 @@ struct Opts {
     /// Arguments for the C compiler that links a native program: `-l`, `-L`
     /// and extra input files.
     link: Vec<String>,
+    /// Arguments after `--`, for the program `jihoo run` runs.
+    args: Vec<String>,
 }
 
 /// Files `jihoo build` passes on to the C compiler.
@@ -79,9 +87,14 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
     let mut link = Vec::new();
     let mut target = Target::host();
     let mut target_given = false;
+    let mut program_args = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
+            "--" => {
+                program_args = it.by_ref().cloned().collect();
+                break;
+            }
             "-o" => output = Some(PathBuf::from(it.next().ok_or("`-o` needs a path")?)),
             "-I" => include.push(PathBuf::from(it.next().ok_or("`-I` needs a directory")?)),
             "--target" => {
@@ -101,16 +114,19 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
         }
     }
     let input = input.ok_or_else(|| format!("missing input file\n\n{USAGE}"))?;
-    Ok(Opts { input, output, include, target, target_given, link })
+    Ok(Opts { input, output, include, target, target_given, link, args: program_args })
 }
 
-/// `parse_opts` for commands that do not link.
+/// `parse_opts` for commands that do not link or run.
 fn parse_opts_no_link(args: &[String]) -> Result<Opts, String> {
     let opts = parse_opts(args)?;
-    match opts.link.first() {
-        Some(a) => Err(format!("`{a}` is a link input; only `jihoo build` links")),
-        None => Ok(opts),
+    if let Some(a) = opts.link.first() {
+        return Err(format!("`{a}` is a link input; only `jihoo build` and `jihoo run` link"));
     }
+    if !opts.args.is_empty() {
+        return Err("arguments after `--` are for `jihoo run`".into());
+    }
+    Ok(opts)
 }
 
 fn dispatch(args: &[String]) -> Result<ExitCode, String> {
@@ -120,20 +136,25 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
     };
     match cmd.as_str() {
         "run" => {
-            let opts = parse_opts_no_link(rest)?;
+            let opts = parse_opts(rest)?;
+            if opts.output.is_some() {
+                return Err("`jihoo run` writes no output file; use `jihoo build -o`".into());
+            }
             if opts.target != Target::host() {
-                return Err(format!("the VM runs on this machine, which is not {}", opts.target.as_str()));
+                return Err(format!("`jihoo run` runs programs on this machine, which is not {}", opts.target.as_str()));
             }
             let m = compile(&opts)?;
-            if m.profile != Profile::Hosted {
-                return Err(format!(
-                    "{}: {} programs do not run on the VM; compile them with `jihoo build`",
-                    opts.input.display(),
-                    m.profile.as_str()
-                ));
+            if m.profile == Profile::Hosted {
+                if let Some(a) = opts.link.first() {
+                    return Err(format!("{}: hosted programs link nothing, so `{a}` cannot be linked in", opts.input.display()));
+                }
+                if !opts.args.is_empty() {
+                    return Err(format!("{}: hosted programs take no arguments", opts.input.display()));
+                }
+                let code = jihoo_vm::run(&m, &mut std::io::stdout()).map_err(|e| e.to_string())?;
+                return Ok(ExitCode::from(code as u8));
             }
-            let code = jihoo_vm::run(&m, &mut std::io::stdout()).map_err(|e| e.to_string())?;
-            Ok(ExitCode::from(code as u8))
+            run_compiled(&m, &opts)
         }
         "emit-ir" => {
             let opts = parse_opts_no_link(rest)?;
@@ -213,26 +234,17 @@ fn compile(opts: &Opts) -> Result<Module, String> {
 ///   native:       (cc) -> a program linked with libc and the link inputs
 ///   freestanding: (ld.lld) -> a static binary with nothing else in it
 fn build(opts: &Opts) -> Result<(), String> {
-    let m = compile(opts)?;
-    match m.profile {
-        Profile::Hosted => {
-            return Err(format!(
-                "{}: `jihoo build` needs a native or freestanding program (add `#![native]` or \
-                 `#![freestanding]`); hosted programs run with `jihoo run`",
-                opts.input.display()
-            ))
-        }
-        Profile::Freestanding if !opts.link.is_empty() => {
-            return Err(format!(
-                "{}: freestanding programs link nothing but themselves, so `{}` cannot be linked in; \
-                 use `#![native]` to link with C",
-                opts.input.display(),
-                opts.link[0]
-            ))
-        }
-        _ => {}
+    if !opts.args.is_empty() {
+        return Err("arguments after `--` are for `jihoo run`".into());
     }
-
+    let m = compile(opts)?;
+    if m.profile == Profile::Hosted {
+        return Err(format!(
+            "{}: `jihoo build` needs a native or freestanding program; hosted programs \
+             (`#![hosted]`) run on the VM with `jihoo run`",
+            opts.input.display()
+        ));
+    }
     let out = opts.output.clone().unwrap_or_else(|| opts.input.with_extension(""));
     // Without an extension, the default output is the source file itself.
     if same_file(&out, &opts.input) {
@@ -241,6 +253,53 @@ fn build(opts: &Opts) -> Result<(), String> {
             opts.input.display()
         ));
     }
+    link(&m, opts, &out)
+}
+
+/// `jihoo run` for a native or freestanding program: builds it in a fresh
+/// temporary directory, runs it with `opts.args` and exits as it did.
+fn run_compiled(m: &Module, opts: &Opts) -> Result<ExitCode, String> {
+    use std::os::unix::process::ExitStatusExt;
+
+    let dir = std::env::temp_dir().join(format!("jihoo-run-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let stem = opts.input.file_stem().map_or("program".into(), |s| s.to_string_lossy().into_owned());
+    let bin = dir.join(stem);
+    let status = link(m, opts, &bin).and_then(|_| {
+        Command::new(&bin).args(&opts.args).status().map_err(|e| format!("cannot run {}: {e}", bin.display()))
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    let status = status?;
+    if let Some(code) = status.code() {
+        return Ok(ExitCode::from(code as u8));
+    }
+    // Killed by a signal: say so, and exit as a shell would report it.
+    let sig = status.signal().unwrap_or(0);
+    let what = match sig {
+        4 | 5 => " (a trap: `trap()`, a failed bounds or overflow check, or `unreachable`)",
+        6 => " (aborted)",
+        11 => " (segmentation fault)",
+        _ => "",
+    };
+    eprintln!("error: {} was killed by signal {sig}{what}", opts.input.display());
+    Ok(ExitCode::from((128 + sig) as u8))
+}
+
+/// Compiles `m`, a native or freestanding program, to the executable `out`.
+fn link(m: &Module, opts: &Opts, out: &Path) -> Result<(), String> {
+    match m.profile {
+        Profile::Hosted => unreachable!("hosted programs run on the VM"),
+        Profile::Freestanding if !opts.link.is_empty() => {
+            return Err(format!(
+                "{}: freestanding programs link nothing but themselves, so `{}` cannot be linked in; \
+                 a native program (without `#![freestanding]`) links with C",
+                opts.input.display(),
+                opts.link[0]
+            ))
+        }
+        _ => {}
+    }
+
     // Not `out.o`: that may be one of the link inputs.
     let jir = out.with_extension("jihoo.jir");
     let obj = out.with_extension("jihoo.o");
@@ -251,13 +310,13 @@ fn build(opts: &Opts) -> Result<(), String> {
         if m.profile == Profile::Native {
             let cc = std::env::var("JIHOO_CC").unwrap_or_else(|_| "cc".into());
             // libm is part of the C standard library, and float `%` calls its `fmod`.
-            run_tool(Command::new(&cc).arg("-o").arg(&out).arg(&obj).args(&opts.link).arg("-lm"))
+            run_tool(Command::new(&cc).arg("-o").arg(out).arg(&obj).args(&opts.link).arg("-lm"))
         } else {
             let ld = std::env::var("JIHOO_LD").unwrap_or_else(|_| "ld.lld".into());
             run_tool(
                 Command::new(&ld)
                     .args(["-static", "--gc-sections", "-e", "_start", "-o"])
-                    .arg(&out)
+                    .arg(out)
                     .arg(&obj),
             )
         }
@@ -275,7 +334,18 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 fn run_tool(cmd: &mut Command) -> Result<(), String> {
     let name = cmd.get_program().to_string_lossy().into_owned();
-    let status = cmd.status().map_err(|e| format!("cannot run `{name}`: {e}"))?;
+    let status = cmd.status().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            // Most likely the first program someone compiles without the toolchain.
+            format!(
+                "cannot run `{name}`: not found. Native and freestanding programs need the LLVM \
+                 backend (`jihoo-llc`, or JIHOO_LLC) and a linker (`cc`/JIHOO_CC, `ld.lld`/JIHOO_LD); \
+                 `nix develop` provides them. Without them, a program with `#![hosted]` runs on the VM"
+            )
+        } else {
+            format!("cannot run `{name}`: {e}")
+        }
+    })?;
     if status.success() {
         Ok(())
     } else {
