@@ -993,6 +993,20 @@ fn functions_on_code() {
 }
 
 #[test]
+fn macros_take_the_rest_of_their_arguments() {
+    // `rest: [expr]` takes the remaining arguments as code, none included,
+    // and functions on code take such lists too.
+    let src = "fn total(es: [expr]) -> expr {\n  let e = quote(0)\n  for x in es { e = quote($e + $x) }\n  return e\n}\n\
+               macro sum(rest: [expr]) -> expr { return total(rest) }\n\
+               macro each(label: str, rest: [expr]) -> stmts {\n  let s = quote { print($label) }\n  for x in rest { s = quote {\n    $s\n    print($x)\n  } }\n  return s\n}\n\
+               fn main() {\n  let x = 2\n  print(sum!(1, x, x * 10))\n  print(sum!())\n  each!(\"x\", x, x + 1)\n}";
+    assert_eq!(run(src), "23\n0\nx\n2\n3\n");
+    assert!(err(&format!("{src}\nfn f() {{ each!() }}")).contains("macro `each` takes at least 1 arguments, 0 given"));
+    assert!(err("macro m(a: [expr], b: expr) -> expr { return b }\nfn main() {}").contains("must be the last parameter"));
+    assert!(err("macro m(a: [i64]) -> expr { return quote(1) }\nfn main() {}").contains("or a last `[expr]`"));
+}
+
+#[test]
 fn macro_value_parameters_and_literals() {
     let src = "const N = 3\n\
                macro sum_to(n: i64) -> expr {\n  let e = quote(0)\n  let i = 1\n  while i <= n {\n    e = quote($e + $i)\n    i = i + 1\n  }\n  return e\n}\n\

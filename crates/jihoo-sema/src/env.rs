@@ -788,14 +788,20 @@ impl<'p> Env<'p> {
                         let msg = format!("macro `{name}` must return `expr`, `stmts` or `items`, not {ret}");
                         return Err(Error::new(decl.pos, msg));
                     }
-                    for (p, t) in decl.params.iter().zip(&params) {
+                    let code_list = Type::List(Box::new(Type::Expr));
+                    for (i, (p, t)) in decl.params.iter().zip(&params).enumerate() {
                         if p.comptime {
                             return Err(Error::new(p.pos, "macro parameters are already compile-time; drop `comptime`"));
                         }
-                        if !matches!(t, Type::Expr | Type::Int(_) | Type::Float(_) | Type::Bool | Type::Str) {
+                        if *t == code_list {
+                            if i + 1 < params.len() {
+                                let msg = format!("`{}: [expr]` takes the remaining arguments, so it must be the last parameter", p.name);
+                                return Err(Error::new(p.ty.pos, msg));
+                            }
+                        } else if !matches!(t, Type::Expr | Type::Int(_) | Type::Float(_) | Type::Bool | Type::Str) {
                             return Err(Error::new(
                                 p.ty.pos,
-                                format!("macro parameters must be `expr`, numbers, bools or `str`, not {t}"),
+                                format!("macro parameters must be `expr`, numbers, bools, `str` or a last `[expr]`, not {t}"),
                             ));
                         }
                     }

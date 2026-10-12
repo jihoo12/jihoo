@@ -168,17 +168,22 @@ impl Env<'_> {
             .with_fuel(FUEL)
             .with_uniques(self.uniques.get())
             .with_input(jihoo_vm::Input::Closed);
-        let mut values = Vec::new();
-        for a in args {
-            values.push(match a {
+        fn arg(vm: &mut Vm, a: &ConstValue) -> Value {
+            match a {
                 ConstValue::Unit => Value::Unit,
                 ConstValue::Int(n) => Value::Int(*n),
                 ConstValue::Float(x) => Value::Float(*x),
                 ConstValue::Bool(b) => Value::Bool(*b),
                 ConstValue::Str(s) => vm.alloc_string(s),
-                ConstValue::Agg(_) | ConstValue::Func(_) => unreachable!("macro arguments are code, numbers, bools or str"),
-            });
+                // The rest of a macro's code arguments, as a list.
+                ConstValue::Agg(items) => {
+                    let items = items.iter().map(|x| arg(vm, x)).collect();
+                    vm.alloc_list(items)
+                }
+                ConstValue::Func(_) => unreachable!("macro arguments are code, numbers, bools or str"),
+            }
         }
+        let values: Vec<Value> = args.iter().map(|a| arg(&mut vm, a)).collect();
         let mut out = Vec::new();
         let result = vm.call_named(entry, &values, &mut out);
         self.uniques.set(vm.uniques());

@@ -1,6 +1,7 @@
 # Design: code as data
 
-Status: step 1 is done ([Functions on code](../language/macros.md#functions-on-code)); the others are proposals.
+Status: steps 1 and 2 are done ([Functions on code](../language/macros.md#functions-on-code),
+[`[expr]` parameters](../language/macros.md#declaring-a-macro)); the others are proposals.
 
 ## Why
 
@@ -99,13 +100,14 @@ Their templates are hygienic as part of the calling macro's expansion, so the
 other names they write resolve where the macro is defined, not where the
 function is.
 
-### 2. Variable numbers of code arguments
+### 2. Variable numbers of code arguments (done)
 
 The last parameter of a macro may be `rest: [expr]`: the remaining arguments,
 as a list of code. Lists already exist on the VM, so the macro walks them with
 `for`.
 
-Fixes gap 2.
+Fixes gap 2. Done: `examples/pipe.jh` takes one function per stage, and binds
+each to a variable named with `unique` before the loop.
 
 ### 3. Looking inside code
 

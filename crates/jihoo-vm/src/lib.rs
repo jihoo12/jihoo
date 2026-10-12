@@ -217,6 +217,14 @@ impl<'m> Vm<'m> {
         v
     }
 
+    /// Allocates a list or array of `items` on this VM's heap, to pass as an
+    /// argument. It stays alive until the VM is dropped.
+    pub fn alloc_list(&mut self, items: Vec<Value>) -> Value {
+        let v = Value::Agg(self.alloc_agg(items));
+        self.pinned.push(v);
+        v
+    }
+
     /// Calls the function `name` with `args`, regardless of the module's profile.
     /// Instructions the VM cannot run (pointers, `syscall`) are runtime errors.
     pub fn call_named(&mut self, name: &str, args: &[Value], out: &mut dyn Write) -> Result<Value, VmError> {

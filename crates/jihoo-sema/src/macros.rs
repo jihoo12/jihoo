@@ -56,15 +56,16 @@ impl FnCx<'_> {
             return Err(Error::new(pos, format!("macro expansion is too deep (over {MAX_DEPTH}); does `{name}!` expand to itself?")));
         }
         let sig = self.env.signature(&key).unwrap()?;
-        if sig.params.len() != args.len() {
-            return Err(Error::new(
-                pos,
-                format!("macro `{name}` takes {} arguments, {} given", sig.params.len(), args.len()),
-            ));
+        // A last parameter `rest: [expr]` takes the remaining arguments.
+        let rest = sig.params.last().is_some_and(|t| *t == Type::List(Box::new(Type::Expr)));
+        let fixed = sig.params.len() - usize::from(rest);
+        if (!rest && args.len() != fixed) || args.len() < fixed {
+            let at_least = if rest { "at least " } else { "" };
+            return Err(Error::new(pos, format!("macro `{name}` takes {at_least}{fixed} arguments, {} given", args.len())));
         }
 
         let mut values = Vec::new();
-        for ((p, a), want) in decl.params.iter().zip(args).zip(&sig.params) {
+        for ((p, a), want) in decl.params.iter().zip(&args[..fixed]).zip(&sig.params) {
             if *want == Type::Expr {
                 values.push(ConstValue::Str(a.text.clone()));
             } else {
@@ -75,6 +76,9 @@ impl FnCx<'_> {
                 }
                 values.push(v);
             }
+        }
+        if rest {
+            values.push(ConstValue::Agg(args[fixed..].iter().map(|a| ConstValue::Str(a.text.clone())).collect()));
         }
 
         let ConstValue::Str(code) = self.env.run(pos, vec![], &key, &values, &sig.ret)? else {

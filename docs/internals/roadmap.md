@@ -75,8 +75,8 @@
 ## Next
 
 - **Code as data** ([design](code-as-data.md)). Done: functions on code,
-  which macros build their code with. Next: macros with a variable number of
-  code arguments, `meta.node` to look inside code, then statement macros as
+  which macros build their code with, and macros taking any number of code
+  arguments. Next: `meta.node` to look inside code, then statement macros as
   expressions and `type_of`. The measure is fusing list pipelines in a
   library (`examples/pipe.jh`), three times as fast as `lists` today.
 - **Memory:** a report of where native code copies lists (`jihoo build

@@ -37,7 +37,22 @@ the result kind says what code it returns:
 | `items` | `quote items { items }` | at the top level of a module |
 
 Parameters of type `expr` receive the arguments as code, unevaluated. Integer,
-bool and `str` parameters receive values computed at compile time.
+bool and `str` parameters receive values computed at compile time. A last
+parameter of type `[expr]` receives the remaining arguments, any number of
+them, as a list of code:
+
+```jihoo
+macro sum(rest: [expr]) -> expr {
+    let e = quote(0)
+    for x in rest {
+        e = quote($e + $x)
+    }
+    return e
+}
+
+print(sum!(1, x, x * 10))      // ((0 + 1) + x) + x * 10
+print(sum!())                  // 0
+```
 
 Macros are module items like functions: `pub macro` exports one, and another
 module calls it as `alias.name!(...)`. They are type checked even when unused,
