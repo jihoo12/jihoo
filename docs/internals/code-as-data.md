@@ -1,7 +1,8 @@
 # Design: code as data
 
-Status: steps 1 and 2 are done ([Functions on code](../language/macros.md#functions-on-code),
-[`[expr]` parameters](../language/macros.md#declaring-a-macro)); the others are proposals.
+Status: steps 1 to 3 are done ([Functions on code](../language/macros.md#functions-on-code),
+[`[expr]` parameters](../language/macros.md#declaring-a-macro),
+[`meta`](../reference/standard-library.md#meta)); steps 4 and 5 are proposals.
 
 ## Why
 
@@ -109,7 +110,7 @@ as a list of code. Lists already exist on the VM, so the macro walks them with
 Fixes gap 2. Done: `examples/pipe.jh` takes one function per stage, and binds
 each to a variable named with `unique` before the loop.
 
-### 3. Looking inside code
+### 3. Looking inside code (done)
 
 A `meta` library module gives the shape of a piece of code, one level at a time:
 
@@ -131,17 +132,27 @@ The children are `expr` again, not nodes: a macro looks only as deep as it
 needs to and puts the rest back with holes, as it does today. Building code
 stays with `quote`.
 
-`node` parses the text with the compiler's own parser (`jihoo_syntax`) and
-builds the enum value on the VM; it is a builtin like `stringify`. Hygiene
-holds because the children are cut out of the text unchanged: code from the
-caller stays the caller's, and marked names stay marked.
+Done, with the parser written in jihoo (`lib/meta.jh`) rather than a builtin
+around `jihoo_syntax`: that needed no VM instruction that parses, only
+`codetext` (JIR 14), the text of code with its hygiene marks and back, which
+the builtins `code_text` and `to_code` expose. `node` finds the operator that
+applies last outside brackets and strings, and otherwise tells calls, names,
+integer and string literals and anonymous functions apart. Hygiene holds
+because the children are cut out of the text unchanged: code from the caller
+stays the caller's, and marked names stay marked.
 
-A later option is a parser written in jihoo (`lib/meta.jh`), which would make a
-self-hosted parser useful rather than an exercise. The differential tests could
-then check it against the Rust one on every file in the repository.
+A struct or enum may now hold code, as `Node` does, and a function whose
+resolved signature holds code is a compile-time function, even when it does
+not write `expr` itself (`Env::holds_code`). Such types are left out of the
+compiled module, and a function of the program that uses one is an error.
 
-Fixes gap 3. With steps 1 to 3, `fuse!` reads `map(f)`, `filter(g)` and `sum()`
-itself.
+`tests/diff-lists/fusion.jh` checks `node` on the shapes it knows, and fused
+pipelines against `lists`, on the VM and natively. What remains open: `meta`
+uses `str`, so freestanding programs cannot import it, and the jihoo parser
+is not yet checked against the Rust one on every file in the repository.
+
+Fixes gap 3. `examples/pipe.jh` is now `fuse!("s", xs, map(f), filter(g),
+sum())`, as fast as the loop written by hand.
 
 ### 4. Statement macros as expressions
 

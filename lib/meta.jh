@@ -1,0 +1,371 @@
+// Looking inside code, for macros. `meta.node(e)` gives the shape of an
+// expression one level deep; the parts are code again, to look into further
+// or to put back with holes as they are.
+//
+//   import meta
+//   macro doubled(call: expr) -> expr {      // `a + a + b + b` for `f(a, b)`
+//       match meta.node(call) {
+//           Call(f, args) => {
+//               let out = quote(0)
+//               for a in args { out = quote($out + $a + $a) }
+//               return out
+//           }
+//           _ => return call
+//       }
+//   }
+//
+// It reads the text of the code (`code_text`), with the hygiene marks of its
+// names, and cuts parts out of it unchanged (`to_code`), so a part means what
+// it meant in the code it came from.
+import strings
+
+pub enum Node {
+    // `f(a, b)` or `m.f(a, b)`: the callee as written, and the arguments.
+    Call(str, [expr]),
+    // A name, such as `x` or `m.f`.
+    Name(str),
+    Int(i64),
+    // A string literal: its value.
+    Str(str),
+    // `a op b`, with the operator that applies last (`a + b * c` is `+`).
+    Binary(str, expr, expr),
+    // `fn(x: T, y) -> R { ... }`: the parameter names, and the whole function.
+    Func([str], expr),
+    // Anything else: unary operators, fields, indexing, literals of structs,
+    // arrays and floats, `match`, macro calls, casts.
+    Other,
+}
+
+pub fn node(e: expr) -> Node {
+    let t = unwrap(strings.trim(code_text(e)))
+    let op = lowest_operator(t)
+    if op.at >= 0 {
+        let lhs = to_code(strings.trim(t[:op.at]))
+        let rhs = to_code(strings.trim(t[op.at + len(op.text):]))
+        return Node.Binary(op.text, lhs, rhs)
+    }
+    if is_int(t) {
+        match strings.parse_int(strings.replace(t, "_", "")) {
+            Some(n) => return Node.Int(n)
+            None => return Node.Other
+        }
+    }
+    if len(t) >= 2 && t[0] == QUOTE && closing(t, 0) == len(t) - 1 {
+        return Node.Str(unescape(t[1:len(t) - 1]))
+    }
+    let path = path_end(t)
+    if path == len(t) && path > 0 {
+        return Node.Name(t)
+    }
+    if path > 0 && t[path] == LPAREN && closing(t, path) == len(t) - 1 {
+        let callee = t[:path]
+        if callee == "fn" {
+            return Node.Other
+        }
+        let args: [expr] = []
+        for a in split_top(t[path + 1:len(t) - 1]) {
+            push(args, to_code(a))
+        }
+        return Node.Call(callee, args)
+    }
+    if strings.starts_with(t, "fn(") || strings.starts_with(t, "fn (") {
+        let open = strings.index_of(t, "(")
+        let names: [str] = []
+        for p in split_top(t[open + 1:closing(t, open)]) {
+            let colon = strings.index_of(p, ":")
+            if colon >= 0 {
+                push(names, strings.trim(p[:colon]))
+            } else {
+                push(names, strings.trim(p))
+            }
+        }
+        return Node.Func(names, e)
+    }
+    return Node.Other
+}
+
+// ---- reading the text ----
+
+const QUOTE: u8 = 34      // "
+const LPAREN: u8 = 40     // (
+const COMMA: u8 = 44
+const SLASH: u8 = 47
+const BACKSLASH: u8 = 92
+const NEWLINE: u8 = 10
+
+struct Op {
+    at: i64
+    text: str
+}
+
+fn is_name_byte(b: u8) -> bool {
+    return strings.is_letter(b) || strings.is_digit(b) || b == 95 || b == 35   // _ and the # of marks
+}
+
+fn opens(b: u8) -> bool {
+    return b == 40 || b == 91 || b == 123   // ( [ {
+}
+
+fn closes(b: u8) -> bool {
+    return b == 41 || b == 93 || b == 125   // ) ] }
+}
+
+// Where the string literal or bracket that starts at `i` ends (the index of
+// its last byte), or -1.
+fn closing(t: str, i: i64) -> i64 {
+    if t[i] == QUOTE {
+        let k = i + 1
+        while k < len(t) {
+            if t[k] == BACKSLASH {
+                k += 2
+            } else if t[k] == QUOTE {
+                return k
+            } else {
+                k += 1
+            }
+        }
+        return -1
+    }
+    let depth = 0
+    let k = i
+    while k < len(t) {
+        let b = t[k]
+        if b == QUOTE || is_comment(t, k) {
+            k = skip(t, k)
+            continue
+        }
+        if opens(b) {
+            depth += 1
+        } else if closes(b) {
+            depth -= 1
+            if depth == 0 {
+                return k
+            }
+        }
+        k += 1
+    }
+    return -1
+}
+
+fn is_comment(t: str, k: i64) -> bool {
+    return t[k] == SLASH && k + 1 < len(t) && t[k + 1] == SLASH
+}
+
+// Past the string literal or comment at `k`.
+fn skip(t: str, k: i64) -> i64 {
+    if t[k] == QUOTE {
+        let end = closing(t, k)
+        if end < 0 {
+            return len(t)
+        }
+        return end + 1
+    }
+    let end = strings.index_from(t, "\n", k)
+    if end < 0 {
+        return len(t)
+    }
+    return end + 1
+}
+
+// `t` without parentheses around all of it.
+fn unwrap(t: str) -> str {
+    while len(t) >= 2 && t[0] == LPAREN && closing(t, 0) == len(t) - 1 {
+        t = strings.trim(t[1:len(t) - 1])
+    }
+    return t
+}
+
+// Where the name or `a.b.c` at the start of `t` ends; 0 if there is none.
+// Qualified names from other expansions (`#3:f`) count as names.
+fn path_end(t: str) -> i64 {
+    let k = 0
+    while k < len(t) {
+        let b = t[k]
+        if is_name_byte(b) || (b == 58 && k > 0 && t[0] == 35) {      // `:` in `#3:f`
+            k += 1
+        } else if b == 46 && k > 0 && k + 1 < len(t) && is_name_byte(t[k + 1]) {   // .
+            k += 1
+        } else {
+            break
+        }
+    }
+    if k > 0 && strings.is_digit(t[0]) {
+        return 0
+    }
+    return k
+}
+
+fn is_int(t: str) -> bool {
+    if len(t) == 0 || !strings.is_digit(t[0]) {
+        return false
+    }
+    for b in t {
+        if !strings.is_digit(b) && b != 95 {
+            return false
+        }
+    }
+    return true
+}
+
+// The parts of `t` between commas outside brackets and strings, trimmed; none
+// for an empty `t`.
+fn split_top(t: str) -> [str] {
+    let parts: [str] = []
+    if len(strings.trim(t)) == 0 {
+        return parts
+    }
+    let start = 0
+    let k = 0
+    while k < len(t) {
+        let b = t[k]
+        if b == QUOTE || is_comment(t, k) {
+            k = skip(t, k)
+            continue
+        }
+        if opens(b) {
+            let end = closing(t, k)
+            if end < 0 {
+                break
+            }
+            k = end + 1
+            continue
+        }
+        if b == COMMA {
+            push(parts, strings.trim(t[start:k]))
+            start = k + 1
+        }
+        k += 1
+    }
+    let last = strings.trim(t[start:])
+    if len(last) > 0 {
+        push(parts, last)
+    }
+    return parts
+}
+
+// The binary operator outside brackets that applies last: the lowest
+// precedence, and the rightmost of those, as they group to the left. `at` is
+// -1 if there is none.
+fn lowest_operator(t: str) -> Op {
+    let best = Op { at: -1, text: "" }
+    let best_prec = 100
+    let operand = false     // whether the bytes so far end an operand
+    let k = 0
+    while k < len(t) {
+        let b = t[k]
+        if b == QUOTE {
+            k = skip(t, k)
+            operand = true
+            continue
+        }
+        if is_comment(t, k) {
+            k = skip(t, k)
+            continue
+        }
+        if opens(b) {
+            let end = closing(t, k)
+            if end < 0 {
+                return Op { at: -1, text: "" }
+            }
+            k = end + 1
+            operand = true
+            continue
+        }
+        if strings.is_space(b) {
+            k += 1
+            continue
+        }
+        let op = operator_at(t, k)
+        if len(op) > 0 {
+            if operand {
+                let prec = precedence(op)
+                if prec <= best_prec {
+                    best = Op { at: k, text: op }
+                    best_prec = prec
+                }
+            }
+            k += len(op)
+            operand = false
+            continue
+        }
+        // `->` and `=>` are not operators; a word such as `as` or `match` is
+        // part of an operand.
+        if b == 45 && k + 1 < len(t) && t[k + 1] == 62 {
+            k += 2
+            operand = false
+            continue
+        }
+        operand = is_name_byte(b) || b == 46
+        k += 1
+    }
+    return best
+}
+
+// The binary operator written at `k`, or "".
+fn operator_at(t: str, k: i64) -> str {
+    let two = ""
+    if k + 1 < len(t) {
+        two = t[k:k + 2]
+    }
+    if two == "||" || two == "&&" || two == "==" || two == "!=" || two == "<=" || two == ">=" || two == "<<" || two == ">>" {
+        return two
+    }
+    if two == "->" || two == "=>" {
+        return ""
+    }
+    let one = t[k:k + 1]
+    if one == "<" || one == ">" || one == "|" || one == "^" || one == "&" || one == "+" || one == "-" || one == "*" || one == "/" || one == "%" {
+        return one
+    }
+    return ""
+}
+
+// As in the parser (`binop` in crates/jihoo-syntax/src/parser.rs).
+fn precedence(op: str) -> i64 {
+    if op == "||" { return 1 }
+    if op == "&&" { return 2 }
+    if op == "==" || op == "!=" { return 3 }
+    if op == "<" || op == "<=" || op == ">" || op == ">=" { return 4 }
+    if op == "|" { return 5 }
+    if op == "^" { return 6 }
+    if op == "&" { return 7 }
+    if op == "<<" || op == ">>" { return 8 }
+    if op == "+" || op == "-" { return 9 }
+    return 10
+}
+
+// The value of a string literal's text: `\n`, `\t`, `\\`, `\"` and `\xHH`.
+fn unescape(s: str) -> str {
+    let out: [u8] = []
+    let k = 0
+    while k < len(s) {
+        if s[k] != BACKSLASH || k + 1 >= len(s) {
+            push(out, s[k])
+            k += 1
+            continue
+        }
+        let c = s[k + 1]
+        if c == 110 {
+            push(out, NEWLINE)
+        } else if c == 116 {
+            push(out, 9)
+        } else if c == 120 && k + 3 < len(s) {
+            push(out, (hex(s[k + 2]) * 16 + hex(s[k + 3])) as u8)
+            k += 2
+        } else {
+            push(out, c)
+        }
+        k += 2
+    }
+    return from_bytes(out)
+}
+
+fn hex(b: u8) -> i64 {
+    if strings.is_digit(b) {
+        return (b - 48) as i64
+    }
+    if b >= 97 {
+        return (b - 87) as i64
+    }
+    return (b - 55) as i64
+}

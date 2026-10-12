@@ -4,21 +4,19 @@
 // three times as fast natively, as fast as the loop written out by hand.
 //   jihoo run examples/pipe.jh
 //
-// The macro runs on the VM while compiling: it reads the stages from `plan`
-// and puts their code together into the body of one `for` loop, with the
-// help of `stage`, a function on code that runs while compiling too. The
-// stages' functions come after the plan, as many as there are (`funcs`).
+// `fuse!` runs on the VM while compiling. It takes the stages as code, any
+// number of them (`stages: [expr]`), reads each with `meta.node` to see
+// `map(f)` or `filter(g)`, and puts their code together into the body of one
+// `for` loop, with the help of `stage`, a function on code.
 //
 // This is an experiment, and its awkward parts show what macros lack today:
-// - `plan` is a string, since a macro cannot look inside the code it is given
-//   to see `map(f)`;
 // - the result goes into a variable named by the caller (`"s"`), since a
 //   macro that makes statements cannot be used as an expression;
 // - the sum is an `i64`, since a macro does not know the types of its code.
-// The aim is `let s = xs |> map(f) |> filter(g) |> sum()`, with the fusion
+// The aim is `let s = fuse!(xs, map(f), filter(g), sum())`, with the fusion
 // written as a library; see the design in `docs/internals/code-as-data.md`.
 import lists
-import strings
+import meta
 
 // The code of one stage, after the stages before it in `body`. `v` is the
 // value so far, the same `v` in every piece of code one expansion builds.
@@ -35,25 +33,30 @@ fn stage(kind: str, call: expr, body: stmts) -> stmts {
     }
 }
 
-// The functions go into variables before the loop, so that a closure is made
-// once, not once per element. The names come from `unique`, as code from a
-// hole declares names in the caller's scope.
-macro pipe(out: str, xs: expr, plan: str, funcs: [expr]) -> stmts {
+// `fuse!("s", xs, map(f), filter(g), sum())` declares `s`, the sum of what
+// is left of `xs` after the stages. The functions go into variables before
+// the loop, so that a closure is made once, not once per element; their
+// names come from `unique`, as a name from a hole is the caller's.
+macro fuse(out: str, xs: expr, stages: [expr]) -> stmts {
     let binds = quote { let acc = 0 }
     let body = quote { let v = x }
-    let n = 0
-    for kind in strings.split(plan, " ") {
-        if kind == "map" || kind == "filter" {
-            let g = unique("stage")
-            binds = quote {
-                $binds
-                let $g = $(funcs[n])
+    for s in stages {
+        match meta.node(s) {
+            Call(kind, args) => {
+                if kind == "map" || kind == "filter" {
+                    let g = unique("stage")
+                    binds = quote {
+                        $binds
+                        let $g = $(args[0])
+                    }
+                    body = stage(kind, quote($(ident(g))(v)), body)
+                } else if kind != "sum" {
+                    trap()      // not a stage: the compiler reports where
+                }
             }
-            body = stage(kind, quote($(ident(g))(v)), body)
-            n += 1
+            _ => trap()
         }
     }
-    // `sum` is the only way to end a pipeline so far.
     return quote {
         $binds
         for x in $xs {
@@ -77,8 +80,9 @@ fn main() {
     print(lists.fold(i64, i64, zs, 0, fn(a: i64, x: i64) -> i64 { return a + x }))
 
     // Fused: one loop, no list in between. Prints the same.
-    pipe!("s", xs, "map filter sum",
-        fn(x: i64) -> i64 { return x * 3 + k },
-        fn(x: i64) -> bool { return x % 2 == 0 })
+    fuse!("s", xs,
+        map(fn(x: i64) -> i64 { return x * 3 + k }),
+        filter(fn(x: i64) -> bool { return x % 2 == 0 }),
+        sum())
     print(s)
 }

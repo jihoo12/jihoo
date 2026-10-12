@@ -111,7 +111,9 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
     let mut structs = Vec::new();
     let mut enums = Vec::new();
     let mut define = |t: Type, pos: Pos, errors: &mut Vec<Error>| {
+        // Types that hold code, such as `meta.Node`, only exist while compiling.
         let r = env.check_acyclic(&t).and_then(|_| match t {
+            _ if env.holds_code(&t) => Ok(()),
             Type::Enum(name) => {
                 let variants = env.enum_variants(pos, &name)?;
                 enums.push(ir::EnumDef { name, variants: (*variants).clone() });
@@ -166,7 +168,7 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
                     Some(Err(e)) => errors.push(e),
                     None => {}
                 }
-            } else if f.is_compile_time() && env.generic(&key).is_none() {
+            } else if (f.is_macro || env.is_code_fn(&key)) && env.generic(&key).is_none() {
                 macros.push(key);
             } else if env.generic(&key).is_none() {
                 plain.push(key);
@@ -334,6 +336,8 @@ fn is_builtin(name: &str) -> bool {
             | "size_of"
             | "align_of"
             | "stringify"
+            | "code_text"
+            | "to_code"
             | "to_str"
             | "unique"
             | "ident"
@@ -464,7 +468,7 @@ impl<'a> FnCx<'a> {
     /// Lowers `f` as the JIR function `name` (an instance name for generics).
     fn lower_fn(mut self, f: &FnDecl, name: &str) -> Result<ir::Function, Error> {
         let sig = self.sig.clone();
-        self.in_macro = f.is_compile_time();
+        self.in_macro = f.is_compile_time() || self.env.sig_holds_code(&sig);
         // Comptime parameters are bindings, not registers.
         for (p, ty) in f.params.iter().filter(|p| !p.comptime).zip(&sig.params) {
             let r = self.new_reg(ty.clone());
@@ -488,6 +492,13 @@ impl<'a> FnCx<'a> {
     /// Closes open blocks, drops unreachable ones, and builds the function.
     /// `end` is where a missing `return` is reported.
     fn finish(mut self, name: &str, ret: Type, end: Pos) -> Result<ir::Function, Error> {
+        // Code only exists while compiling, also inside a struct or an enum.
+        if !self.in_macro {
+            if let Some(t) = self.regs.iter().find(|t| self.env.holds_code(t)) {
+                let msg = format!("`{name}` uses {t}, which holds code and so only exists while compiling");
+                return Err(Error::new(end, ir::plain_names(&msg)));
+            }
+        }
         let reachable = self.reachable();
         // A reachable block that is still open falls off the end of the function.
         for &b in &reachable {
@@ -1320,6 +1331,7 @@ impl<'a> FnCx<'a> {
                 Ok(self.unit())
             }
             "stringify" => self.stringify(pos, args),
+            "code_text" | "to_code" => self.code_text(pos, name, args),
             "path_index" => self.path_index(pos, args),
             "to_str" => {
                 if self.profile() == Profile::Freestanding && !self.in_macro {

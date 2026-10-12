@@ -182,8 +182,9 @@ fn main() {
 ## Functions on code
 
 A function whose parameters or result are code (`expr`, `stmts`, `items`, or a
-type holding them, such as `[expr]`) runs only while compiling, like a macro.
-Macros use such functions to build their code in parts:
+type holding them, such as `[expr]` or a struct or enum with a field of code,
+like `meta.Node`) runs only while compiling, like a macro. Macros use such
+functions to build their code in parts:
 
 ```jihoo
 fn twice(e: expr) -> expr {
@@ -203,6 +204,8 @@ macro quad(x: expr) -> expr {
 - Only macros and other functions on code may call one or use it as a value;
   the compiled program never contains it. Its body follows the rules of macro
   bodies: `quote` works, and `str` does even in freestanding programs.
+- A struct or enum may have fields of code; it then only exists while
+  compiling too, and code that runs in the program may not use it.
 - Its templates are hygienic as part of the macro that called it: the locals
   they declare belong to that expansion, so a `let v` in one function and a `v`
   in the macro's own template are the same variable. Other names they write
@@ -219,5 +222,11 @@ macro quad(x: expr) -> expr {
 | `unique(prefix)` | a name that is new in the whole compilation, a `str`, for items or variables a macro makes for the caller |
 | `ident(name)` | a name as code, for expression positions |
 | `to_str(x)` | a number or bool as a `str`, handy for building names |
+| `code_text(e)` | the text of code `e` with the hygiene marks of its names, for code that reads code |
+| `to_code(s)` | text, such as a part of what `code_text` gave, as code again |
+
+To look inside code, use the [`meta`](../reference/standard-library.md#meta)
+library rather than these two: `meta.node(e)` tells a call from a name, a
+literal or an operator, and gives the parts as code.
 
 See `examples/macros.jh`.

@@ -9,6 +9,7 @@ One of them, the prelude, needs no import.
 | [prelude](#prelude) | all | `Option(T)` and `Result(T, E)`, without an import |
 | [`strings`](#strings) | hosted | searching, splitting, joining, trimming and parsing text |
 | [`lists`](#lists) | hosted | sorting, mapping and searching lists |
+| [`meta`](#meta) | macros | the shape of code, for macros that read the code they are given |
 | [`libc`](#libc) | native | declarations of C library functions |
 | [`sys`](#sys) | native, freestanding | Linux syscall numbers of the target |
 | [`alloc`](#alloc) | native, freestanding | an arena allocator over `mmap`, and a checked `Vec(T)` |
@@ -143,6 +144,47 @@ fn main() {
 
 `examples/words.jh` puts `read_line`, `strings` and `lists` together: it counts
 the words of its input and prints the most common ones.
+
+## meta
+
+The shape of code, one level deep, for [macros](../language/macros.md) and
+functions on code. `meta.node(e)` reads the text of `e` and gives a `Node`;
+its parts are code again, to look into further or to put back with holes.
+
+```jihoo
+import meta
+
+// `doubled!(f(a, b))` adds up the arguments twice: `a + a + b + b`.
+macro doubled(call: expr) -> expr {
+    match meta.node(call) {
+        Call(f, args) => {
+            let out = quote(0)
+            for a in args {
+                out = quote($out + $a + $a)
+            }
+            return out
+        }
+        _ => return call
+    }
+}
+```
+
+| `Node` | for |
+|--------|-----|
+| `Call(callee, args)` | `f(a, b)` or `m.f(a, b)`: the callee as written, a `str`, and the arguments, `[expr]` |
+| `Name(n)` | a name, such as `x` or `m.f` |
+| `Int(n)` | an integer literal, an `i64` |
+| `Str(s)` | a string literal: its value |
+| `Binary(op, lhs, rhs)` | the operator that applies last, such as `"+"` in `a + b * c`, and both sides |
+| `Func(params, f)` | an anonymous function: the names of its parameters, and the whole function |
+| `Other` | anything else: unary operators, fields, indexing, casts, literals of structs, arrays and floats, `match`, macro calls |
+
+`Node` holds code, so it only exists while compiling
+([Functions on code](../language/macros.md#functions-on-code)). `meta` is
+written in jihoo on top of `code_text` and `to_code`
+([Macro builtins](../language/macros.md#macro-builtins)); it uses `str`, so
+freestanding programs cannot import it yet. `examples/pipe.jh` uses it to fuse
+`map`, `filter` and sums into one loop.
 
 ## libc
 

@@ -24,7 +24,7 @@ pub use verify::verify;
 /// module instead of compiling it with other rules. Bump it whenever the
 /// format or the meaning of anything in it changes (see "Versions" in
 /// `docs/jir.md`); the `version` tests check that both sides and the spec agree.
-pub const JIR_VERSION: u32 = 13;
+pub const JIR_VERSION: u32 = 14;
 
 /// Language profile, selected with `#![native]` or `#![freestanding]` at the
 /// top of a source file.
@@ -487,6 +487,10 @@ pub enum Inst {
     /// Compile time only (macros): the source text of code, a `str`, with
     /// names as written (see `plain_names`).
     Stringify { dst: Reg, code: Reg },
+    /// Compile time only (macros): the same text as code and as a `str`, either
+    /// way: code to `str` keeps the hygiene marks of its names, which
+    /// `stringify` drops, and `str` to code takes the text as it is.
+    CodeText { dst: Reg, src: Reg },
     /// Native and freestanding only: inline assembly. `template` uses LLVM operand syntax
     /// (`$0` is the output if there is one, then the inputs) and `constraints` is an
     /// LLVM constraint string with one input entry per register in `args`. `dst`
@@ -600,6 +604,7 @@ impl Inst {
             | Addr { dst, src }
             | Unique { dst, prefix: src }
             | Stringify { dst, code: src }
+            | CodeText { dst, src }
             | Load { dst, ptr: src }
             | AtomicLoad { dst, ptr: src }
             | FieldPtr { dst, ptr: src, .. }

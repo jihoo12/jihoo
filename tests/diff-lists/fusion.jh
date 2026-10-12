@@ -1,0 +1,100 @@
+// Pipelines fused by a macro that reads its stages with `meta.node` must give
+// what the same pipelines give with `lists`, and `meta.node` must see the
+// shape of code as the parser does.
+import lists
+import meta
+
+fn stage(kind: str, call: expr, body: stmts) -> stmts {
+    if kind == "map" {
+        return quote {
+            $body
+            let v = $call
+        }
+    }
+    return quote {
+        $body
+        if !$call { continue }
+    }
+}
+
+macro fuse(out: str, xs: expr, stages: [expr]) -> stmts {
+    let binds = quote { let acc = 0 }
+    let body = quote { let v = x }
+    for s in stages {
+        match meta.node(s) {
+            Call(kind, args) => {
+                if kind == "map" || kind == "filter" {
+                    let g = unique("stage")
+                    binds = quote {
+                        $binds
+                        let $g = $(args[0])
+                    }
+                    body = stage(kind, quote($(ident(g))(v)), body)
+                }
+            }
+            _ => trap()
+        }
+    }
+    return quote {
+        $binds
+        for x in $xs {
+            $body
+            acc += v
+        }
+        let $out = acc
+    }
+}
+
+fn total(xs: [i64]) -> i64 {
+    return lists.fold(i64, i64, xs, 0, fn(a: i64, x: i64) -> i64 { return a + x })
+}
+
+// A number for each shape of code: what `meta.node` sees.
+macro shape(e: expr) -> expr {
+    match meta.node(e) {
+        Call(f, args) => return quote($(100 + len(args)))
+        Name(n) => return quote($(200 + len(n)))
+        Int(n) => return quote($(300000 + n))
+        Str(s) => return quote($(400 + len(s)))
+        Binary(op, l, r) => return quote($(500 + len(op)) * 1000 + $l - ($r))
+        Func(params, f) => return quote($(600 + len(params)))
+        Other => return quote(700)
+    }
+}
+
+fn add(a: i64, b: i64) -> i64 {
+    return a + b
+}
+
+fn entry() -> i64 {
+    let xs: [i64] = []
+    for i in 0..50 {
+        push(xs, i * 7 % 23 - 5)
+    }
+    let k = 3
+
+    fuse!("a", xs, map(fn(x: i64) -> i64 { return x * k }))
+    out(a - total(lists.map(i64, i64, xs, fn(x: i64) -> i64 { return x * k })))
+
+    fuse!("b", xs, filter(fn(x: i64) -> bool { return x > 0 }), map(fn(x: i64) -> i64 { return x + 1 }), sum())
+    out(b - total(lists.map(i64, i64, lists.filter(i64, xs, fn(x: i64) -> bool { return x > 0 }), fn(x: i64) -> i64 { return x + 1 })))
+
+    fuse!("c", xs)
+    out(c - total(xs))
+
+    // Captured values, and a filter that keeps nothing.
+    let limit = 1000
+    fuse!("d", xs, filter(fn(x: i64) -> bool { return x > limit }))
+    out(d)
+
+    out(shape!(add(1, 2)))
+    out(shape!(xs))
+    out(shape!(1_000))
+    out(shape!("a\"b"))
+    out(shape!(10 - 2 - 3))         // `-` applies last: (10 - 2) and 3
+    out(shape!(1 + 2 * 3))
+    out(shape!(fn(p: i64, q) -> i64 { return p }))
+    out(shape!(-k))
+    out(shape!(((k))))
+    return a + b
+}

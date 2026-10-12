@@ -895,6 +895,11 @@ impl<'m> Vm<'m> {
                 let r = self.alloc_str(&text);
                 self.set(*dst, Value::Str(r));
             }
+            // Code is text on the VM: the same string either way.
+            Inst::CodeText { dst, src } => {
+                let v = self.get(*src);
+                self.set(*dst, v);
+            }
             Inst::Unique { dst, prefix } => {
                 let Value::Str(p) = self.get(*prefix) else {
                     return Err(self.error("`unique` needs a str"));

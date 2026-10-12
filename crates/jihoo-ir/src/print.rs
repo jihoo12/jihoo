@@ -172,6 +172,7 @@ impl Display for Inst {
             Inst::FromBytes { dst, src } => write!(f, "{dst} = frombytes {src}"),
             Inst::Unique { dst, prefix } => write!(f, "{dst} = unique {prefix}"),
             Inst::Stringify { dst, code } => write!(f, "{dst} = stringify {code}"),
+            Inst::CodeText { dst, src } => write!(f, "{dst} = codetext {src}"),
             Inst::Quote { dst, pieces, holes, kinds } => {
                 let pieces: Vec<String> = pieces.iter().map(|p| quote(p)).collect();
                 let holes: Vec<String> = holes.iter().zip(kinds).map(|(h, k)| format!("{k:?} {h}").to_lowercase()).collect();

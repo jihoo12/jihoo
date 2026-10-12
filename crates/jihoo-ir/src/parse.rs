@@ -552,6 +552,7 @@ fn assign(l: &mut Line, dst: Reg) -> Result<Inst> {
         "frombytes" => Inst::FromBytes { dst, src: l.reg()? },
         "unique" => Inst::Unique { dst, prefix: l.reg()? },
         "stringify" => Inst::Stringify { dst, code: l.reg()? },
+        "codetext" => Inst::CodeText { dst, src: l.reg()? },
         "asm" => {
             let template = l.str()?;
             l.punct(",")?;

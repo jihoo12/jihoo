@@ -199,6 +199,27 @@ impl FnCx<'_> {
         // Code is text on the VM; this drops the hygiene marks of its names.
         Ok(self.emit_to(Type::Str, |dst| Inst::Stringify { dst, code: r }))
     }
+
+    /// `code_text(e)`: the text of code with its hygiene marks, for code that
+    /// reads code (`lib/meta.jh`); `to_code(s)` turns such text back into code.
+    pub(crate) fn code_text(&mut self, pos: Pos, name: &str, args: &[Expr]) -> Result<Reg, Error> {
+        if !self.in_macro {
+            return Err(Error::new(pos, format!("`{name}` can only be used inside a macro")));
+        }
+        let [arg] = args else {
+            return Err(Error::new(pos, format!("`{name}` takes exactly 1 argument")));
+        };
+        let to_code = name == "to_code";
+        let r = self.expr(arg, to_code.then_some(&Type::Str))?;
+        if to_code {
+            self.expect(arg.pos, r, &Type::Str, "the argument of `to_code`")?;
+            return Ok(self.emit_to(Type::Expr, |dst| Inst::CodeText { dst, src: r }));
+        }
+        if !self.ty(r).is_code() {
+            return Err(Error::new(arg.pos, format!("`code_text` needs code, not {}", self.ty(r))));
+        }
+        Ok(self.emit_to(Type::Str, |dst| Inst::CodeText { dst, src: r }))
+    }
 }
 
 fn bad_code(pos: Pos, name: &str, err: &Error, code: &str) -> Error {

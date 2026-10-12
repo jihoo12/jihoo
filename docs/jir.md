@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 13)
+# JIR — jihoo IR text format (version 14)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -43,6 +43,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 11 | `closure` in native modules; native function values are `{code, env}` (16 bytes) |
 | 12 | `ref` and `cell` in native modules, as counted boxes |
 | 13 | `chan`, `send`, `recv` and `select` in native modules, on lib/channel.jh |
+| 14 | `codetext`, code as text and text as code at compile time |
 
 ## Example
 
@@ -95,7 +96,7 @@ bb3:
 ## Module
 
 ```
-jir 13                               ; format version, must come first
+jir 14                               ; format version, must come first
 profile hosted|native|freestanding   ; language profile
 target x86_64|aarch64                ; the machine, 64-bit Linux
 struct ...                           ; zero or more structs
@@ -484,6 +485,7 @@ there, as `load` is.
 | `%d = to_str %a`                | number or `bool`      | `str`  | hosted, native and macros: the value as text, as `print` writes it |
 | `%d = unique %p`                | `str`                 | `str`  | compile time only: `p` plus a number unique in this compilation |
 | `%d = stringify %c`             | `expr`, `stmts` or `items` | `str` | compile time only: the source text of code, with the hygiene marks of its names removed |
+| `%d = codetext %a`              | code or `str`         | `str` or code | compile time only: the same text as the other type; code to `str` keeps the hygiene marks, `str` to code takes the text as it is |
 | `%d = asm "tmpl", "cons"(%a, ...)` | int, `bool` or `*T` | int, `*T` or `unit` | native and freestanding only: inline assembly |
 | `%d = quote ["p0", "p1", ...](kind %h, ...)` | see below | `expr`, `stmts` or `items` | compile time only: code from template pieces and holes |
 

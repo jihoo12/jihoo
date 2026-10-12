@@ -993,6 +993,28 @@ fn functions_on_code() {
 }
 
 #[test]
+fn types_that_hold_code() {
+    // A struct or enum may hold code; it then only exists while compiling,
+    // and so do the functions that take or return it.
+    let base = "enum Part { Lit(expr), Many([expr]) }\n\
+                fn parts(rest: [expr]) -> Part { return Part.Many(rest) }\n\
+                fn first(p: Part) -> expr {\n  match p {\n    Lit(e) => return e\n    Many(es) => return es[0]\n  }\n}\n";
+    let src = format!("{base}macro head(rest: [expr]) -> expr {{ return first(parts(rest)) }}\nfn main() {{ print(head!(7, 8)) }}");
+    assert_eq!(run(&src), "7\n");
+    let m = check(&src).unwrap();
+    assert!(m.enums.iter().all(|e| e.name != "Part") && m.func("first").is_none(), "{m}");
+    let e = err(&format!("{base}fn main() {{ let p = Part.Many([])\n print(1) }}"));
+    assert!(e.contains("uses") && e.contains("holds code"), "{e}");
+    assert!(err(&format!("{base}fn f(p: Part) -> i64 {{ return 1 }}\nfn main() {{ print(f(Part.Many([]))) }}")).contains("works on code"));
+    // `code_text` keeps the hygiene marks that `stringify` drops, and
+    // `to_code` turns such text back into code: here the macro's own `t`.
+    let src = "macro m(x: expr) -> stmts {\n  let c = quote(t + $x)\n  let back = to_code(code_text(c))\n  return quote {\n    let t = 10\n    print($back)\n    print($(stringify(c)))\n  }\n}\n\
+               fn main() {\n  let t = 1\n  m!(t)\n}";
+    assert_eq!(run(src), "11\nt + (t)\n");
+    assert!(err("fn main() { print(code_text(1)) }").contains("`code_text` can only be used inside a macro"));
+}
+
+#[test]
 fn macros_take_the_rest_of_their_arguments() {
     // `rest: [expr]` takes the remaining arguments as code, none included,
     // and functions on code take such lists too.
@@ -1356,7 +1378,7 @@ fn statement_and_item_macro_errors() {
     // Errors inside produced items point at the call.
     let e = err("macro m() -> items { return quote items { fn f() -> i64 { return true } } }\nm!()\nfn main() {}");
     assert!(e.starts_with("2:1:"), "{e}");
-    assert!(err("struct S { s: stmts }\nfn main() {}").contains("only available in macros"));
+    assert!(err("fn main() { let s: stmts = 1 }").contains("only available in macros"));
 }
 
 #[test]

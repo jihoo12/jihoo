@@ -531,7 +531,8 @@ impl<'p> Env<'p> {
                     if fields.iter().any(|(n, _)| *n == f.name) {
                         return Err(Error::new(f.pos, format!("field `{}` is declared twice", f.name)));
                     }
-                    let ty = self.resolve(&f.ty, &bindings).map_err(|mut e| {
+                    // A field may hold code, which makes the struct compile-time only.
+                    let ty = self.resolve_in(&f.ty, &bindings, f.ty.mentions_code()).map_err(|mut e| {
                         if !bindings.is_empty() {
                             e.msg = format!("{} (in `{name}`)", e.msg);
                         }
@@ -562,7 +563,7 @@ impl<'p> Env<'p> {
                     if variants.iter().any(|(n, _)| *n == v.name) {
                         return Err(Error::new(v.pos, format!("variant `{}` is declared twice", v.name)));
                     }
-                    let tys = v.fields.iter().map(|t| self.resolve(t, &bindings)).collect::<Result<_, _>>();
+                    let tys = v.fields.iter().map(|t| self.resolve_in(t, &bindings, t.mentions_code())).collect::<Result<_, _>>();
                     let tys = tys.map_err(|mut e| {
                         if !bindings.is_empty() {
                             e.msg = format!("{} (in `{name}`)", e.msg);
@@ -746,7 +747,40 @@ impl<'p> Env<'p> {
     /// Whether `key` is a function, not a macro, that works on code and so
     /// only runs while compiling.
     pub fn is_code_fn(&self, key: &str) -> bool {
-        self.fn_decls.get(key).is_some_and(|&(_, d)| !d.is_macro && d.is_compile_time())
+        let Some(&(_, d)) = self.fn_decls.get(key) else { return false };
+        if d.is_macro || d.is_extern {
+            return false;
+        }
+        d.is_compile_time() || matches!(self.signature(key), Some(Ok(sig)) if self.sig_holds_code(&sig))
+    }
+
+    /// Whether a signature's parameters or result hold code, directly or
+    /// through structs and enums such as `meta.Node`.
+    pub fn sig_holds_code(&self, sig: &Sig) -> bool {
+        sig.params.iter().chain([&sig.ret]).any(|t| self.holds_code(t))
+    }
+
+    /// Whether values of `t` hold code, which only exists while compiling.
+    pub fn holds_code(&self, t: &Type) -> bool {
+        self.holds_code_in(t, &mut HashSet::new())
+    }
+
+    fn holds_code_in(&self, t: &Type, seen: &mut HashSet<String>) -> bool {
+        match t {
+            Type::Expr | Type::Stmts | Type::Items => true,
+            Type::List(e) | Type::Array(e, _) | Type::Ptr(e) | Type::Ref(e) | Type::Cell(e) | Type::Chan(e) => {
+                self.holds_code_in(e, seen)
+            }
+            Type::Fn(params, ret) => params.iter().chain([&**ret]).any(|p| self.holds_code_in(p, seen)),
+            Type::Struct(name) | Type::Enum(name) => {
+                if !seen.insert(name.clone()) {
+                    return false;
+                }
+                let members = self.members(Pos::default(), t).unwrap_or_default();
+                members.iter().flatten().any(|m| self.holds_code_in(m, seen))
+            }
+            _ => false,
+        }
     }
 
     /// The declaration of `key` if it is a macro.

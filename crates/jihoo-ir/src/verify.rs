@@ -616,6 +616,7 @@ impl Cx<'_> {
                     Inst::Trap => Ok(()),
                     Inst::Unique { .. } => Err("`unique` only exists at compile time".into()),
                     Inst::Stringify { .. } => Err("`stringify` only exists at compile time".into()),
+                    Inst::CodeText { .. } => Err("`codetext` only exists at compile time".into()),
                     Inst::Print { src } => {
                         if !Type::can_print(profile) {
                             Err(format!("`print` needs the VM or the C library and is not available in {} mode", profile.as_str()))

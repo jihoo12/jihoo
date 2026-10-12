@@ -75,10 +75,12 @@
 ## Next
 
 - **Code as data** ([design](code-as-data.md)). Done: functions on code,
-  which macros build their code with, and macros taking any number of code
-  arguments. Next: `meta.node` to look inside code, then statement macros as
-  expressions and `type_of`. The measure is fusing list pipelines in a
-  library (`examples/pipe.jh`), three times as fast as `lists` today.
+  which macros build their code with, macros taking any number of code
+  arguments, and `meta.node` to look inside code (JIR 14: `codetext`), with
+  which `examples/pipe.jh` fuses `map`, `filter` and sums into one loop, three
+  times as fast as `lists`. Next: statement macros as expressions, so that a
+  fused pipeline is a value, and `type_of`, so that it works for any element
+  type; `meta` for freestanding programs.
 - **Memory:** a report of where native code copies lists (`jihoo build
   --cost`), which needs source positions in JIR; moving a field out of a
   value at its last use instead of copying it.
