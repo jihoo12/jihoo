@@ -5,43 +5,51 @@
 //   jihoo run examples/pipe.jh
 //
 // The macro runs on the VM while compiling: it reads the stages from `plan`
-// and puts their code together into the body of one `for` loop.
+// and puts their code together into the body of one `for` loop, with the
+// help of `stage` and `slot`, functions on code that run while compiling too.
 //
 // This is an experiment, and its awkward parts show what macros lack today:
 // - `plan` is a string, since a macro cannot look inside the code it is given
 //   to see `map(f)`;
 // - there are exactly three function slots, filled even when unused, since a
 //   macro takes a fixed number of arguments;
-// - the code that picks a slot is written inline, since `expr` values cannot
-//   be passed to ordinary functions;
 // - the result goes into a variable named by the caller (`"s"`), since a
 //   macro that makes statements cannot be used as an expression;
 // - the sum is an `i64`, since a macro does not know the types of its code.
 // The aim is `let s = xs |> map(f) |> filter(g) |> sum()`, with the fusion
-// written as a library; see the roadmap.
+// written as a library; see the design in `docs/internals/code-as-data.md`.
 import lists
 import strings
 
+// The code of one stage, after the stages before it in `body`. `v` is the
+// value so far, the same `v` in every piece of code one expansion builds.
+fn stage(kind: str, call: expr, body: stmts) -> stmts {
+    if kind == "map" {
+        return quote {
+            $body
+            let v = $call
+        }
+    }
+    return quote {
+        $body
+        if !$call { continue }
+    }
+}
+
+// A call of the function in slot `n` on `v`.
+fn slot(n: i64) -> expr {
+    if n == 1 { return quote(g1(v)) }
+    if n == 2 { return quote(g2(v)) }
+    return quote(g3(v))
+}
+
 macro pipe(out: str, xs: expr, plan: str, f1: expr, f2: expr, f3: expr) -> stmts {
     let body = quote { let v = x }
-    let slot = 0
-    for stage in strings.split(plan, " ") {
-        if stage == "map" || stage == "filter" {
-            slot += 1
-            let call = quote(g3(v))
-            if slot == 1 { call = quote(g1(v)) }
-            if slot == 2 { call = quote(g2(v)) }
-            if stage == "map" {
-                body = quote {
-                    $body
-                    let v = $call
-                }
-            } else {
-                body = quote {
-                    $body
-                    if !$call { continue }
-                }
-            }
+    let n = 0
+    for kind in strings.split(plan, " ") {
+        if kind == "map" || kind == "filter" {
+            n += 1
+            body = stage(kind, slot(n), body)
         }
     }
     // `sum` is the only way to end a pipeline so far.

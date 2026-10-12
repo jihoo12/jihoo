@@ -164,6 +164,37 @@ fn main() {
   to the module that called the macro. Produced code may call item macros, so
   this repeats, up to 16 rounds.
 
+## Functions on code
+
+A function whose parameters or result are code (`expr`, `stmts`, `items`, or a
+type holding them, such as `[expr]`) runs only while compiling, like a macro.
+Macros use such functions to build their code in parts:
+
+```jihoo
+fn twice(e: expr) -> expr {
+    return quote($e + $e)
+}
+
+fn nest(n: i64, e: expr) -> expr {
+    if n == 0 { return e }
+    return nest(n - 1, twice(e))
+}
+
+macro quad(x: expr) -> expr {
+    return nest(2, x)          // ((x + x) + (x + x))
+}
+```
+
+- Only macros and other functions on code may call one or use it as a value;
+  the compiled program never contains it. Its body follows the rules of macro
+  bodies: `quote` works, and `str` does even in freestanding programs.
+- Its templates are hygienic as part of the macro that called it: the locals
+  they declare belong to that expansion, so a `let v` in one function and a `v`
+  in the macro's own template are the same variable. Other names they write
+  mean what they mean where the *macro* is defined, so a function on code that
+  is meant for macros in other modules must not name its own module's private
+  items.
+
 ## Macro builtins
 
 | builtin | gives |

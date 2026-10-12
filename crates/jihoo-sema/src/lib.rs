@@ -140,7 +140,8 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
             }
         }
     }
-    // Generic functions are compiled per instance; macros only run while compiling.
+    // Generic functions are compiled per instance; macros and functions on code
+    // only run while compiling.
     let mut plain = Vec::new();
     let mut macros = Vec::new();
     let mut externs: Vec<(Pos, ir::ExternFn)> = Vec::new();
@@ -165,7 +166,7 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
                     Some(Err(e)) => errors.push(e),
                     None => {}
                 }
-            } else if f.is_macro {
+            } else if f.is_compile_time() && env.generic(&key).is_none() {
                 macros.push(key);
             } else if env.generic(&key).is_none() {
                 plain.push(key);
@@ -189,7 +190,8 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
             }
         }
     }
-    // Macros are checked even when unused, but are not part of the program.
+    // Macros and functions on code are checked even when unused, but are not
+    // part of the program.
     for key in &macros {
         match env.signature(key) {
             Some(Ok(_)) => {
@@ -462,7 +464,7 @@ impl<'a> FnCx<'a> {
     /// Lowers `f` as the JIR function `name` (an instance name for generics).
     fn lower_fn(mut self, f: &FnDecl, name: &str) -> Result<ir::Function, Error> {
         let sig = self.sig.clone();
-        self.in_macro = f.is_macro;
+        self.in_macro = f.is_compile_time();
         // Comptime parameters are bindings, not registers.
         for (p, ty) in f.params.iter().filter(|p| !p.comptime).zip(&sig.params) {
             let r = self.new_reg(ty.clone());
@@ -665,6 +667,16 @@ impl<'a> FnCx<'a> {
         }
     }
 
+    /// A function that works on code runs only while compiling: only macros
+    /// and other such functions may use it.
+    fn check_code_fn(&self, pos: Pos, name: &str, key: &str) -> Result<(), Error> {
+        if self.env.is_code_fn(key) && !self.in_macro {
+            let msg = format!("`{name}` works on code, so it only runs while compiling: use it from a macro or a function on code");
+            return Err(Error::new(pos, msg));
+        }
+        Ok(())
+    }
+
     /// Function `key`, written `name`, as a value of type `fn(...) -> R`.
     fn func_value(&mut self, pos: Pos, name: &str, key: &str) -> Result<Reg, Error> {
         if is_builtin(name) {
@@ -673,6 +685,7 @@ impl<'a> FnCx<'a> {
         if self.env.macro_decl(key).is_some() {
             return Err(Error::new(pos, format!("`{name}` is a macro; macros cannot be used as values")));
         }
+        self.check_code_fn(pos, name, key)?;
         if self.env.generic(key).is_some() {
             return Err(Error::new(
                 pos,
@@ -1439,6 +1452,7 @@ impl<'a> FnCx<'a> {
                 if self.env.macro_decl(&key).is_some() {
                     return Err(Error::new(pos, format!("`{name}` is a macro; call it as `{name}!(...)`")));
                 }
+                self.check_code_fn(pos, name, &key)?;
                 let sig = self.env.signature(&key).ok_or_else(|| match self.local(name) {
                     Some(r) => Error::new(pos, format!("`{name}` is not a function; it has type {}", self.ty(r))),
                     None => Error::new(pos, format!("unknown function `{name}`")),

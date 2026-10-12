@@ -972,6 +972,27 @@ fn macros_expand_to_code() {
 }
 
 #[test]
+fn functions_on_code() {
+    // A function whose signature mentions code runs while compiling, and the
+    // code it builds is hygienic like the macro's own: its `t` is the macro's.
+    let src = "fn twice(e: expr) -> expr { return quote($e + $e) }\n\
+               fn with_tmp(e: expr) -> stmts { return quote { let t = $e } }\n\
+               fn nest(n: i64, e: expr) -> expr {\n  if n == 0 { return e }\n  return nest(n - 1, twice(e))\n}\n\
+               macro quad(x: expr) -> expr { return nest(2, x) }\n\
+               macro keep(x: expr) -> stmts { return quote {\n  $(with_tmp(x))\n  print(t * 10)\n} }\n\
+               fn main() {\n  let t = 1\n  print(quad!(t + 2))\n  keep!(t)\n  print(t)\n}";
+    assert_eq!(run(src), "12\n10\n1\n");
+    let m = check(src).unwrap();
+    assert!(m.func("twice").is_none() && m.func("nest").is_none(), "{m}");
+    // Only macros and other functions on code may use one.
+    let f = "fn f(e: expr) -> expr { return e }\n";
+    assert!(err(&format!("{f}fn main() {{ let y = f(1) }}")).contains("`f` works on code, so it only runs while compiling"));
+    assert!(err(&format!("{f}fn main() {{ let g = f }}")).contains("works on code"));
+    assert!(err(&format!("{f}fn g(x: i64) -> i64 {{ f(1)\n return x }}\nfn main() {{}}")).contains("works on code"));
+    check(&format!("{f}fn g(e: [expr]) -> expr {{ return f(e[0]) }}\nfn main() {{}}")).unwrap();
+}
+
+#[test]
 fn macro_value_parameters_and_literals() {
     let src = "const N = 3\n\
                macro sum_to(n: i64) -> expr {\n  let e = quote(0)\n  let i = 1\n  while i <= n {\n    e = quote($e + $i)\n    i = i + 1\n  }\n  return e\n}\n\
@@ -1005,7 +1026,7 @@ fn macros_in_freestanding_programs() {
 #[test]
 fn macro_errors() {
     assert!(err("fn main() { let x = quote(1) }").contains("only be used inside a macro"));
-    assert!(err("fn f(x: expr) {}\nfn main() {}").contains("only available in macros"));
+    assert!(err("fn main() { let x: expr = 1 }").contains("only available in macros and functions on code"));
     assert!(err(&format!("{POWER}fn main() {{ print(power(1, 2)) }}")).contains("call it as `power!(...)`"));
     assert!(err("fn main() { print(nope!(1)) }").contains("`nope` is not a macro"));
     assert!(err("macro m(x: expr) -> i64 { return 1 }\nfn main() {}").contains("must return `expr`"));
@@ -1321,7 +1342,7 @@ fn statement_and_item_macro_errors() {
     // Errors inside produced items point at the call.
     let e = err("macro m() -> items { return quote items { fn f() -> i64 { return true } } }\nm!()\nfn main() {}");
     assert!(e.starts_with("2:1:"), "{e}");
-    assert!(err("fn f(x: stmts) {}\nfn main() {}").contains("only available in macros"));
+    assert!(err("struct S { s: stmts }\nfn main() {}").contains("only available in macros"));
 }
 
 #[test]

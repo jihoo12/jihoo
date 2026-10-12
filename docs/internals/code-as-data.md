@@ -1,6 +1,6 @@
 # Design: code as data
 
-Status: proposal. Nothing here is implemented yet.
+Status: step 1 is done ([Functions on code](../language/macros.md#functions-on-code)); the others are proposals.
 
 ## Why
 
@@ -59,24 +59,45 @@ a test framework needs a variable number of cases (2). Every feature that is a
 library is one that the VM, the native and the freestanding profiles do not
 each have to implement.
 
+## What compile time is for
+
+Running code while compiling is not the point by itself. A program that only
+computes values at compile time, such as a table of primes, could as well be a
+separate program that writes a file, which is how Go does it (`go generate`).
+What a generator outside the compiler cannot do is see the program: where a
+pipeline is written, which local variables its functions use, what type its
+elements have. Fusing pipelines that way means parsing and type checking jihoo
+again, outside the compiler, and keeping the output in step with the source.
+
+So these steps strengthen what compile-time code can see and give back, not
+what it can compute: code it is handed, the shape of that code, the types of
+the program. The test for a feature is whether it needs to know the code or the
+types where it is used. If it does not, a script that writes a file is simpler,
+and fine.
+
 ## Steps
 
 Each step is useful on its own and shortens `examples/pipe.jh`, which serves as
 the measure. They are ordered by how much they unlock against what they cost.
 
-### 1. Compile-time functions
+### 1. Compile-time functions (done)
 
 A function whose signature mentions `expr`, `stmts` or `items` becomes a
-*compile-time function*: it may only be called from macros, from other
-compile-time functions and in `comptime` expressions, and it is never part of
-the compiled program. Today such a signature is an error
-(`crates/jihoo-sema/src/env.rs`, "only available in macros").
+*compile-time function*: it may only be used by macros and other
+compile-time functions, and it is never part of the compiled program. Such a
+signature used to be an error (`crates/jihoo-sema/src/env.rs`, "only available
+in macros").
 
-The check moves from the declaration to the call: sema already knows when it is
-analyzing code for the VM at compile time (`in_macro`), so a call from runtime
-code is the error instead. Code values stay text on the VM, as now.
+The check moved from the declaration to the use: sema knows when it analyzes
+code for the VM at compile time (`in_macro`), which such a function's body now
+is, so a call or a function value in runtime code is the error instead
+(`check_code_fn` in `crates/jihoo-sema/src/lib.rs`). Code values stay text on
+the VM.
 
-Fixes gap 1.
+Fixes gap 1. Done: `examples/pipe.jh` builds its stages with two such functions.
+Their templates are hygienic as part of the calling macro's expansion, so the
+other names they write resolve where the macro is defined, not where the
+function is.
 
 ### 2. Variable numbers of code arguments
 

@@ -107,6 +107,34 @@ pub struct FnDecl {
     pub body: Block,
 }
 
+impl FnDecl {
+    /// Whether the function only runs while compiling: a macro, or a function
+    /// whose parameters or result are code (`expr`, `stmts`, `items`).
+    pub fn is_compile_time(&self) -> bool {
+        self.is_macro || self.params.iter().any(|p| p.ty.mentions_code()) || self.ret.as_ref().is_some_and(|t| t.mentions_code())
+    }
+}
+
+impl TypeExpr {
+    /// Whether the type is or holds code, such as `expr` or `[expr]`.
+    pub fn mentions_code(&self) -> bool {
+        match &self.kind {
+            TypeExprKind::Named(n) => matches!(n.as_str(), "expr" | "stmts" | "items"),
+            TypeExprKind::Ptr(t)
+            | TypeExprKind::List(t)
+            | TypeExprKind::Array(t, _)
+            | TypeExprKind::Ref(t)
+            | TypeExprKind::Chan(t)
+            | TypeExprKind::Cell(t)
+            | TypeExprKind::Path(t, _) => t.mentions_code(),
+            TypeExprKind::Fn(params, ret) => {
+                params.iter().any(TypeExpr::mentions_code) || ret.as_ref().is_some_and(|t| t.mentions_code())
+            }
+            TypeExprKind::Generic(..) => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Param {
     pub pos: Pos,

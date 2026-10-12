@@ -406,7 +406,7 @@ impl<'p> Env<'p> {
                     return if in_macro {
                         Ok(code)
                     } else {
-                        Err(Error::new(t.pos, format!("`{name}` (a piece of code) is only available in macros")))
+                        Err(Error::new(t.pos, format!("`{name}` (a piece of code) is only available in macros and functions on code")))
                     };
                 }
                 if let Some(ty) = Type::from_name(name) {
@@ -743,6 +743,12 @@ impl<'p> Env<'p> {
         self.used_externs.borrow().contains(symbol)
     }
 
+    /// Whether `key` is a function, not a macro, that works on code and so
+    /// only runs while compiling.
+    pub fn is_code_fn(&self, key: &str) -> bool {
+        self.fn_decls.get(key).is_some_and(|&(_, d)| !d.is_macro && d.is_compile_time())
+    }
+
     /// The declaration of `key` if it is a macro.
     pub fn macro_decl(&self, key: &str) -> Option<&'p FnDecl> {
         self.fn_decls.get(key).map(|&(_, d)| d).filter(|d| d.is_macro)
@@ -766,13 +772,15 @@ impl<'p> Env<'p> {
                     }
                 }
                 let is_macro = decl.is_macro;
+                // Compile-time functions may use code types, as macros do.
+                let code_ok = decl.is_compile_time();
                 let params: Vec<Type> = decl
                     .params
                     .iter()
-                    .map(|p| self.resolve_in(&p.ty, scope, is_macro))
+                    .map(|p| self.resolve_in(&p.ty, scope, code_ok))
                     .collect::<Result<_, _>>()?;
                 let ret = match &decl.ret {
-                    Some(t) => self.resolve_in(t, scope, is_macro)?,
+                    Some(t) => self.resolve_in(t, scope, code_ok)?,
                     None => Type::Unit,
                 };
                 if is_macro {
