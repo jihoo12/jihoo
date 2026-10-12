@@ -27,7 +27,7 @@ impl Display for Module {
             let fields: Vec<String> = s.fields.iter().map(|(n, t)| format!("{n}: {}", t.jir())).collect();
             write!(f, "struct ${} {{ {} }}", types::struct_name_jir(&s.name), fields.join(", "))?;
             // The backend checks this against LLVM's data layout.
-            if let Some(l) = layout::of(&Type::Struct(s.name.clone()), &|t| self.members(t)) {
+            if let Some(l) = layout::of(&Type::Struct(s.name.clone()), self.profile, &|t| self.members(t)) {
                 write!(f, " size {} align {}", l.size, l.align)?;
             }
             writeln!(f)?;
@@ -43,7 +43,7 @@ impl Display for Module {
                 })
                 .collect();
             write!(f, "enum ${} {{ {} }}", types::struct_name_jir(&e.name), variants.join(", "))?;
-            if let Some(l) = layout::of(&Type::Enum(e.name.clone()), &|t| self.members(t)) {
+            if let Some(l) = layout::of(&Type::Enum(e.name.clone()), self.profile, &|t| self.members(t)) {
                 write!(f, " size {} align {}", l.size, l.align)?;
             }
             writeln!(f)?;

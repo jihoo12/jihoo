@@ -1,0 +1,70 @@
+// Closures that capture values, the same on the VM and natively, where each
+// closure owns the values it captured.
+import lists
+
+struct Counter {
+    name: str
+    step: fn(i64) -> i64
+}
+
+fn adder(n: i64) -> fn(i64) -> i64 {
+    return fn(x: i64) -> i64 { return x + n }
+}
+
+fn compose(f: fn(i64) -> i64, g: fn(i64) -> i64) -> fn(i64) -> i64 {
+    return fn(x: i64) -> i64 { return g(f(x)) }
+}
+
+fn sum_with(xs: [i64]) -> fn(i64) -> i64 {
+    // Captures a list: the closure gets a copy of its own.
+    return fn(k: i64) -> i64 {
+        let t = 0
+        let i = 0
+        while i < len(xs) {
+            t = t + xs[i] * k
+            i = i + 1
+        }
+        return t
+    }
+}
+
+fn apply_all(fs: [fn(i64) -> i64], x: i64) -> i64 {
+    let t = 0
+    let i = 0
+    while i < len(fs) {
+        t = t + fs[i](x)
+        i = i + 1
+    }
+    return t
+}
+
+fn twice(x: i64) -> i64 {
+    return 2 * x
+}
+
+fn entry() -> i64 {
+    let xs: [i64] = [1, 2, 3]
+    let s = sum_with(xs)
+    push(xs, 100)                      // the closure keeps its own [1, 2, 3]
+    out(s(2))                          // 12
+    let fs: [fn(i64) -> i64] = [adder(1), twice, compose(adder(3), twice), s]
+    out(apply_all(fs, 5))              // 6 + 10 + 16 + 30
+    let more = fs                      // copies every closure
+    push(more, adder(1000))
+    out(apply_all(fs, 1) * 10000 + apply_all(more, 1))
+    let c = Counter { name: "by three", step: adder(3) }
+    let d = c
+    d.step = compose(c.step, c.step)
+    out(c.step(0) * 100 + d.step(0))   // 3 and 6
+    out(len(c.name))
+    let label = "n="
+    let show = fn(n: i64) -> str { return label + to_str(n) }
+    let shown = lists.map(i64, str, [1, 22], show)
+    out(len(shown[0]) * 10 + len(shown[1]))
+    let k = 7
+    let big = lists.filter(i64, [3, 9, 12, 5], fn(x: i64) -> bool { return x > k })
+    out(len(big) * 100 + big[0])
+    let total = lists.fold(i64, i64, big, 0, fn(a: i64, x: i64) -> i64 { return a + x * k })
+    out(total)
+    return 0
+}

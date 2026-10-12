@@ -361,6 +361,9 @@ fn c_field(t: &Type, structs: &CStructs<'_>, depth: u32) -> bool {
     match t {
         Type::Struct(name) => c_struct(name, structs, depth),
         Type::Array(elem, n) => *n > 0 && c_field(elem, structs, depth),
+        // In memory, a native function value also holds what a closure
+        // captured, so it is not one of C's function pointers.
+        Type::Fn(..) => false,
         _ => c_scalar(t),
     }
 }

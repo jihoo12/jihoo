@@ -58,7 +58,8 @@ namespace {
 // payload's address. This is the C layout of `struct { u32 tag; union {...} }`.
 class Types {
  public:
-  Types(LLVMContext &ctx, const jir::Module &m, const DataLayout &dl) : ctx_(ctx), dl_(dl) {
+  Types(LLVMContext &ctx, const jir::Module &m, const DataLayout &dl)
+      : ctx_(ctx), dl_(dl), fat_fns_(m.profile == jir::Profile::Native) {
     // Create every named type first, so members can refer to any of them through pointers.
     for (const auto &s : m.structs) add(s.name, &s, nullptr);
     for (const auto &e : m.enums) add(e.name, nullptr, &e);
@@ -79,8 +80,12 @@ class Types {
       case jir::Type::Bool: return Type::getInt1Ty(ctx_);
       case jir::Type::Int: return Type::getIntNTy(ctx_, t.bits);
       case jir::Type::Float: return t.bits == 32 ? Type::getFloatTy(ctx_) : Type::getDoubleTy(ctx_);
-      case jir::Type::Ptr:
-      case jir::Type::Fn: return PointerType::get(ctx_, 0);
+      case jir::Type::Ptr: return PointerType::get(ctx_, 0);
+      // Natively `{ code, env }`: a closure's code takes the memory holding
+      // what it captured first; other functions have no env (null).
+      case jir::Type::Fn:
+        if (fat_fns_) return StructType::get(ctx_, {PointerType::get(ctx_, 0), PointerType::get(ctx_, 0)});
+        return PointerType::get(ctx_, 0);
       case jir::Type::Struct: return info(t.name).ty;
       case jir::Type::Array: return ArrayType::get(lower(*t.pointee), t.count);
       // `{ T *data, i64 len, i64 cap }`; see `Glue`. A `str` is the same
@@ -102,15 +107,47 @@ class Types {
 
   // Aggregate parameters become pointers; an aggregate result becomes a leading
   // `sret` pointer parameter and a void return.
-  FunctionType *signature(const std::vector<jir::Type> &params, const jir::Type &ret) const {
+  // With `env`, the signature of a closure's code, which takes the closure's
+  // memory after the `sret` pointer.
+  FunctionType *signature(const std::vector<jir::Type> &params, const jir::Type &ret, bool env = false) const {
     std::vector<Type *> lowered;
     Type *ptr = PointerType::get(ctx_, 0);
     if (is_agg(ret)) lowered.push_back(ptr);
+    if (env) lowered.push_back(ptr);
     for (const auto &t : params) lowered.push_back(is_agg(t) ? ptr : lower(t));
     Type *r = is_agg(ret) ? Type::getVoidTy(ctx_) : lower(ret);
     return FunctionType::get(r, lowered, false);
   }
   FunctionType *signature(const jir::Function &f) const { return signature(f.params, f.ret); }
+
+  // Whether function values are `{ code, env }` (native modules).
+  bool fat_fns() const { return fat_fns_; }
+
+  // Calls the function value `fat` (of JIR type `ft`) with `args`, which
+  // start with the `sret` pointer if the result is an aggregate: the code
+  // alone, or with the env of a closure. Gives the result, if one comes back.
+  Value *call_value(IRBuilder<> &b, Value *fat, const jir::Type &ft, std::vector<Value *> args) const {
+    const jir::Type &ret = *ft.pointee;
+    if (!fat_fns_) return b.CreateCall(signature(ft.params, ret), fat, args);
+    Value *code = b.CreateExtractValue(fat, 0), *env = b.CreateExtractValue(fat, 1);
+    Function *fn = b.GetInsertBlock()->getParent();
+    auto *plain = BasicBlock::Create(ctx_, "call.plain", fn), *with = BasicBlock::Create(ctx_, "call.env", fn);
+    auto *done = BasicBlock::Create(ctx_, "call.done", fn);
+    b.CreateCondBr(b.CreateIsNull(env), plain, with);
+    b.SetInsertPoint(plain);
+    Value *r1 = b.CreateCall(signature(ft.params, ret), code, args);
+    b.CreateBr(done);
+    b.SetInsertPoint(with);
+    args.insert(args.begin() + (is_agg(ret) ? 1 : 0), env);
+    Value *r2 = b.CreateCall(signature(ft.params, ret, true), code, args);
+    b.CreateBr(done);
+    b.SetInsertPoint(done);
+    if (r1->getType()->isVoidTy()) return nullptr;
+    PHINode *p = b.CreatePHI(r1->getType(), 2);
+    p->addIncoming(r1, plain);
+    p->addIncoming(r2, with);
+    return p;
+  }
 
   // JIR type of field `index` of struct type `t`.
   const jir::Type &field(const jir::Type &t, int64_t index) const {
@@ -145,6 +182,7 @@ class Types {
   };
   LLVMContext &ctx_;
   const DataLayout &dl_;
+  bool fat_fns_;
   std::unordered_map<std::string, Info> named_;
 
   void add(const std::string &name, const jir::StructDef *s, const jir::EnumDef *e) {
@@ -237,6 +275,7 @@ class Glue {
   bool owns(const jir::Type &t) {
     switch (t.kind) {
       case jir::Type::List: case jir::Type::Str: return true;
+      case jir::Type::Fn: return types_.fat_fns();  // a closure owns what it captured
       case jir::Type::Array: return owns(*t.pointee);
       case jir::Type::Struct: {
         auto memo = owns_.find(t.name);
@@ -257,6 +296,74 @@ class Glue {
   }
 
   uint64_t size(const jir::Type &t) const { return m_.getDataLayout().getTypeAllocSize(types_.lower(t)); }
+
+  // What a closure of function `name` needs: the layout of its env
+  // (`{ drop, clone, captured... }`) and its code, which takes the env and
+  // the function value's arguments and calls `target` with the captured
+  // values first.
+  struct ClosureCode {
+    StructType *env;
+    Function *code;
+  };
+  ClosureCode closure(const std::string &name, Function *target, const std::vector<jir::Type> &captured,
+                      const jir::Type &ft) {
+    if (auto it = closures_.find(name); it != closures_.end()) return it->second;
+    std::vector<Type *> fields{ptr(), ptr()};
+    for (const auto &t : captured) fields.push_back(types_.lower(t));
+    StructType *env_ty = StructType::get(ctx_, fields);
+    const DataLayout &dl = m_.getDataLayout();
+    uint64_t bytes = dl.getTypeAllocSize(env_ty);
+    const jir::Type &ret = *ft.pointee;
+
+    auto *code = Function::Create(types_.signature(ft.params, ret, true), GlobalValue::InternalLinkage,
+                                  "jihoo.closure." + name, m_);
+    {
+      IRBuilder<> b(BasicBlock::Create(ctx_, "entry", code));
+      bool sret = Types::is_agg(ret);
+      std::vector<Value *> args;
+      if (sret) args.push_back(code->getArg(0));
+      Value *env = code->getArg(sret ? 1 : 0);
+      // The captured values are borrowed from the env, as arguments are.
+      for (unsigned k = 0; k < captured.size(); k++) {
+        Value *at = b.CreateStructGEP(env_ty, env, k + 2);
+        args.push_back(Types::is_agg(captured[k]) ? at : b.CreateLoad(types_.lower(captured[k]), at));
+      }
+      for (unsigned i = (sret ? 2 : 1); i < code->arg_size(); i++) args.push_back(code->getArg(i));
+      Value *r = b.CreateCall(target, args);
+      if (r->getType()->isVoidTy()) b.CreateRetVoid();
+      else b.CreateRet(r);
+    }
+    auto *drop_env = Function::Create(FunctionType::get(Type::getVoidTy(ctx_), {ptr()}, false),
+                                      GlobalValue::InternalLinkage, "jihoo.closure.drop." + name, m_);
+    {
+      IRBuilder<> b(BasicBlock::Create(ctx_, "entry", drop_env));
+      Value *env = drop_env->getArg(0);
+      for (unsigned k = 0; k < captured.size(); k++)
+        if (owns(captured[k])) b.CreateCall(drop(captured[k]), {b.CreateStructGEP(env_ty, env, k + 2)});
+      b.CreateCall(free_fn(), {env});
+      b.CreateRetVoid();
+    }
+    auto *clone_env = Function::Create(FunctionType::get(ptr(), {ptr()}, false), GlobalValue::InternalLinkage,
+                                       "jihoo.closure.clone." + name, m_);
+    {
+      IRBuilder<> b(BasicBlock::Create(ctx_, "entry", clone_env));
+      Value *env = clone_env->getArg(0);
+      Value *copy = b.CreateCall(malloc_fn(), {b.getInt64(bytes)});
+      check(b, b.CreateIsNotNull(copy));
+      Align a = dl.getABITypeAlign(env_ty);
+      b.CreateMemCpy(copy, a, env, a, bytes);
+      for (unsigned k = 0; k < captured.size(); k++)
+        if (owns(captured[k]))
+          b.CreateCall(clone(captured[k]), {b.CreateStructGEP(env_ty, copy, k + 2), b.CreateStructGEP(env_ty, env, k + 2)});
+      b.CreateRet(copy);
+    }
+    drop_fns_[name] = drop_env;
+    clone_fns_[name] = clone_env;
+    return closures_[name] = {env_ty, code};
+  }
+
+  Function *closure_drop(const std::string &name) const { return drop_fns_.at(name); }
+  Function *closure_clone(const std::string &name) const { return clone_fns_.at(name); }
 
   StructType *header() const {
     Type *ptr = PointerType::get(ctx_, 0);
@@ -324,6 +431,8 @@ class Glue {
   std::unordered_map<std::string, const jir::EnumDef *> enums_;
   std::unordered_map<std::string, bool> owns_;
   std::unordered_map<std::string, Function *> drops_, clones_;
+  std::unordered_map<std::string, ClosureCode> closures_;
+  std::unordered_map<std::string, Function *> drop_fns_, clone_fns_;
 
   Type *ptr() const { return PointerType::get(ctx_, 0); }
 
@@ -409,6 +518,19 @@ class Glue {
   }
 
   void drop_body(IRBuilder<> &b, Function *fn, const jir::Type &t, Value *v) {
+    if (t.kind == jir::Type::Fn) {
+      // A closure's env starts with the functions that free and copy it.
+      Value *env = b.CreateLoad(ptr(), b.CreateStructGEP(types_.lower(t), v, 1));
+      auto *closure = BasicBlock::Create(ctx_, "closure", fn);
+      auto *done = BasicBlock::Create(ctx_, "done", fn);
+      b.CreateCondBr(b.CreateIsNotNull(env), closure, done);
+      b.SetInsertPoint(closure);
+      Value *drop_env = b.CreateLoad(ptr(), env);
+      b.CreateCall(FunctionType::get(b.getVoidTy(), {ptr()}, false), drop_env, {env});
+      b.CreateBr(done);
+      b.SetInsertPoint(done);
+      return;
+    }
     if (t.kind == jir::Type::Str) {
       // A literal's bytes are not ours to free.
       auto *heap = BasicBlock::Create(ctx_, "heap", fn);
@@ -437,6 +559,26 @@ class Glue {
 
   void clone_body(IRBuilder<> &b, Function *fn, const jir::Type &t, Value *dst, Value *src) {
     const DataLayout &dl = m_.getDataLayout();
+    if (t.kind == jir::Type::Fn) {
+      Type *fat = types_.lower(t);
+      Value *code = b.CreateLoad(ptr(), b.CreateStructGEP(fat, src, 0));
+      Value *env = b.CreateLoad(ptr(), b.CreateStructGEP(fat, src, 1));
+      auto *closure = BasicBlock::Create(ctx_, "closure", fn);
+      auto *done = BasicBlock::Create(ctx_, "done", fn);
+      BasicBlock *from = b.GetInsertBlock();
+      b.CreateCondBr(b.CreateIsNotNull(env), closure, done);
+      b.SetInsertPoint(closure);
+      Value *clone_env = b.CreateLoad(ptr(), b.CreateConstGEP1_64(ptr(), env, 1));
+      Value *copy = b.CreateCall(FunctionType::get(ptr(), {ptr()}, false), clone_env, {env});
+      b.CreateBr(done);
+      b.SetInsertPoint(done);
+      PHINode *e = b.CreatePHI(ptr(), 2);
+      e->addIncoming(env, from);
+      e->addIncoming(copy, closure);
+      b.CreateStore(code, b.CreateStructGEP(fat, dst, 0));
+      b.CreateStore(e, b.CreateStructGEP(fat, dst, 1));
+      return;
+    }
     if (t.kind == jir::Type::Str) {
       // A literal stays a literal; other bytes are copied.
       Value *data = b.CreateLoad(ptr(), b.CreateStructGEP(header(), src, 0));
@@ -637,7 +779,7 @@ class FnGen {
         c_arg(s.params[i], r, args);
         continue;
       }
-      Value *v = load(r);
+      Value *v = c_value(r);
       if (t.kind == jir::Type::Bool) v = b_.CreateZExt(v, b_.getInt32Ty());
       else if (t.kind == jir::Type::Int && t.bits < 32) v = b_.CreateIntCast(v, b_.getInt32Ty(), t.is_signed);
       else if (t.kind == jir::Type::Float && t.bits == 32) v = b_.CreateFPExt(v, b_.getDoubleTy());
@@ -648,7 +790,9 @@ class FnGen {
     CallInst *c = b_.CreateCall(fn->getFunctionType(), fn, args);
     c->setAttributes(fn->getAttributes());  // extensions, `sret` and `byval`, as C wants
     switch (s.ret.kind) {
-      case cabi::Arg::Direct: store(inst.dst, e.ret.kind == jir::Type::Unit ? unit() : c); return;
+      case cabi::Arg::Direct:
+        store(inst.dst, e.ret.kind == jir::Type::Unit ? unit() : e.ret.kind == jir::Type::Fn ? from_c(c) : c);
+        return;
       case cabi::Arg::Expand: {
         // The struct comes back in registers, as `mem`.
         Value *tmp = temp(s.ret.mem, type(inst.dst));
@@ -663,7 +807,7 @@ class FnGen {
   // Adds the C arguments that pass register `r` as `a` says to `args`.
   void c_arg(const cabi::Arg &a, uint32_t r, std::vector<Value *> &args) {
     switch (a.kind) {
-      case cabi::Arg::Direct: args.push_back(load(r)); return;
+      case cabi::Arg::Direct: args.push_back(c_value(r)); return;
       case cabi::Arg::Expand: {
         // The struct's bytes, read as the parts the registers take.
         Value *tmp = temp(a.mem, type(r));
@@ -743,7 +887,7 @@ class FnGen {
     if (ft.kind != jir::Type::Fn) fail(f_.name, "`spawn` needs a function value");
     if (ft.params.size() != inst.args.size() - 1) fail(f_.name, "wrong number of arguments to `spawn`");
     Type *ptr = PointerType::get(ctx_, 0);
-    std::vector<Type *> fields{ptr};
+    std::vector<Type *> fields{types_.lower(ft)};
     for (size_t i = 1; i < inst.args.size(); i++) {
       if (type(inst.args[i]) != ft.params[i - 1])
         fail(f_.name, "argument " + std::to_string(i) + " to `spawn` has the wrong type");
@@ -782,14 +926,15 @@ class FnGen {
     std::vector<Value *> args;
     const jir::Type &ret = *ft.pointee;
     if (Types::is_agg(ret)) args.push_back(b.CreateAlloca(types_.lower(ret)));  // the result, dropped
-    Value *callee = b.CreateLoad(ptr, b.CreateStructGEP(env_ty, env, 0));
+    Value *callee = b.CreateLoad(types_.lower(ft), b.CreateStructGEP(env_ty, env, 0));
     for (size_t i = 0; i < ft.params.size(); i++) {
       Value *field = b.CreateStructGEP(env_ty, env, unsigned(i + 1));
       args.push_back(Types::is_agg(ft.params[i]) ? field : b.CreateLoad(types_.lower(ft.params[i]), field));
     }
-    b.CreateCall(types_.signature(ft.params, ret), callee, args);
-    // The thread owns its arguments (they were moved into `env`); the callee
-    // only borrowed them.
+    types_.call_value(b, callee, ft, args);
+    // The thread owns the function value and its arguments (they were moved
+    // into `env`); the callee only borrowed them.
+    if (glue_.owns(ft)) b.CreateCall(glue_.drop(ft), {b.CreateStructGEP(env_ty, env, 0)});
     if (Types::is_agg(ret) && glue_.owns(ret)) b.CreateCall(glue_.drop(ret), {args[0]});
     for (size_t i = 0; i < ft.params.size(); i++)
       if (glue_.owns(ft.params[i]))
@@ -948,6 +1093,23 @@ class FnGen {
   }
 
   bool is_str(uint32_t r) { return type(r).kind == jir::Type::Str; }
+
+  // A function value made from C's function pointer `code`: no env.
+  Value *from_c(Value *code) {
+    if (!types_.fat_fns()) return code;
+    Value *fat = UndefValue::get(types_.lower(jir::Type::function({}, jir::Type::unit())));
+    fat = b_.CreateInsertValue(fat, code, 0);
+    return b_.CreateInsertValue(fat, ConstantPointerNull::get(PointerType::get(ctx_, 0)), 1);
+  }
+
+  // Register `r` as C takes it: a function value as C's function pointer,
+  // which cannot carry what a closure captured, so a closure stops the program.
+  Value *c_value(uint32_t r) {
+    if (!types_.fat_fns() || type(r).kind != jir::Type::Fn) return load(r);
+    Value *fat = load(r);
+    check(b_.CreateIsNull(b_.CreateExtractValue(fat, 1)), "c.no_closure");
+    return b_.CreateExtractValue(fat, 0);
+  }
 
   // Makes the string at `header` new memory for `n` bytes, not yet written;
   // gives its address.
@@ -1268,13 +1430,41 @@ class FnGen {
         auto it = fns_.find(inst.text);
         if (it == fns_.end()) fail(f_.name, "funcref to unknown function @" + inst.text);
         if (type(inst.dst).kind != jir::Type::Fn) fail(f_.name, "`funcref` result is not a function type");
-        store(inst.dst, it->second);
+        store(inst.dst, from_c(it->second));
         return;
       }
       case Op::CallIndirect: {
         const jir::Type &t = type(arg_reg(0));
         if (t.kind != jir::Type::Fn) fail(f_.name, "%" + std::to_string(arg_reg(0)) + " is not a function");
-        call(types_.signature(t.params, *t.pointee), arg(0), inst, 1, "%" + std::to_string(arg_reg(0)));
+        if (!types_.fat_fns()) {
+          call(types_.signature(t.params, *t.pointee), arg(0), inst, 1, "%" + std::to_string(arg_reg(0)));
+          return;
+        }
+        bool sret = agg(inst.dst);
+        std::vector<Value *> args;
+        if (sret) args.push_back(slot(inst.dst));
+        for (size_t i = 1; i < inst.args.size(); i++) args.push_back(agg(inst.args[i]) ? slot(inst.args[i]) : load(inst.args[i]));
+        Value *r = types_.call_value(b_, arg(0), t, args);
+        if (!sret) store(inst.dst, r);
+        return;
+      }
+      case Op::Closure: {
+        if (!types_.fat_fns()) fail(f_.name, "closures that capture values are only available in native modules");
+        auto it = fns_.find(inst.text);
+        if (it == fns_.end()) fail(f_.name, "closure of unknown function @" + inst.text);
+        std::vector<jir::Type> captured;
+        for (uint32_t r : inst.args) captured.push_back(type(r));
+        Glue::ClosureCode c = glue_.closure(inst.text, it->second, captured, type(inst.dst));
+        Value *env = b_.CreateCall(glue_.malloc_fn(), {b_.getInt64(mod_.getDataLayout().getTypeAllocSize(c.env))});
+        check(b_.CreateIsNotNull(env), "closure.alloc");
+        b_.CreateStore(glue_.closure_drop(inst.text), b_.CreateStructGEP(c.env, env, 0));
+        b_.CreateStore(glue_.closure_clone(inst.text), b_.CreateStructGEP(c.env, env, 1));
+        // The captured values move into the env.
+        for (unsigned k = 0; k < inst.args.size(); k++) write_mem(b_.CreateStructGEP(c.env, env, k + 2), inst.args[k]);
+        Value *fat = UndefValue::get(types_.lower(type(inst.dst)));
+        fat = b_.CreateInsertValue(fat, c.code, 0);
+        fat = b_.CreateInsertValue(fat, env, 1);
+        store(inst.dst, fat);
         return;
       }
       case Op::Struct: {
@@ -2071,6 +2261,7 @@ cabi::Signature c_signature(const Module &m, const Types &types, const Triple &t
     if (t.kind == jir::Type::Array || t.kind == jir::Type::Str || t.kind == jir::Type::Unit)
       throw CodegenError(what + ": " + t.str() + " cannot be passed to or from C");
     if (t.kind == jir::Type::Struct) types.struct_type(t.name);  // not an enum
+    if (t.kind == jir::Type::Fn) return PointerType::get(m.getContext(), 0);  // C's function pointer
     return types.lower(t);
   };
   std::vector<Type *> lowered;
@@ -2145,7 +2336,15 @@ void define_export(Module &m, const Types &types, const Triple &triple, const ji
     const cabi::Arg &a = s.params[i];
     Value *first = fn->getArg(s.first[i]);
     switch (a.kind) {
-      case cabi::Arg::Direct: args.push_back(first); break;
+      case cabi::Arg::Direct:
+        if (f.params[i].kind == jir::Type::Fn && types.fat_fns()) {
+          // C's function pointer, as a function value without env.
+          Value *fat = UndefValue::get(types.lower(f.params[i]));
+          fat = b.CreateInsertValue(fat, first, 0);
+          first = b.CreateInsertValue(fat, ConstantPointerNull::get(PointerType::get(ctx, 0)), 1);
+        }
+        args.push_back(first);
+        break;
       case cabi::Arg::Indirect: args.push_back(first); break;  // the callee copies it
       case cabi::Arg::Expand: {
         // The registers, stored back as the struct's bytes.
@@ -2166,7 +2365,17 @@ void define_export(Module &m, const Types &types, const Triple &triple, const ji
     b.CreateRet(b.CreateLoad(s.ret.mem, ret_tmp));
   else if (s.ret.kind == cabi::Arg::Indirect || f.ret.kind == jir::Type::Unit)
     b.CreateRetVoid();
-  else
+  else if (f.ret.kind == jir::Type::Fn && types.fat_fns()) {
+    // C cannot call a closure: one stops the program here.
+    Value *env = b.CreateExtractValue(result, 1);
+    auto *bad = BasicBlock::Create(ctx, "closure", fn), *ok = BasicBlock::Create(ctx, "ok", fn);
+    b.CreateCondBr(b.CreateIsNull(env), ok, bad);
+    b.SetInsertPoint(bad);
+    b.CreateCall(Intrinsic::getOrInsertDeclaration(&m, Intrinsic::trap));
+    b.CreateUnreachable();
+    b.SetInsertPoint(ok);
+    b.CreateRet(b.CreateExtractValue(result, 0));
+  } else
     b.CreateRet(result);
 }
 

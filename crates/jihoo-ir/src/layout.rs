@@ -10,7 +10,7 @@
 //! `u32` tag, then the payload of the largest variant, where each variant's
 //! payload is laid out like a struct of its values.
 
-use crate::Type;
+use crate::{Profile, Type};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout {
@@ -25,10 +25,10 @@ pub type Members<'a> = dyn Fn(&Type) -> Option<Vec<Vec<Type>>> + 'a;
 /// Size of the tag of an enum, which comes first.
 pub const TAG: Layout = Layout { size: 4, align: 4 };
 
-/// Layout of `t`, or `None` for types without a fixed layout (`str`, which is a GC
-/// reference, and anything containing it). The struct and enum types reachable
-/// from `t` must not contain themselves.
-pub fn of(t: &Type, members: &Members<'_>) -> Option<Layout> {
+/// Layout of `t` in `profile`, or `None` for types without a fixed layout
+/// (`str`, lists and GC references, and anything containing them). The struct
+/// and enum types reachable from `t` must not contain themselves.
+pub fn of(t: &Type, profile: Profile, members: &Members<'_>) -> Option<Layout> {
     Some(match t {
         Type::Unit => Layout { size: 0, align: 1 },
         Type::Bool => Layout { size: 1, align: 1 },
@@ -40,17 +40,19 @@ pub fn of(t: &Type, members: &Members<'_>) -> Option<Layout> {
             let bytes = u64::from(f.bits() / 8);
             Layout { size: bytes, align: bytes }
         }
+        // Natively, a function value is code and the memory a closure captured.
+        Type::Fn(..) if profile == Profile::Native => Layout { size: 16, align: 8 },
         Type::Ptr(_) | Type::Fn(..) => Layout { size: 8, align: 8 },
         Type::Str | Type::List(_) | Type::Ref(_) | Type::Chan(_) | Type::Cell(_) | Type::Expr | Type::Stmts | Type::Items => {
             return None
         }
         Type::Array(elem, n) => {
-            let e = of(elem, members)?;
+            let e = of(elem, profile, members)?;
             Layout { size: e.size.checked_mul(*n)?, align: e.align }
         }
-        Type::Struct(_) => record(&members(t)?.into_iter().next()?, members)?,
+        Type::Struct(_) => record(&members(t)?.into_iter().next()?, profile, members)?,
         Type::Enum(_) => {
-            let payload = payload(&members(t)?, members)?;
+            let payload = payload(&members(t)?, profile, members)?;
             let align = TAG.align.max(payload.align);
             let size = TAG.size.next_multiple_of(payload.align) + payload.size;
             Layout { size: size.next_multiple_of(align), align }
@@ -59,11 +61,11 @@ pub fn of(t: &Type, members: &Members<'_>) -> Option<Layout> {
 }
 
 /// Layout of a C struct with fields of the given types.
-pub fn record(fields: &[Type], members: &Members<'_>) -> Option<Layout> {
+pub fn record(fields: &[Type], profile: Profile, members: &Members<'_>) -> Option<Layout> {
     let mut size = 0u64;
     let mut align = 1u64;
     for ft in fields {
-        let f = of(ft, members)?;
+        let f = of(ft, profile, members)?;
         size = size.next_multiple_of(f.align) + f.size;
         align = align.max(f.align);
     }
@@ -72,10 +74,10 @@ pub fn record(fields: &[Type], members: &Members<'_>) -> Option<Layout> {
 
 /// Layout of the payload area of an enum with these variants: large and aligned
 /// enough for every variant's payload.
-pub fn payload(variants: &[Vec<Type>], members: &Members<'_>) -> Option<Layout> {
+pub fn payload(variants: &[Vec<Type>], profile: Profile, members: &Members<'_>) -> Option<Layout> {
     let mut l = Layout { size: 0, align: 1 };
     for v in variants {
-        let r = record(v, members)?;
+        let r = record(v, profile, members)?;
         l = Layout { size: l.size.max(r.size), align: l.align.max(r.align) };
     }
     Some(Layout { size: l.size.next_multiple_of(l.align), align: l.align })
@@ -105,14 +107,18 @@ mod tests {
             Type::Enum(_) => Some(vec![vec![], vec![Type::U8]]),
             _ => None,
         };
-        let l = |t: Type| of(&t, &fields).unwrap();
+        let l = |t: Type| of(&t, Profile::Freestanding, &fields).unwrap();
 
         assert_eq!(l(Type::Struct("A".into())), Layout { size: 24, align: 8 });
         assert_eq!(l(Type::Struct("B".into())), Layout { size: 32, align: 8 });
         assert_eq!(l(Type::Struct("E".into())), Layout { size: 0, align: 1 });
         assert_eq!(l(Type::array(Type::Int(IntTy::U16), 3)), Layout { size: 6, align: 2 });
         assert_eq!(l(Type::array(Type::Struct("A".into()), 2)), Layout { size: 48, align: 8 });
-        assert_eq!(of(&Type::Str, &fields), None);
+        assert_eq!(of(&Type::Str, Profile::Native, &fields), None);
+        // A native function value is code and env; elsewhere just code.
+        let f = Type::Fn(vec![], Box::new(Type::Unit));
+        assert_eq!(of(&f, Profile::Native, &fields), Some(Layout { size: 16, align: 8 }));
+        assert_eq!(l(f), Layout { size: 8, align: 8 });
         // Tag at 0, payload at 8 (aligned for i64), 16 bytes of payload.
         assert_eq!(l(Type::Enum("Shape".into())), Layout { size: 24, align: 8 });
         // Tag at 0, payload at 4.

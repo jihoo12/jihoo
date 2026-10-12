@@ -678,7 +678,7 @@ impl<'p> Env<'p> {
         if let Some(s) = named_by_value(t) {
             self.check_acyclic(s)?;
         }
-        layout::of(t, &|t| self.members(pos, t).ok())
+        layout::of(t, self.profile, &|t| self.members(pos, t).ok())
             .ok_or_else(|| Error::new(pos, format!("type {t} has no fixed memory layout (it contains a GC reference)")))
     }
 

@@ -380,6 +380,13 @@ Inst parse_assign(Line &l) {
     } else {
       fail(l.no, "expected a function like @name or %N");
     }
+  } else if (w == "closure") {
+    // `closure @f(%c, ...)`
+    const Tok &f = l.next("a function");
+    if (f.kind != TokKind::Global) fail(l.no, "expected a function like @name");
+    inst.op = Op::Closure;
+    inst.text = f.text;
+    inst.args = l.reg_list();
   } else if (w == "funcref") {
     const Tok &f = l.next("a function");
     if (f.kind != TokKind::Global) fail(l.no, "expected a function like @name");

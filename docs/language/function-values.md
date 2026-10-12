@@ -48,13 +48,16 @@ an `R`; `fn(A)` returns `unit`. The `-> R` must be on the same line as the
 ## In each profile
 
 Function values are plain values in every profile: on the VM an index into the
-module's functions, natively a code pointer (8 bytes, so `size_of` and struct
-layouts work, and C can call them: see [Calling C](calling-c.md#callbacks)). In
-JIR they are `funcref @f` and `call %r(...)`.
+module's functions, in freestanding code a code pointer (8 bytes), and in native
+code a code pointer and, for a closure, the values it captured (16 bytes). So
+`size_of` and struct layouts work, and C can call them: see
+[Calling C](calling-c.md#callbacks). In JIR they are `funcref @f` and
+`call %r(...)`.
 
-Closures that capture variables need the GC, so only hosted programs can store
-them; see [Closures](closures.md#comptime-closures) for how compiled code uses
-them anyway.
+Closures that capture variables can be stored and passed around in hosted and
+native programs, not in freestanding ones; see
+[Closures](closures.md#comptime-closures) for how freestanding code uses them
+anyway.
 
 ## Direct calls
 

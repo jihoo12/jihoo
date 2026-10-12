@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 10)
+# JIR — jihoo IR text format (version 11)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -40,6 +40,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 8 | `spawn` in native modules, starting a thread |
 | 9 | lists in native modules, and `clone` and `drop` |
 | 10 | `str` in native modules: string literals of type `str`, `strbyte`, `frombytes`, `to_str`, `readline` and comparisons |
+| 11 | `closure` in native modules; native function values are `{code, env}` (16 bytes) |
 
 ## Example
 
@@ -92,7 +93,7 @@ bb3:
 ## Module
 
 ```
-jir 10                               ; format version, must come first
+jir 11                               ; format version, must come first
 profile hosted|native|freestanding   ; language profile
 target x86_64|aarch64                ; the machine, 64-bit Linux
 struct ...                           ; zero or more structs
@@ -157,7 +158,7 @@ cannot be a `funcref`.
 | `expr`, `stmts`, `items` | code, inside macros; compile time only | —        |
 | `[N x T]`         | array of `N` `T`s, by value              | `[N x T]`     |
 | `[T]`             | list of any number of `T`s, by value; hosted and native | `{ptr, i64, i64}` |
-| `fn(T, ...) -> R` | function value                           | `ptr`         |
+| `fn(T, ...) -> R` | function value                           | `ptr`; native `{ptr, ptr}` |
 | `ref T`           | immutable GC reference to a `T`, hosted only | —         |
 | `chan T`          | channel of `T` values between tasks, hosted only | —     |
 | `cell T`          | shared mutable `T`, hosted only          | —             |
@@ -274,7 +275,7 @@ The result type is what the destination register must be declared as.
 | `%d = call @f(%a, ...)`         | parameter types of `@f` | return type of `@f` | call |
 | `%d = funcref @f`               |                       | `fn(P...) -> R` of `@f` | function `@f` as a value |
 | `%d = call %f(%a, ...)`         | `%f: fn(P...) -> R`, then `P...` | `R` | call a function value |
-| `%d = closure @f(%c, ...)`      | the first parameter types of `@f` | `fn(P...) -> R`, the rest of `@f`'s signature | hosted only: a function value that calls `@f` with `%c, ...` before its own arguments |
+| `%d = closure @f(%c, ...)`      | the first parameter types of `@f` | `fn(P...) -> R`, the rest of `@f`'s signature | hosted and native: a function value that calls `@f` with `%c, ...` before its own arguments; natively the captured values move into memory the value owns |
 
 `cast` allows: int → int (truncate, or sign-/zero-extend by the *source* type),
 `bool` → int (0/1), int → float and float → float (to nearest), float → int
@@ -494,14 +495,22 @@ returns `i64`, with 0 if it returns `unit`.
 
 ## Function values
 
-A function value is an index into the module's functions on the VM and a code
-pointer natively (8 bytes, aligned to 8). There is no null function value, and
-function values have no equality. A call through a function value uses the same
+A function value is an index into the module's functions on the VM, a code
+pointer in freestanding modules (8 bytes, aligned to 8), and `{ code, env }`
+in native ones (16 bytes). There is no null function value, and function
+values have no equality. A call through a function value uses the same
 calling convention as a direct call, including the aggregate rules below.
 
-A closure (hosted only) is a function value too: on the VM, a GC object holding
-the function and the captured values, which a call passes as the first
-arguments. The frontend names the functions it lifts out of anonymous functions
+A closure is a function value too, which passes the values it captured as
+the first arguments. On the VM it is a GC object holding the function and the
+captured values. Natively, `env` points to memory from `malloc` holding a
+function that frees it, one that copies it, and the captured values; `code`
+takes `env` after the `sret` pointer, before the arguments. A function value
+that is not a closure has a null `env`, and a call through a function value
+tests which it is. Function values own memory as lists do (see
+[Ownership](#ownership-native-lists)), but may be read and written through
+pointers: one read through a pointer is borrowed from that memory. C gets
+`code` alone; passing it a closure traps. The frontend names the functions it lifts out of anonymous functions
 `@fn.N`; `fn` is a keyword, so these never clash with user names.
 
 ## Native ABI

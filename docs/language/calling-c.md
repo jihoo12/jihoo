@@ -146,6 +146,12 @@ compiler, `cc` unless `JIHOO_CC` names another ([Command line](../reference/comm
 - A function value handed to C (a callback) takes and returns scalars only:
   it uses jihoo's own calling convention, which passes structs by pointer.
   Export a function to pass structs by value to it from C.
+- C calls a function pointer and nothing else, so it cannot call a closure
+  that captured values: passing one written right there is an error, and
+  passing one from a variable stops the program. Pass the values another
+  way, such as the `void *` argument most C callbacks get.
+- A struct with a function value in it cannot go to C by value: natively a
+  function value also holds what a closure captured.
 - `print` and `libc.printf` write to the same buffered `stdout`, so they can be
   mixed.
 

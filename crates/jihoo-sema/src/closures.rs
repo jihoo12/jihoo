@@ -8,8 +8,10 @@
 //!
 //! - none: the value is a plain `funcref`, in both profiles;
 //! - some: `closure @fn.N(%captured...)` builds a function value that passes
-//!   the captured values before its own arguments. Hosted only, since the
-//!   captured values live on the GC heap.
+//!   the captured values before its own arguments. On the VM the captured
+//!   values live on the GC heap; natively in memory of the closure's own,
+//!   which the ownership pass frees like a list's. Freestanding code has no
+//!   allocator, so no closures.
 //!
 //! Values are captured when the closure is made (by value, like every other
 //! copy in jihoo), and captured variables cannot be assigned inside it.
@@ -44,8 +46,8 @@ impl FnCx<'_> {
         self.closure_value(pos, &what, lifted.func, lifted.captured, lifted.ty)
     }
 
-    /// A closure value: hosted only, since the captured values go to the GC
-    /// heap. `what` describes it in errors.
+    /// A closure value: the captured values go to the GC heap, or natively to
+    /// memory from `malloc`. `what` describes it in errors.
     pub(crate) fn closure_value(
         &mut self,
         pos: Pos,
@@ -54,10 +56,10 @@ impl FnCx<'_> {
         captures: Vec<Reg>,
         ty: Type,
     ) -> Result<Reg, Error> {
-        if self.profile() != Profile::Hosted && !self.in_macro {
+        if self.profile() == Profile::Freestanding && !self.in_macro {
             let msg = format!(
-                "{what}, so it is a closure; storing or passing a closure as a value needs the GC, which only \
-                 hosted mode has (in freestanding code, pass it to a `comptime` parameter, or pass the values as arguments)"
+                "{what}, so it is a closure; storing or passing a closure as a value needs an allocator, which \
+                 freestanding programs do not have (pass it to a `comptime` parameter, or pass the values as arguments)"
             );
             return Err(Error::new(pos, msg));
         }

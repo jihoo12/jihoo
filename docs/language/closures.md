@@ -79,8 +79,10 @@ are the captured values (`crates/jihoo-sema/src/closures.rs`).
 - One that captures nothing is a plain `funcref`, which works everywhere,
   including freestanding code and compile-time constants.
 - One that captures is `closure @fn.N(%captured...)`: a GC object on the VM,
-  holding the function and the captured values. So it is only a run-time value
-  in hosted programs.
+  holding the function and the captured values. Natively, the captured values
+  move into memory the closure owns, which is freed when the closure is, like
+  a [list](lists.md#lists-in-native-programs): copying a closure copies them.
+  Freestanding programs have no allocator, so no closure values.
 
 ## Comptime closures
 
@@ -114,7 +116,8 @@ fn _start() -> i64 {
 - Inside the instance, the closure can be called, passed on to another
   `comptime` parameter, or captured by another closure that is passed on.
   Using it as a value (storing or returning it) makes a closure value, which
-  needs the GC: fine in hosted code, an error in compiled code.
+  needs memory of its own: fine in hosted and native code, an error in
+  freestanding code.
 - Each closure written in the source is its own instance, so a function called
   with many different closures is compiled many times.
 

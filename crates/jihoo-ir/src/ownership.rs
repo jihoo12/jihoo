@@ -113,8 +113,9 @@ fn cloned_params(f: &Function, owning: &mut Owning) -> Vec<usize> {
         .collect()
 }
 
-/// Whether values of a type own memory: lists and strings, and structs, arrays
-/// and enums that hold one by value.
+/// Whether values of a type own memory: lists, strings and function values
+/// (a closure owns its captured values), and structs, arrays and enums that
+/// hold one by value.
 pub struct Owning {
     members: HashMap<String, Vec<Type>>,
     memo: HashMap<String, bool>,
@@ -134,7 +135,8 @@ impl Owning {
 
     pub fn owns(&mut self, t: &Type) -> bool {
         match t {
-            Type::List(_) | Type::Str => true,
+            // A function value may be a closure, which owns what it captured.
+            Type::List(_) | Type::Str | Type::Fn(..) => true,
             Type::Array(elem, _) => self.owns(elem),
             Type::Struct(name) | Type::Enum(name) => {
                 if let Some(&r) = self.memo.get(name) {
@@ -179,7 +181,9 @@ fn consumed(inst: &mut Inst) -> Vec<&mut Reg> {
             vec![value]
         }
         Ref { src, .. } => vec![src],
-        Spawn { args, .. } | Closure { captures: args, .. } => args.iter_mut().collect(),
+        // A thread owns the function value it runs and its arguments.
+        Spawn { callee, args } => std::iter::once(callee).chain(args.iter_mut()).collect(),
+        Closure { captures: args, .. } => args.iter_mut().collect(),
         _ => vec![],
     }
 }
@@ -191,7 +195,7 @@ fn borrowed(inst: &Inst) -> Vec<Reg> {
         Const { .. } | FConst { .. } | Unit { .. } | Str { .. } | FuncRef { .. } | ReadLine { .. } | Trap | Fence => {
             vec![]
         }
-        Copy { .. } | Struct { .. } | Variant { .. } | Array { .. } | Ref { .. } | Closure { .. } => vec![],
+        Copy { .. } | Struct { .. } | Variant { .. } | Array { .. } | Ref { .. } | Closure { .. } | Spawn { .. } => vec![],
         Clone { src, .. }
         | Drop { src }
         | Unary { src, .. }
@@ -224,7 +228,6 @@ fn borrowed(inst: &Inst) -> Vec<Reg> {
         AtomicCas { ptr, expected, new, .. } => vec![*ptr, *expected, *new],
         Slice { src, lo, hi, .. } => vec![*src, *lo, *hi],
         Store { ptr, .. } | Send { chan: ptr, .. } => vec![*ptr],
-        Spawn { callee, .. } => vec![*callee],
         GetPath { src, path, .. } | CellGet { cell: src, path, .. } => [*src].into_iter().chain(path_regs(path)).collect(),
         CellSet { cell, path, .. } => [*cell].into_iter().chain(path_regs(path)).collect(),
         Push { root, path, .. } | Pop { root, path, .. } => [*root].into_iter().chain(path_regs(path)).collect(),
@@ -472,8 +475,15 @@ fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
         b.insts = insts;
     }
     // Neither borrowed parameters nor views are ever freed: their memory is
-    // someone else's. Consuming one copies it.
-    let borrowed_params: HashSet<Reg> = borrowed_params.into_iter().chain(roots.keys().copied()).collect();
+    // someone else's. Consuming one copies it. A value read through a pointer
+    // (a function value; nothing else that owns memory can be) is borrowed
+    // from that memory too.
+    let loaded = f.blocks.iter().flat_map(|b| &b.insts).filter_map(|i| match i {
+        Inst::Load { dst, .. } if tracked.contains(dst) => Some(*dst),
+        _ => None,
+    });
+    let borrowed_params: HashSet<Reg> =
+        borrowed_params.into_iter().chain(roots.keys().copied()).chain(loaded.collect::<Vec<_>>()).collect();
 
     let owned: HashSet<Reg> = tracked.difference(&borrowed_params).copied().collect();
     let live_in = liveness(f, &tracked, &roots);

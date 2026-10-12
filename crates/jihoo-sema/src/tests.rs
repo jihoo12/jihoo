@@ -771,7 +771,16 @@ fn closures() {
     let e = err("fn g(f: fn(i64) -> i64) {}\nfn main() { g(fn(x) { print(x) }) }");
     assert!(e.contains("missing `return`"), "{e}");
     let e = err(&fs("fn f(k: i64) -> i64 { let g = fn(x: i64) -> i64 { return x + k }\n return g(1) }"));
-    assert!(e.contains("captures `k`") && e.contains("only hosted mode has"), "{e}");
+    assert!(e.contains("captures `k`") && e.contains("freestanding programs do not have"), "{e}");
+    // Natively a closure owns what it captured, as a list owns its elements.
+    let m = check(&native("fn adder(n: [i64]) -> fn(i64) -> i64 { return fn(x: i64) -> i64 { return x + len(n) } }\n\
+                           fn g() -> i64 { let f = adder([1, 2])\n return f(1) }"))
+    .unwrap();
+    assert!(m.to_string().contains(" = closure @fn."), "{m}");
+    // C calls function pointers, which cannot carry captured values.
+    let e = err(&native("extern fn qsort(b: *u8, n: u64, s: u64, cmp: fn(*u8, *u8) -> i32)\n\
+                         fn g(k: i32) { qsort(\"\", 0, 1, fn(a: *u8, b: *u8) -> i32 { return k }) }"));
+    assert!(e.contains("C cannot call a closure"), "{e}");
     let e = err("fn adder(n: i64) -> fn(i64) -> i64 { return fn(x) { return x + n } }\nconst A = adder(1)\nfn main() {}");
     assert!(e.contains("closure that captures values cannot be computed at compile time"), "{e}");
     assert!(err("fn main() { let f = fn(x: i64) }").contains("expected the body of the anonymous function"));
@@ -1299,7 +1308,7 @@ fn native_programs_call_c() {
     assert!(text.contains("call @abs("), "{text}");
     // Pointers, `&`, syscall and asm work as in freestanding code, and so do lists and `str`.
     check(&native("fn f() -> i64 { let x = 1\n let p = &x\n return *p + syscall(39) }")).unwrap();
-    check(&native("fn f(s: str) -> i64 { return len(s) }")).unwrap();
+    check(&native("fn f(s: str) -> i64 { return len(s) + syscall(1, 1, \"hi\", 2) }")).unwrap();
     // `print` works natively, where text is a C string (`*u8`); not freestanding.
     check(&native("fn f(p: *u8, q: *i32) { print(1)\n print(\"hi\")\n print(p)\n print(1.5)\n print(q != q) }")).unwrap();
     assert!(err(&native("fn f(q: *i32) { print(q) }")).contains("cannot print a value of type *i32"));
@@ -1423,7 +1432,7 @@ fn float_builtins() {
 #[test]
 fn structs_cross_into_c_by_value() {
     // Structs of scalars, arrays and structs go by value, to C and back.
-    let src = "struct P { x: f64, y: f64 }\nstruct Q { p: P, tag: [u8; 3], next: *Q, f: fn(i32) -> i32 }\n\
+    let src = "struct P { x: f64, y: f64 }\nstruct Q { p: P, tag: [u8; 3], next: *Q }\n\
                extern fn move(p: P, q: Q) -> Q\n\
                export fn mid(a: P, b: P) -> P { return P { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } }\n\
                fn f() { let p = mid(P { x: 1, y: 2 }, P { x: 3, y: 4 }) }";
@@ -1431,6 +1440,9 @@ fn structs_cross_into_c_by_value() {
     assert_eq!(m.func("mid").unwrap().export.as_deref(), Some("mid"));
     assert!(m.to_string().contains("fn @mid($P, $P) -> $P export @mid {"), "{m}");
     check(&fs("struct P { x: i32 }\nexport fn get(p: P) -> i32 { return p.x }")).unwrap();
+    // A native function value in a struct is code and env, not C's function pointer.
+    let e = err(&native("struct S { f: fn(i32) -> i32 }\nextern fn f(s: S)"));
+    assert!(e.contains("S cannot be passed to or from C"), "{e}");
     // C has no enums or empty structs, and through `...` only scalars go.
     let e = err(&native("enum E { A, B }\nstruct S { e: E }\nextern fn f(s: S)"));
     assert!(e.contains("S cannot be passed to or from C"), "{e}");

@@ -1367,8 +1367,11 @@ impl<'a> FnCx<'a> {
                     return Err(Error::new(pos, "`syscall` takes 1 to 7 arguments"));
                 }
                 let mut regs = Vec::with_capacity(args.len());
+                // A string literal is a C string here, as for C's variable arguments.
+                let c_string = Type::ptr(Type::U8);
                 for a in args {
-                    let r = self.expr(a, None)?;
+                    let hint = matches!(a.kind, ExprKind::Str(_)).then_some(&c_string);
+                    let r = self.expr(a, hint)?;
                     if !self.ty(r).is_syscall_arg() {
                         return Err(Error::new(
                             a.pos,
@@ -1452,6 +1455,21 @@ impl<'a> FnCx<'a> {
                 } else {
                     self.call_args(pos, &format!("`{name}`"), &sig.params, args)?
                 };
+                // C calls a function pointer without the values a closure
+                // captured: a closure made right here is an error (one in a
+                // variable stops the program when passed).
+                if self.env.extern_decl(&key).is_some() {
+                    for (a, &r) in args.iter().zip(&regs) {
+                        let made_here = self.blocks[self.cur.0 as usize]
+                            .insts
+                            .iter()
+                            .any(|i| matches!(i, Inst::Closure { dst, .. } if *dst == r));
+                        if made_here {
+                            let msg = "C cannot call a closure: this function captures values; pass them as arguments";
+                            return Err(Error::new(a.pos, msg));
+                        }
+                    }
+                }
                 let ret = sig.ret.clone();
                 let func = self.env.ir_name(&key);
                 Ok(self.emit_to(ret, |dst| Inst::Call { dst, func, args: regs }))

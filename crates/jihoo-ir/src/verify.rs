@@ -323,8 +323,8 @@ impl Cx<'_> {
                         expect(dst, &Type::Fn(params.to_vec(), Box::new(ret.clone())))
                     }
                     Inst::Closure { dst, func, captures } => {
-                        if profile != Profile::Hosted {
-                            return Err(at("closures that capture values need the GC; hosted only".into()));
+                        if profile == Profile::Freestanding {
+                            return Err(at("closures that capture values need an allocator; not freestanding".into()));
                         }
                         let callee = self
                             .funcs
