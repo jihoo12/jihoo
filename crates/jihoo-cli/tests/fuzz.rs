@@ -26,7 +26,7 @@
 //! valgrind's path, any leak or invalid access fails the seed (memory C threads
 //! keep until they finish is not a leak).
 //!
-//!   JIHOO_FUZZ_LIST_SEEDS=500 cargo test --release --test fuzz lists
+//!   JIHOO_FUZZ_LIST_SEEDS=500 cargo test --release --test fuzz list
 //!
 //! A failing seed's program is saved, wrapped for the VM, to a file the failure
 //! names. Without `JIHOO_LLC` the programs only run on the VM, which still

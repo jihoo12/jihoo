@@ -1,0 +1,66 @@
+// Returning a part read out of a value: the part is copied out and the value
+// it was read from is freed at the `ret`.
+
+struct Bag {
+    name: i64
+    items: [i64]
+}
+
+struct Shelf {
+    bags: [Bag]
+}
+
+// A field of a value of the function's own.
+fn items() -> [i64] {
+    let b = Bag { name: 1, items: [1, 2, 3] }
+    return b.items
+}
+
+// An element of a list of the function's own.
+fn first_row() -> [i64] {
+    let g: [[i64]] = [[4, 5], [6]]
+    return g[0]
+}
+
+// A part several steps in.
+fn deep() -> [i64] {
+    let s = Shelf { bags: [Bag { name: 2, items: [7] }, Bag { name: 3, items: [8, 9] }] }
+    return s.bags[1].items
+}
+
+// A part of a borrowed parameter: copied, and the parameter is left alone.
+fn items_of(b: Bag) -> [i64] {
+    return b.items
+}
+
+// Different parts on different paths.
+fn pick(k: i64) -> [i64] {
+    let g: [[i64]] = [[1], [2, 2], [3, 3, 3]]
+    if k == 0 {
+        return g[2]
+    }
+    let b = Bag { name: k, items: [k] }
+    if k == 1 {
+        return b.items
+    }
+    return g[1]
+}
+
+fn entry() -> i64 {
+    let a = items()
+    push(a, 9)
+    out(len(a))                 // 4
+    out(a[0] + a[3])            // 10
+    out(first_row()[1])         // 5
+    let d = deep()
+    out(d[0] + d[1])            // 17
+    let b = Bag { name: 4, items: [5, 6] }
+    let c = items_of(b)
+    push(c, 1)
+    out(len(b.items))           // 2
+    out(len(c))                 // 3
+    out(len(pick(0)))           // 3
+    out(pick(1)[0])             // 1
+    out(len(pick(2)))           // 2
+    return 0
+}
