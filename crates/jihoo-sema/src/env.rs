@@ -27,6 +27,8 @@ pub(crate) struct Sig {
 }
 
 pub(crate) type Fields = Rc<Vec<(String, Type)>>;
+/// What an impl is of: the key of its trait, and its type.
+pub(crate) type ImplHead = (String, Type);
 /// The variants of an enum: names and payload types.
 pub(crate) type Variants = Rc<Vec<(String, Vec<Type>)>>;
 
@@ -122,6 +124,16 @@ pub(crate) struct Env<'p> {
     struct_decls: HashMap<String, (usize, &'p StructDecl)>,
     fn_decls: HashMap<String, (usize, &'p FnDecl)>,
     const_decls: HashMap<String, (usize, &'p ConstDecl)>,
+    /// Traits by key, like the declarations above.
+    pub(crate) trait_decls: HashMap<String, (usize, &'p TraitDecl)>,
+    /// Every impl, numbered in order, with its module. Its functions are in
+    /// `fn_decls` as `impl.N.name`, and a trait's default bodies as
+    /// `trait.Name.name`: those keys are in `self_fns`, functions compiled per
+    /// type of `Self` as generic functions are (`traits.rs`).
+    pub(crate) impls: Vec<(usize, &'p ImplDecl)>,
+    pub(crate) self_fns: HashSet<String>,
+    /// The trait and type of each impl, by number, once asked for.
+    pub(crate) impl_heads: RefCell<HashMap<usize, Result<ImplHead, Error>>>,
     structs: Memo<Fields>,
     enums: Memo<Variants>,
     sigs: Memo<Rc<Sig>>,
@@ -185,6 +197,10 @@ impl<'p> Env<'p> {
             struct_decls: HashMap::new(),
             fn_decls: HashMap::new(),
             const_decls: HashMap::new(),
+            trait_decls: HashMap::new(),
+            impls: Vec::new(),
+            self_fns: HashSet::new(),
+            impl_heads: RefCell::new(HashMap::new()),
             structs: Memo::new(),
             enums: Memo::new(),
             sigs: Memo::new(),
@@ -245,13 +261,43 @@ impl<'p> Env<'p> {
                     errors.push(Error::new(c.pos, format!("constant `{}` is defined twice", c.name)));
                 }
             }
+            for t in &prog.traits {
+                let key = env.item_key(m, &t.name);
+                if Type::from_name(&t.name).is_some() {
+                    errors.push(Error::new(t.pos, format!("`{}` is a builtin type name", t.name)));
+                } else if env.struct_decls.contains_key(&key) || env.trait_decls.insert(key, (m, t)).is_some() {
+                    errors.push(Error::new(t.pos, format!("`{}` is defined twice", t.name)));
+                }
+                for (i, f) in t.funcs.iter().enumerate() {
+                    if t.funcs[..i].iter().any(|g| g.decl.name == f.decl.name) {
+                        errors.push(Error::new(f.decl.pos, format!("function `{}` is defined twice in `{}`", f.decl.name, t.name)));
+                    } else if f.has_body {
+                        let key = env.item_key(m, &format!("trait.{}.{}", t.name, f.decl.name));
+                        env.self_fns.insert(key.clone());
+                        env.fn_decls.insert(key, (m, &f.decl));
+                    }
+                }
+            }
+            for i in &prog.impls {
+                let n = env.impls.len();
+                env.impls.push((m, i));
+                for (j, f) in i.funcs.iter().enumerate() {
+                    if i.funcs[..j].iter().any(|g| g.name == f.name) {
+                        errors.push(Error::new(f.pos, format!("function `{}` is defined twice in this impl", f.name)));
+                    } else {
+                        let key = env.item_key(m, &format!("impl.{n}.{}", f.name));
+                        env.self_fns.insert(key.clone());
+                        env.fn_decls.insert(key, (m, f));
+                    }
+                }
+            }
         }
         (env, errors)
     }
 
     // ---- modules ----
 
-    fn item_key(&self, module: usize, item: &str) -> String {
+    pub(crate) fn item_key(&self, module: usize, item: &str) -> String {
         let prefix = &self.modules[module].name;
         if prefix.is_empty() {
             item.to_string()
@@ -304,7 +350,32 @@ impl<'p> Env<'p> {
         self.fn_decls.contains_key(&key)
             || self.struct_decls.contains_key(&key)
             || self.const_decls.contains_key(&key)
+            || self.trait_decls.contains_key(&key)
             || self.is_alias(module, name)
+    }
+
+    /// Function `key`: its module and declaration.
+    pub(crate) fn fn_decl(&self, key: &str) -> Option<(usize, &'p FnDecl)> {
+        self.fn_decls.get(key).copied()
+    }
+
+    /// The comptime parameters of every function and type, with their modules.
+    pub(crate) fn comptime_params(&self) -> Vec<(usize, &'p Param)> {
+        let fns = self.fn_decls.values().flat_map(|&(m, d)| d.params.iter().map(move |p| (m, p)));
+        let types = self.struct_decls.values().flat_map(|&(m, d)| d.params.iter().map(move |p| (m, p)));
+        let mut params: Vec<(usize, &Param)> = fns.chain(types).filter(|(_, p)| p.comptime).collect();
+        params.sort_by_key(|(m, p)| (*m, p.pos.file, p.pos.line, p.pos.col));
+        params
+    }
+
+    /// The modules `module` imports.
+    pub(crate) fn imports_of(&self, module: usize) -> impl Iterator<Item = usize> + '_ {
+        self.modules[module].imports.values().copied()
+    }
+
+    /// The prelude module, if there is one.
+    pub(crate) fn prelude_module(&self) -> Option<usize> {
+        self.prelude
     }
 
     /// The scope at the top level of `module`.
@@ -325,7 +396,8 @@ impl<'p> Env<'p> {
             .get(key)
             .map(|&(m, d)| (m, d.is_pub))
             .or_else(|| self.struct_decls.get(key).map(|&(m, d)| (m, d.is_pub)))
-            .or_else(|| self.const_decls.get(key).map(|&(m, d)| (m, d.is_pub)));
+            .or_else(|| self.const_decls.get(key).map(|&(m, d)| (m, d.is_pub)))
+            .or_else(|| self.trait_decls.get(key).map(|&(m, d)| (m, d.is_pub)));
         match item {
             Some((m, false)) if m != from => {
                 let module = &self.modules[m].name;
@@ -431,6 +503,7 @@ impl<'p> Env<'p> {
                     return Err(Error::new(t.pos, msg));
                 }
                 let bindings = self.bind(name, dm, decl.params.iter().zip(args), b, &mut |_, _| Ok(None))?;
+                self.check_bounds(t.pos, name, dm, &decl.params, &bindings)?;
                 Ok(named(decl, self.struct_instance(&key, bindings)))
             }
             TypeExprKind::Named(name) => {
@@ -479,6 +552,9 @@ impl<'p> Env<'p> {
                     Ok(named(decl, key))
                 } else if name.contains('.') && self.key(b.module, name).is_none() {
                     Err(self.key_or_err(t.pos, b, name).unwrap_err())
+                } else if self.trait_key(b.module, name).is_some() {
+                    let msg = format!("`{name}` is a trait, not a type; take a type that implements it as `comptime T: {name}`");
+                    Err(Error::new(t.pos, msg))
                 } else if name == "ptr" {
                     Err(Error::new(t.pos, "unknown type `ptr`; byte pointers are written `*u8`"))
                 } else {
@@ -788,7 +864,7 @@ impl<'p> Env<'p> {
 
     /// The declaration of function `key` if it is generic.
     pub fn generic(&self, key: &str) -> Option<&'p FnDecl> {
-        self.fn_decls.get(key).map(|&(_, d)| d).filter(|d| !d.is_macro && d.params.iter().any(|p| p.comptime))
+        self.fn_decls.get(key).map(|&(_, d)| d).filter(|d| !d.is_macro && (d.params.iter().any(|p| p.comptime) || self.self_fns.contains(key)))
     }
 
     /// The declaration of `key` if it is an extern (C) function. Its JIR name is

@@ -276,6 +276,8 @@ impl Parser {
         let mut consts = Vec::new();
         let mut funcs = Vec::new();
         let mut macro_calls = Vec::new();
+        let mut traits = Vec::new();
+        let mut impls = Vec::new();
         loop {
             match self.peek() {
                 Tok::Eof if !in_braces => break,
@@ -300,22 +302,25 @@ impl Parser {
                 Tok::Fn | Tok::Macro | Tok::Extern | Tok::Export => funcs.push(self.fn_decl(false)?),
                 Tok::Struct | Tok::Enum => structs.push(self.struct_decl(false)?),
                 Tok::Const => consts.push(self.const_decl(false)?),
+                Tok::Trait => traits.push(self.trait_decl(false)?),
+                Tok::Impl => impls.push(self.impl_decl()?),
                 Tok::Pub => {
                     self.bump();
                     match self.peek() {
                         Tok::Fn | Tok::Macro | Tok::Extern | Tok::Export => funcs.push(self.fn_decl(true)?),
                         Tok::Struct | Tok::Enum => structs.push(self.struct_decl(true)?),
                         Tok::Const => consts.push(self.const_decl(true)?),
-                        _ => return Err(self.unexpected("`fn`, `extern`, `export`, `macro`, `struct`, `enum` or `const` after `pub`")),
+                        Tok::Trait => traits.push(self.trait_decl(true)?),
+                        _ => return Err(self.unexpected("`fn`, `extern`, `export`, `macro`, `struct`, `enum`, `trait` or `const` after `pub`")),
                     }
                 }
                 Tok::InnerAttr(_) => {
                     return Err(Error::new(self.pos(), "`#![...]` must come before any item"))
                 }
-                _ => return Err(self.unexpected("`fn`, `extern`, `export`, `macro`, `struct`, `enum`, `const` or `import`")),
+                _ => return Err(self.unexpected("`fn`, `extern`, `export`, `macro`, `struct`, `enum`, `trait`, `impl`, `const` or `import`")),
             }
         }
-        Ok(Program { attrs: vec![], imports, structs, consts, funcs, macro_calls })
+        Ok(Program { attrs: vec![], imports, structs, consts, funcs, traits, impls, macro_calls })
     }
 
     fn item_macro_follows(&self) -> bool {
@@ -374,7 +379,7 @@ impl Parser {
                 self.mark();
                 self.expect(&Tok::Colon, "`:` and a parameter type")?;
                 let ty = self.type_expr()?;
-                params.push(Param { pos: ppos, comptime: true, name: pname, ty });
+                params.push(Param { pos: ppos, comptime: true, name: pname, ty, bounds: vec![] });
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
@@ -412,6 +417,12 @@ impl Parser {
     /// `fn`, `macro`, `extern fn` (a C function: no body, and `...` may end its
     /// parameters) or `export fn` (a function C may call).
     fn fn_decl(&mut self, is_pub: bool) -> PResult<FnDecl> {
+        Ok(self.fn_decl_with(is_pub, false)?.0)
+    }
+
+    /// A function, whose body may be left out if `body_optional` (in a trait);
+    /// also says whether it has one.
+    fn fn_decl_with(&mut self, is_pub: bool, body_optional: bool) -> PResult<(FnDecl, bool)> {
         let is_macro = *self.peek() == Tok::Macro;
         let is_extern = *self.peek() == Tok::Extern;
         let is_export = *self.peek() == Tok::Export;
@@ -439,19 +450,61 @@ impl Parser {
             self.mark();
             self.expect(&Tok::Colon, "`:` and a parameter type")?;
             let ty = self.type_expr()?;
-            params.push(Param { pos: ppos, comptime, name: pname, ty });
+            let mut bounds = Vec::new();
+            while comptime && self.eat(&Tok::Plus) {
+                bounds.push(self.type_expr()?);
+            }
+            params.push(Param { pos: ppos, comptime, name: pname, ty, bounds });
             if !self.eat(&Tok::Comma) {
                 break;
             }
         }
         self.expect(&Tok::RParen, "`)`")?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
-        if is_extern {
+        if is_extern || (body_optional && *self.peek() != Tok::LBrace) {
             let body = Block { stmts: vec![], end: pos };
-            return Ok(FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, body });
+            return Ok((FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, body }, false));
         }
         let body = self.block()?;
-        Ok(FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, body })
+        Ok((FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, body }, true))
+    }
+
+    /// `trait Name { fn f(a: Self) -> T ... }`, where a function may have a
+    /// body, its default.
+    fn trait_decl(&mut self, is_pub: bool) -> PResult<TraitDecl> {
+        let pos = self.expect(&Tok::Trait, "`trait`")?.pos;
+        let (_, name) = self.ident("trait name")?;
+        self.expect(&Tok::LBrace, "`{`")?;
+        let mut funcs = Vec::new();
+        while !self.eat(&Tok::RBrace) {
+            if *self.peek() != Tok::Fn {
+                return Err(self.unexpected("`fn` or `}` in a trait"));
+            }
+            let (decl, has_body) = self.fn_decl_with(false, true)?;
+            funcs.push(TraitFn { decl, has_body });
+        }
+        Ok(TraitDecl { pos, is_pub, name, funcs })
+    }
+
+    /// `impl Trait for Type { fn ... }`.
+    fn impl_decl(&mut self) -> PResult<ImplDecl> {
+        let pos = self.expect(&Tok::Impl, "`impl`")?.pos;
+        let mut trait_name = self.ident("trait name")?.1;
+        self.mark();
+        if self.eat(&Tok::Dot) {
+            trait_name = format!("{trait_name}.{}", self.ident("trait name")?.1);
+        }
+        self.expect(&Tok::For, "`for` and a type")?;
+        let ty = self.type_expr()?;
+        self.expect(&Tok::LBrace, "`{`")?;
+        let mut funcs = Vec::new();
+        while !self.eat(&Tok::RBrace) {
+            if *self.peek() != Tok::Fn {
+                return Err(self.unexpected("`fn` or `}` in an impl"));
+            }
+            funcs.push(self.fn_decl(false)?);
+        }
+        Ok(ImplDecl { pos, trait_name, ty, funcs })
     }
 
     fn type_expr(&mut self) -> PResult<TypeExpr> {
@@ -1470,6 +1523,8 @@ fn punct(t: &Tok) -> &'static str {
         Tok::Pub => "pub",
         Tok::Extern => "extern",
         Tok::Export => "export",
+        Tok::Trait => "trait",
+        Tok::Impl => "impl",
         Tok::Ellipsis => "...",
         Tok::DotDot => "..",
         Tok::Dollar => "$",

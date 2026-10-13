@@ -43,6 +43,8 @@ pub enum Tok {
     Pub,
     Extern,
     Export,
+    Trait,
+    Impl,
 
     LParen,
     RParen,
@@ -435,6 +437,8 @@ impl<'a> Lexer<'a> {
                     "true" => Tok::True,
                     "false" => Tok::False,
                     "struct" => Tok::Struct,
+                    "trait" => Tok::Trait,
+                    "impl" => Tok::Impl,
                     "enum" => Tok::Enum,
                     "match" => Tok::Match,
                     "ref" => Tok::Ref,

@@ -9,7 +9,7 @@ use jihoo_ir::{Inst, Reg, Type};
 use jihoo_syntax::ast::*;
 use jihoo_syntax::{Error, Pos};
 
-use crate::generic::{is_type_param, Binding};
+use crate::generic::Binding;
 use crate::FnCx;
 
 /// An enum named in an expression.
@@ -149,7 +149,7 @@ impl FnCx<'_> {
         for p in &decl.params {
             let found = v.fields.iter().zip(regs).find(|(t, _)| matches!(&t.kind, TypeExprKind::Named(n) if *n == p.name));
             match found {
-                Some((_, r)) if is_type_param(p) => args.push(self.ty(*r).clone()),
+                Some((_, r)) if self.env.is_type_param(self.env.type_decl(key).unwrap().0, p) => args.push(self.ty(*r).clone()),
                 _ => return Ok(Err(p.name.clone())),
             }
         }

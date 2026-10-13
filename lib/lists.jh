@@ -4,9 +4,9 @@
 //
 //   import lists
 //   let xs: [i64] = [3, 1, 2]
-//   let sorted = lists.sort(xs, fn(a, b) { return a < b })
+//   let sorted = lists.sort(xs)                 // by `Ord`; `sort_by` takes an order
 //   let doubled = lists.map(sorted, fn(x) -> i64 { return x * 2 })
-//   print(lists.index_of(doubled, 4))      // 1
+//   print(lists.index_of(doubled, 4))           // 1
 //
 // `fuse!` runs a pipeline of `map` and `filter` stages as one loop, building
 // no list between them:
@@ -68,10 +68,15 @@ pub fn fold(comptime T: type, comptime A: type, xs: [T], init: A, f: fn(A, T) ->
     return acc
 }
 
+// `xs` in the order of its elements' `Ord`, least first; stable, as `sort_by`.
+pub fn sort(comptime T: Ord, xs: [T]) -> [T] {
+    return sort_by(xs, fn(a: T, b: T) -> bool { return a.less(b) })
+}
+
 // `xs` sorted so that `less(b, a)` is false for every `a` before `b`. The
 // sort is stable (equal elements keep their order) and takes O(n log n) calls
 // of `less`.
-pub fn sort(comptime T: type, xs: [T], less: fn(T, T) -> bool) -> [T] {
+pub fn sort_by(comptime T: type, xs: [T], less: fn(T, T) -> bool) -> [T] {
     // Bottom-up merge sort: merge runs of width 1, 2, 4, ... from `src` into `dst`.
     let src = xs
     let n = len(xs)

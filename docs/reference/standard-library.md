@@ -28,8 +28,8 @@ x86_64 and aarch64 Linux.
 
 ## prelude
 
-`lib/prelude.jh` declares the types every program can name without an import,
-in every profile:
+`lib/prelude.jh` declares the types and traits every program can name without
+an import, in every profile:
 
 ```jihoo
 pub enum Option(T: type) {      // a value that may be missing
@@ -63,6 +63,9 @@ fn main() {
     }
 }
 ```
+
+The prelude also declares the [trait](../language/traits.md#ord) `Ord`, an order
+(`compare` and `less`), with impls for every integer type and `str`.
 
 A module's own item of the same name comes first, so a program that declares
 its own `Option` uses that one. The compiler carries the prelude in itself, so
@@ -126,7 +129,7 @@ import lists
 
 fn main() {
     let xs: [i64] = [3, 1, 2]
-    let sorted = lists.sort(xs, fn(a, b) { return a < b })
+    let sorted = lists.sort(xs)
     let doubled = lists.map(sorted, fn(x) -> i64 { return x * 2 })
     print(lists.index_of(doubled, 4))      // 1
 }
@@ -134,7 +137,8 @@ fn main() {
 
 | function | description |
 |----------|-------------|
-| `sort(T, xs, less: fn(T, T) -> bool) -> [T]` | sorted by `less`; stable, O(n log n) (merge sort) |
+| `sort(T: Ord, xs) -> [T]` | sorted by the elements' [`Ord`](../language/traits.md#ord), least first; stable, O(n log n) (merge sort) |
+| `sort_by(T, xs, less: fn(T, T) -> bool) -> [T]` | sorted by `less`; stable, O(n log n) |
 | `map(T, U, xs, f: fn(T) -> U) -> [U]` | `f` of each element |
 | `filter(T, xs, keep: fn(T) -> bool) -> [T]` | the elements `keep` is true for |
 | `fold(T, A, xs, init: A, f: fn(A, T) -> A) -> A` | `f(... f(f(init, xs[0]), xs[1]) ...)` |

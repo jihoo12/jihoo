@@ -1,6 +1,7 @@
 # Design: traits
 
-Status: step 1 (inferred type arguments) is done; the rest is proposed.
+Status: steps 1 (inferred type arguments) and 2 (traits, impls and bounds) are
+done; the rest is proposed.
 
 ## Why
 
@@ -115,11 +116,16 @@ per-instance one:
   error: main.jh:12:15: `Point` does not implement `Ord`, which `T` of `lists.sort` needs
   ```
 
-- **In the body.** On a value of a bounded type parameter, trait functions
-  resolve only through the declared bounds. `x.less(y)` with `x: T` and
-  `T: Ord` finds `Ord.less`; `x.show()` is an error even when this instance's
-  `T` happens to have a `Show`, so a body cannot depend on an impl it did not
-  ask for. Built-in operators on `T` are still checked per instance, as now.
+- **In the body.** Trait functions resolve as anywhere else, through the
+  traits the module can see; the bound only guarantees that the impl exists.
+  The proposal was to resolve them on a value of type `T` only through `T`'s
+  bounds, so that a body could not depend on an impl it did not ask for. Step 2
+  found that this cannot be checked per instance: in `sort` with `T = i64`, a
+  value of type `T` and any other `i64` have the same type, and nothing tells
+  them apart. A body that uses a trait it did not ask for still works for the
+  types that have it, and fails, inside its body, for the others, as a body
+  using `<` on `T` does. Checking that would need sema to know which values
+  have type `T`, not just `i64`.
 
 The error for a missing impl is now at the call, with the bound named, which
 fixes gap 2 for every library that states its bounds.
@@ -163,12 +169,10 @@ Generic structs and enums may bound their parameters too,
 ### Method calls
 
 `x.f(args)` already means calling a field `f` of function type. It keeps that
-meaning: a field wins. Otherwise, `f` is looked up among:
-
-- the bounds of `x`'s type, if it is a type parameter; otherwise
-- the traits in the prelude and those the calling module declares or imports,
-  that have an impl for `x`'s type and a function `f` whose first parameter is
-  `Self`.
+meaning: a field wins. Otherwise, `f` is looked up among the traits in the
+prelude and those the calling module declares or imports (public ones), that
+have an impl for `x`'s type and a function `f` whose first parameter is `Self`.
+A bounded type parameter is no exception (see [Checking](#checking)).
 
 None is an error naming the type; more than one is an error asking for the
 spelled-out form, `Show.show(x)`. Methods are never found through traits the
@@ -216,13 +220,13 @@ in `crates/jihoo-sema/src/infer.rs`, without changing JIR. Two choices the
 design left open: a literal that no other argument decides takes its default
 type, as in `let`, so `max(3, -5)` is an `i64` instance rather than an error;
 and an anonymous function may leave out exactly the types other arguments
-decide, so `lists.sort(xs, fn(a, b) { return a < b })` needs no annotations
+decide, so `lists.sort_by(xs, fn(a, b) { return a < b })` needs no annotations
 while `lists.map(xs, fn(v) { ... })` needs `-> U`. `lists`, `examples/words.jh`
 and `examples/pipe.jh` call the short form; `tests/diff/inferred_types.jh`
 checks it in all three profiles. The unifier (`FnCx::unify`) is what step 3
 will match generic impls with.
 
-### 2. Traits, impls and bounds
+### 2. Traits, impls and bounds (done)
 
 `trait`, `impl`, `Self`, bounds on function parameters, default bodies, method
 calls and `Trait.f(x)` / `Type.f(x)` calls, impls for concrete types only.
@@ -231,6 +235,28 @@ uses either as a name.
 
 Done when `lists.sort(xs)` takes no order, `Ord` has impls for every integer
 type and `str`, and a missing impl is reported at the call.
+
+Done ([Traits](../language/traits.md)), in `crates/jihoo-sema/src/traits.rs`, with
+no change to JIR. Each function of an impl, and each default body, is compiled
+like a generic function whose one comptime parameter is `Self`, so instances,
+their names and their compilation are the ones generic functions have. Choices
+made on the way:
+
+- Every impl is checked, used or not: its trait, the orphan rule, duplicates,
+  missing and extra functions, and each function's signature against the
+  trait's. The prelude's impls are the exception, since `impl Ord for str`
+  cannot be checked in a freestanding program, which has no `str`; the
+  compiler's tests check them instead.
+- `Trait.f(args)` infers `Self` from the arguments with the unifier of step 1;
+  `T.f(args)` and `Type.f(args)` name it.
+- A bound on a struct or enum parameter is checked too, though generic impls
+  (step 3) are what make it useful.
+- `lists.sort(xs)` sorts by `Ord`, and the old `sort`, which takes an order,
+  is `sort_by`.
+
+`tests/diff/traits.jh` and `tests/diff-lists/traits.jh` check traits in every
+profile, and `traits_and_impls` and `trait_errors` in
+`crates/jihoo-sema/src/tests.rs` the rules and the messages.
 
 ### 3. Generic impls and bounded structs
 

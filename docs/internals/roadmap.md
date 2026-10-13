@@ -76,9 +76,15 @@
     so JIR and both backends are unchanged.
 28. Inferred type arguments: a call to a generic function may leave out its
     `comptime T: type` arguments, which are matched from the other arguments
-    (`lists.sort(xs, fn(a, b) { return a < b })`); literals and anonymous
+    (`lists.sort_by(xs, fn(a, b) { return a < b })`); literals and anonymous
     functions take what those decide. The first step of
     [traits](traits.md).
+29. Traits: `trait`, `impl` and bounds (`comptime T: Ord + Hash`), with
+    default bodies, method calls (`x.f()`), `Trait.f(x)` and `Type.f()`. An
+    impl's functions are compiled per type like generic functions and called
+    directly, so JIR is unchanged; impls live in the trait's or the type's
+    module, and every one is checked. The prelude has `Ord`, for integers
+    and `str`, and `lists.sort(xs)` sorts by it.
 
 ## Next
 
@@ -92,9 +98,9 @@
   `#![comptime]` modules, so `meta` costs programs nothing and works in
   freestanding ones; random pipelines in the fuzzer, each checked against
   the same stages written out as a loop.
-- **Traits** ([design](traits.md)), before v1: after inferred type arguments,
-  `trait`, `impl` and bounds (`comptime T: Ord`), resolved statically with no
-  change to JIR; `Ord`, `Hash` and `Show` in the prelude, and a `Map(K, V)`.
+- **Traits** ([design](traits.md)), before v1: generic impls
+  (`impl(T: Ord) Ord for Option(T)`), then `Hash` and `Show` in the prelude,
+  a `Map(K, V)`, comparison operators through `Ord`, and deriving.
 - **Memory:** a report of where native code copies lists (`jihoo build
   --cost`), which needs source positions in JIR; moving a field out of a
   value at its last use instead of copying it.

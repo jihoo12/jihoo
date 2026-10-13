@@ -1,0 +1,119 @@
+# Traits
+
+A trait names functions that a type can have. An `impl` gives them for one
+type, and a generic function can ask for a type that has them.
+
+```jihoo
+trait Shape {
+    fn area(s: Self) -> i64
+    fn sides() -> i64
+
+    fn describe(s: Self) -> i64 {          // a default, which impls may replace
+        return Self.sides() * 1000 + s.area()
+    }
+}
+
+struct Sq { w: i64 }
+
+impl Shape for Sq {
+    fn area(s: Sq) -> i64 { return s.w * s.w }
+    fn sides() -> i64 { return 4 }
+}
+
+fn larger(comptime T: Shape + Ord, x: T, y: T) -> i64 {
+    if x.less(y) { return y.area() }
+    return x.area()
+}
+
+fn main() {
+    let s = Sq { w: 3 }
+    print(s.area())              // 9: a method call
+    print(Shape.describe(s))     // 4009: the trait spelled out
+    print(Sq.sides())            // 4: a function without `Self` first
+}
+```
+
+## Declaring a trait
+
+`trait Name { ... }` lists functions. In them `Self` stands for the type that
+implements the trait. A function with a body has a default: an impl that does
+not give the function gets the body, with `Self` its own type. Trait functions
+cannot have `comptime` parameters.
+
+A trait is an item like a struct: it may be `pub`, and other modules name it as
+`alias.Name`.
+
+## Impls
+
+`impl Trait for Type { ... }` gives the trait's functions for `Type`. It must
+give every function that has no default, and no others, each with the
+trait's signature (`Self` as `Type`, which an impl may write either way).
+Every impl in a program is checked, used or not.
+
+- A type has at most one impl of a trait.
+- The impl must be in the module of the trait or the module of the type. So
+  `impl Ord for i64` can only be in the trait's module; a module that wants
+  another order for `i64` wraps it in a struct of its own.
+- An impl can be for a concrete instance of a generic type,
+  `impl Ord for Pair(u8)`.
+- An impl has no name and no `pub`: it applies wherever the trait and the type
+  can both be seen.
+
+## Calling trait functions
+
+| call | means |
+|------|-------|
+| `x.area()` | `area` of the type of `x`, from a trait the module can see, with `x` first |
+| `Shape.area(x)` | `area` of `Shape`, for the type of `Self` the arguments give |
+| `Sq.sides()`, `T.sides()` | `sides` of a trait the module can see, for type `Sq` or `T` |
+
+A method call `x.f(...)` works for trait functions whose first parameter is
+`Self`. The traits it looks in are the module's own, the prelude's, and the
+public ones of the modules it imports. If `x` has a field `f`, the field comes
+first: `x.f(...)` calls the function the field holds. If two traits have an
+`f` for the type, the call is an error that asks for `Shape.f(x)`.
+
+Parameters are values, as everywhere in jihoo: there is no `self` keyword and
+no borrowing. A function that changes a value returns the new one, and the
+caller writes `v = v.grown()`.
+
+## Bounds
+
+`comptime T: Shape` is a type parameter that only takes types with an
+`impl Shape`; `comptime T: Shape + Ord` asks for both. `comptime T: type`
+takes any type, as before. The bound is checked where the function is
+instantiated, so a missing impl is reported at the call:
+
+```text
+error: main.jh:12:15: Point does not implement `Ord`, which `T` of `sort` needs
+```
+
+The parameters of generic structs and enums can have bounds the same way.
+Types are [inferred](generics.md#inferred-type-arguments) as for any generic
+function, so `larger(s, Sq { w: 4 })` needs no `Sq`.
+
+Bodies are still checked per instance, as for every generic function.
+
+## `Ord`
+
+The prelude declares `Ord`, an order, and implements it for every integer type
+and `str`:
+
+```jihoo
+pub trait Ord {
+    fn compare(a: Self, b: Self) -> i64     // < 0, 0 or > 0
+    fn less(a: Self, b: Self) -> bool       // compare(a, b) < 0
+}
+```
+
+[`lists.sort`](../reference/standard-library.md#lists) sorts by it, so
+`lists.sort(xs)` works for any element type with an `Ord`.
+
+## How it works
+
+Each function of an impl, and each default body, is compiled like a generic
+function whose comptime parameter is `Self`: once per type, named
+`impl.N.name.M` or `trait.Name.name.M` in JIR. A call through a trait is a
+direct call of that instance, so traits add nothing to JIR, the VM or the
+backend (`crates/jihoo-sema/src/traits.rs`). The design and what comes next
+are in [Design: traits](../internals/traits.md).

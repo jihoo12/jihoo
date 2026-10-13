@@ -29,6 +29,7 @@ mod paths;
 mod patterns;
 mod place;
 mod tasks;
+mod traits;
 mod tuples;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -113,6 +114,7 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
     if !errors.is_empty() {
         return Err(errors);
     }
+    errors.extend(env.check_traits());
 
     // Ask for every item; the lazy queries compute what each one needs.
     // Generic structs and enums only exist as instances, collected at the end.
@@ -331,6 +333,8 @@ fn expand_item_macros(profile: Profile, mods: &[Module]) -> Result<Vec<Module>, 
             prog.structs.extend(p.structs);
             prog.consts.extend(p.consts);
             prog.funcs.extend(p.funcs);
+            prog.traits.extend(p.traits);
+            prog.impls.extend(p.impls);
             prog.macro_calls.extend(p.macro_calls);
         }
     }
@@ -1093,6 +1097,21 @@ impl<'a> FnCx<'a> {
                     if let Some(en) = self.enum_path(base)? {
                         return self.construct(e.pos, en, variant, Some(args), expected);
                     }
+                    // `shapes.Shape.area(s)`: a function of another module's
+                    // trait or type.
+                    if let ExprKind::Field(m, item) = &base.kind {
+                        if let ExprKind::Var(alias) = &m.kind {
+                            if self.local(alias).is_none() && self.env.is_alias(self.bindings.module, alias) {
+                                if let Some(r) = self.path_call(e.pos, &format!("{alias}.{item}"), variant, args)? {
+                                    return Ok(r);
+                                }
+                            }
+                        }
+                    }
+                    // `xs[0].less(y)`: maybe a trait function.
+                    if let Some(r) = self.method_call(e.pos, base, variant, args)? {
+                        return Ok(r);
+                    }
                 }
                 let callee = self.expr(f, None)?;
                 self.call_value(e.pos, callee, "this function", args)?
@@ -1506,8 +1525,12 @@ impl<'a> FnCx<'a> {
                 }
                 if let Some((base, field)) = name.split_once('.') {
                     let base_expr = Expr { pos, kind: ExprKind::Var(base.to_string()) };
-                    // `s.f(x)`: a function stored in a field of a local.
+                    // `s.f(x)`: a function stored in a field of a local, or a
+                    // trait function of its type.
                     if self.local(base).is_some() {
+                        if let Some(r) = self.method_call(pos, &base_expr, field, args)? {
+                            return Ok(r);
+                        }
                         let callee = Expr { pos, kind: ExprKind::Field(Box::new(base_expr), field.to_string()) };
                         let r = self.expr(&callee, None)?;
                         return self.call_value(pos, r, &format!("`{name}`"), args);
@@ -1515,6 +1538,10 @@ impl<'a> FnCx<'a> {
                     // `Shape.Circle(1)`: a variant of an enum.
                     if let Some(en) = self.enum_path(&base_expr)? {
                         return self.construct(pos, en, field, Some(args), expected);
+                    }
+                    // `Ord.compare(a, b)`, `T.zero()`: a function of a trait or type.
+                    if let Some(r) = self.path_call(pos, base, field, args)? {
+                        return Ok(r);
                     }
                 }
                 // A comptime parameter or constant naming a function: a direct call.

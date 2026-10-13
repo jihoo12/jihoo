@@ -37,7 +37,8 @@ fn main() {
   `u8`, `*u8`, `[u8; 4]` and `fn(i64) -> i64` all parse as expressions.
 - Inside an instance, `T` stands for its type and `N` for a constant, also in
   array lengths and `size_of`. Comptime parameters cannot be assigned.
-- There are no constraints on `T`: the body is checked per instance, and errors
+- `comptime T: Ord` takes only types that implement a [trait](traits.md#bounds),
+  checked at the call. Either way the body is checked per instance, and errors
   name the instance:
 
   ```text
@@ -64,7 +65,7 @@ let x: u8 = 7
 max(x, 200)                                  // T = u8: the literal takes it from `x`
 max("app", "apple")                          // T = str
 lists.map(xs, fn(v) -> str { return to_str(v) })   // T from `xs`, U from the function
-lists.sort(words, fn(a, b) { return a < b })       // the function's types from T
+lists.sort_by(words, fn(a, b) { return a < b })    // the function's types from T
 ```
 
 - Each argument with a type of its own is matched against its parameter's type:

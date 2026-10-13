@@ -8,6 +8,8 @@ pub struct Program {
     pub structs: Vec<StructDecl>,
     pub consts: Vec<ConstDecl>,
     pub funcs: Vec<FnDecl>,
+    pub traits: Vec<TraitDecl>,
+    pub impls: Vec<ImplDecl>,
     /// `name!(...)` at the top level: replaced by the items the macro returns.
     pub macro_calls: Vec<ItemMacro>,
 }
@@ -53,6 +55,14 @@ pub struct StructDecl {
     pub variants: Option<Vec<VariantDecl>>,
 }
 
+impl Program {
+    /// Every function of the module: its own, and those of its traits and impls.
+    pub fn funcs_mut(&mut self) -> impl Iterator<Item = &mut FnDecl> {
+        let traits = self.traits.iter_mut().flat_map(|t| t.funcs.iter_mut().map(|f| &mut f.decl));
+        self.funcs.iter_mut().chain(traits).chain(self.impls.iter_mut().flat_map(|i| i.funcs.iter_mut()))
+    }
+}
+
 impl StructDecl {
     pub fn is_enum(&self) -> bool {
         self.variants.is_some()
@@ -84,6 +94,34 @@ pub struct FieldDecl {
     pub is_pub: bool,
     pub name: String,
     pub ty: TypeExpr,
+}
+
+/// `trait Name { fn f(a: Self) -> T ... }`: functions over `Self`, the type that
+/// implements the trait.
+#[derive(Debug, Clone)]
+pub struct TraitDecl {
+    pub pos: Pos,
+    pub is_pub: bool,
+    pub name: String,
+    pub funcs: Vec<TraitFn>,
+}
+
+/// A function of a trait. Without a body of its own (`has_body`), every impl
+/// must give it; with one, the body is the default.
+#[derive(Debug, Clone)]
+pub struct TraitFn {
+    pub decl: FnDecl,
+    pub has_body: bool,
+}
+
+/// `impl Trait for Type { fn ... }`: the functions of `Trait` for `Type`.
+#[derive(Debug, Clone)]
+pub struct ImplDecl {
+    pub pos: Pos,
+    /// As written: `Ord`, or `cmp.Ord` for another module's.
+    pub trait_name: String,
+    pub ty: TypeExpr,
+    pub funcs: Vec<FnDecl>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +183,8 @@ pub struct Param {
     pub comptime: bool,
     pub name: String,
     pub ty: TypeExpr,
+    /// `comptime T: Ord + Hash`: the bounds after the first, `Hash` here.
+    pub bounds: Vec<TypeExpr>,
 }
 
 #[derive(Debug, Clone)]
@@ -758,11 +798,19 @@ pub fn set_program_pos(p: &mut Program, pos: Pos) {
         }
         set_pos(&mut c.value, pos);
     }
-    for f in &mut p.funcs {
+    for t in &mut p.traits {
+        t.pos = pos;
+    }
+    for i in &mut p.impls {
+        i.pos = pos;
+        set_type_pos(&mut i.ty, pos);
+    }
+    for f in p.funcs_mut() {
         f.pos = pos;
         for prm in &mut f.params {
             prm.pos = pos;
             set_type_pos(&mut prm.ty, pos);
+            prm.bounds.iter_mut().for_each(|t| set_type_pos(t, pos));
         }
         if let Some(t) = &mut f.ret {
             set_type_pos(t, pos);
@@ -1042,10 +1090,15 @@ pub fn names_in_program(p: &mut Program, f: &mut dyn FnMut(&mut String, NameRole
         }
         names_in_expr(&mut c.value, f);
     }
-    for func in &mut p.funcs {
+    for i in &mut p.impls {
+        f(&mut i.trait_name, NameRole::Uses);
+        names_in_type(&mut i.ty, f);
+    }
+    for func in p.funcs_mut() {
         for prm in &mut func.params {
             f(&mut prm.name, NameRole::Binds);
             names_in_type(&mut prm.ty, f);
+            prm.bounds.iter_mut().for_each(|t| names_in_type(t, f));
         }
         if let Some(t) = &mut func.ret {
             names_in_type(t, f);

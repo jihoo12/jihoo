@@ -44,6 +44,7 @@ same on GitHub.
 
 - [Compile-time evaluation](language/compile-time-evaluation.md)
 - [Generics](language/generics.md)
+- [Traits](language/traits.md)
 - [Macros](language/macros.md)
 
 ### Native and freestanding

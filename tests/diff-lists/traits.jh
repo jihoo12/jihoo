@@ -1,0 +1,32 @@
+// `lists.sort` sorts by `Ord`, which the prelude gives integers and strings
+// and programs give their own types; `sort_by` takes the order instead.
+import lists
+
+struct Version {
+    major: i64
+    minor: i64
+}
+
+impl Ord for Version {
+    fn compare(a: Version, b: Version) -> i64 {
+        if a.major != b.major {
+            return a.major.compare(b.major)
+        }
+        return a.minor.compare(b.minor)
+    }
+}
+
+fn entry() -> i64 {
+    let vs: [Version] = [Version { major: 2, minor: 0 }, Version { major: 1, minor: 7 }, Version { major: 1, minor: 2 }]
+    for v in lists.sort(vs) {
+        out(v.major * 10 + v.minor)       // 12, 17, 20
+    }
+    let words: [str] = ["pear", "apple", "fig", "apple"]
+    let sorted = lists.sort(words)
+    out(len(sorted[0]) + len(sorted[3]) * 10)   // 5 + 40
+    let bytes: [u8] = [200, 3, 77]
+    out(lists.sort(bytes)[2] as i64)      // 200
+    let by_len = lists.sort_by(words, fn(a, b) { return len(a) < len(b) })
+    out(len(by_len[0]))                   // 3: "fig"
+    return lists.sort(vs)[2].major
+}

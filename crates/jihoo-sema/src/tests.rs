@@ -592,6 +592,61 @@ fn inferred_type_argument_errors() {
     assert!(e.contains("cannot infer `U` of `ap`: annotate this function's types"), "{e}");
 }
 
+// ---- traits ----
+
+const SHAPES: &str = "trait Shape {\n  fn area(s: Self) -> i64\n  fn sides() -> i64\n  fn describe(s: Self) -> i64 { return Self.sides() * 1000 + s.area() }\n}\n\
+                      struct Sq { w: i64 }\nstruct Rect { w: i64, h: i64, area: fn(i64) -> i64 }\n\
+                      impl Shape for Sq {\n  fn area(s: Sq) -> i64 { return s.w * s.w }\n  fn sides() -> i64 { return 4 }\n}\n\
+                      impl Shape for Rect {\n  fn area(s: Self) -> i64 { return s.w * s.h }\n  fn sides() -> i64 { return 4 }\n  fn describe(s: Self) -> i64 { return -1 }\n}\n";
+
+#[test]
+fn traits_and_impls() {
+    let src = format!(
+        "{SHAPES}{PAIR}fn total(comptime T: Shape + Ord, a: T, b: T) -> i64 {{\n  if a.less(b) {{ return a.area() }}\n  return T.sides() + b.describe()\n}}\n\
+         impl Ord for Sq {{\n  fn compare(a: Sq, b: Sq) -> i64 {{ return a.w.compare(b.w) }}\n}}\n\
+         impl Ord for Pair(u8) {{\n  fn compare(a: Pair(u8), b: Pair(u8)) -> i64 {{ return (a.a + a.b).compare(b.a + b.b) }}\n}}\n\
+         fn main() {{\n  let s = Sq {{ w: 3 }}\n  print(s.area())\n  print(s.describe())\n  print(Shape.describe(Sq {{ w: 2 }}))\n  print(Sq.sides())\n\
+           let r = Rect {{ w: 2, h: 5, area: fn(x: i64) -> i64 {{ return x + 1 }} }}\n  print(r.area(7))\n  print(Shape.area(r))\n  print(r.describe())\n\
+           print(total(s, Sq {{ w: 4 }}))\n  print(total(Sq {{ w: 4 }}, s))\n  let ss = [s, Sq {{ w: 1 }}]\n  print(ss[1].less(ss[0]))\n\
+           print(Pair(u8) {{ a: 1, b: 2 }}.compare(Pair(u8) {{ a: 3, b: 0 }}))\n  let x: u8 = 200\n  print(x.compare(7))\n  print(\"b\".less(\"ab\"))\n  print(i64.compare(-1, 1))\n}}"
+    );
+    assert_eq!(run(&src), "9\n4009\n4004\n4\n8\n10\n-1\n9\n4013\ntrue\n0\n1\nfalse\n-1\n");
+    // An impl's functions are instances, called directly; JIR has nothing new.
+    let m = check(&src).unwrap();
+    let text = m.to_string();
+    assert!(text.contains("call @impl.0.area."), "{text}");
+    assert!(text.contains("fn @trait.Shape.describe."), "{text}");
+}
+
+#[test]
+fn trait_errors() {
+    let e = err(&format!("{SHAPES}fn f(comptime T: Shape, x: T) -> i64 {{ return x.area() }}\nfn main() {{ print(f(1)) }}"));
+    assert!(e.contains("i64 does not implement `Shape`, which `T` of `f` needs"), "{e}");
+    let e = err(&format!("{SHAPES}impl Shape for i64 {{\n  fn area(s: i64) -> bool {{ return true }}\n  fn sides() -> i64 {{ return 0 }}\n}}\nfn main() {{}}"));
+    assert!(e.contains("`area` of `Shape` for i64 must be fn(i64) -> i64, not fn(i64) -> bool"), "{e}");
+    let e = err(&format!("{SHAPES}impl Shape for Sq {{\n  fn area(s: Sq) -> i64 {{ return 0 }}\n  fn sides() -> i64 {{ return 0 }}\n}}\nfn main() {{}}"));
+    assert!(e.contains("`Shape` is implemented for Sq twice"), "{e}");
+    let e = err(&format!("{SHAPES}struct T {{ x: i64 }}\nimpl Shape for T {{\n  fn sides() -> i64 {{ return 0 }}\n  fn other() {{}}\n}}\nfn main() {{}}"));
+    assert!(e.contains("`Shape` has no function `other`"), "{e}");
+    let e = err(&format!("{SHAPES}struct T {{ x: i64 }}\nimpl Shape for T {{\n  fn sides() -> i64 {{ return 0 }}\n}}\nfn main() {{}}"));
+    assert!(e.contains("this impl of `Shape` for T lacks `area`, which has no default"), "{e}");
+    assert!(err("impl Nope for i64 {}\nfn main() {}").contains("unknown trait `Nope`"));
+    let e = err(&format!("{SHAPES}fn f(s: Shape) {{}}\nfn main() {{}}"));
+    assert!(e.contains("`Shape` is a trait, not a type"), "{e}");
+    let e = err(&format!("{SHAPES}fn f(comptime T: i64 + Shape) {{}}\nfn main() {{}}"));
+    assert!(e.contains("only traits can be joined with `+`"), "{e}");
+    let e = err("fn main() { print(true.less(false)) }");
+    assert!(e.contains("bool does not implement `Ord`, which has `less`"), "{e}");
+    let e = err("fn main() { print(Ord.compare(1, true)) }");
+    assert!(e.contains("`Self` of `Ord.compare` is i64 here, but bool from an earlier argument"), "{e}");
+    let e = err(&format!("{SHAPES}fn main() {{ print(Shape.sides()) }}"));
+    assert!(e.contains("cannot infer `Self` of `Shape.sides`"), "{e}");
+    let e = err(&format!("{SHAPES}trait Two {{\n  fn area(s: Self) -> i64\n}}\nimpl Two for Sq {{\n  fn area(s: Sq) -> i64 {{ return 0 }}\n}}\nfn main() {{ print(Sq {{ w: 1 }}.area()) }}"));
+    assert!(e.contains("`area` of Sq is in both `Shape` and `Two`"), "{e}");
+    let e = err("trait T {\n  fn f(comptime N: i64)\n}\nfn main() {}");
+    assert!(e.contains("trait functions cannot have `comptime` parameters"), "{e}");
+}
+
 // ---- function values ----
 
 #[test]
@@ -1297,6 +1352,33 @@ fn generics_and_macros_across_modules() {
     let mut out = Vec::new();
     jihoo_vm::run(&m, &mut out).unwrap();
     assert_eq!(String::from_utf8(out).unwrap(), "49\n");
+}
+
+#[test]
+fn traits_across_modules_and_macros() {
+    let run_files = |files: &[(&str, &str)]| {
+        let m = check_files(files).unwrap_or_else(|e| panic!("{e}"));
+        let mut out = Vec::new();
+        jihoo_vm::run(&m, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    };
+    let shapes = "pub trait Shape {\n  fn area(s: Self) -> i64\n}\ntrait Hidden {\n  fn h(s: Self) -> i64\n}\n\
+                  pub fn twice(comptime T: Shape, x: T) -> i64 { return x.area() * 2 }";
+    // An impl of another module's trait, in the type's module; one made by a
+    // macro; method calls and spelled-out calls written in macros.
+    let main = "import shapes\nstruct Sq { w: i64 }\n\
+                impl shapes.Shape for Sq {\n  fn area(s: Sq) -> i64 { return s.w * s.w }\n}\n\
+                macro make_ord(t: expr) -> items {\n  return quote items {\n    impl Ord for $t {\n      fn compare(a: $t, b: $t) -> i64 { return a.w.compare(b.w) }\n    }\n  }\n}\n\
+                make_ord!(Sq)\n\
+                macro smaller(x: expr, y: expr) -> expr {\n  return quote({\n    let a = $x\n    let b = $y\n    let r = Ord.compare(a, b) * 10 + i64.compare(1, 2)\n    if a.less(b) { r = 100 }\n    r\n  })\n}\n\
+                fn main() {\n  let s = Sq { w: 3 }\n  print(s.area() + shapes.twice(s) + shapes.Shape.area(s))\n  print(s.less(Sq { w: 4 }))\n  print(smaller!(3, 9))\n  print(smaller!(9, 3))\n}";
+    assert_eq!(run_files(&[("main.jh", main), ("shapes.jh", shapes)]), "36\ntrue\n100\n9\n");
+
+    let e = check_files(&[("main.jh", "import shapes\nstruct Sq { w: i64 }\nimpl shapes.Hidden for Sq {\n  fn h(s: Sq) -> i64 { return 0 }\n}\nfn main() {}"), ("shapes.jh", shapes)])
+        .unwrap_err();
+    assert!(e.contains("`shapes.Hidden` is private to module `shapes`"), "{e}");
+    let e = check_files(&[("main.jh", "impl Ord for bool {\n  fn compare(a: bool, b: bool) -> i64 { return 0 }\n}\nfn main() {}")]).unwrap_err();
+    assert!(e.contains("an impl of `Ord` for bool must be in the module of `Ord`"), "{e}");
 }
 
 #[test]

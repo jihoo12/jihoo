@@ -120,6 +120,37 @@ impl FnCx<'_> {
         Ok(place)
     }
 
+    /// Field `name` of `base`, which may also be a path, or a pointer, cell or
+    /// ref to a struct.
+    pub(crate) fn field_place(&mut self, pos: Pos, base: Place, name: &str) -> Result<Place, Error> {
+        match base.ty().clone() {
+            t if self.env.path_def(&t).is_some() => self.extend_path(pos, base, PathShape::Field(name.to_string()), None),
+            t @ Type::Struct(_) => {
+                let (index, fty) = self.env.field(pos, &t, name, self.bindings.module)?;
+                Ok(self.step(base, Step::Field(index), fty))
+            }
+            // `p.x` with `p: *Struct` reads through the pointer, like Go.
+            Type::Ptr(inner) if matches!(*inner, Type::Struct(_)) => {
+                let (index, fty) = self.env.field(pos, &inner, name, self.bindings.module)?;
+                let ptr = self.read(base);
+                Ok(self.step_ptr(ptr, Step::Field(index), fty))
+            }
+            // `c.x` with `c: cell Struct` is a part of what the cell holds.
+            Type::Cell(inner) if matches!(*inner, Type::Struct(_)) => {
+                let (index, fty) = self.env.field(pos, &inner, name, self.bindings.module)?;
+                let cell = self.read(base);
+                Ok(Place::Cell { cell, path: vec![Step::Field(index)], ty: fty })
+            }
+            // `r.x` with `r: ref Struct` reads through the ref.
+            Type::Ref(inner) if matches!(*inner, Type::Struct(_)) => {
+                let (index, fty) = self.env.field(pos, &inner, name, self.bindings.module)?;
+                let target = self.deref(base);
+                Ok(self.step(target, Step::Field(index), fty))
+            }
+            t => Err(Error::new(pos, format!("type {t} has no fields"))),
+        }
+    }
+
     fn place_of(&mut self, e: &Expr) -> Result<Place, Error> {
         match &e.kind {
             ExprKind::Var(name) if self.local(name).is_some() => {
@@ -137,34 +168,7 @@ impl FnCx<'_> {
             }
             ExprKind::Field(base, name) => {
                 let base = self.place(base)?;
-                match base.ty().clone() {
-                    t if self.env.path_def(&t).is_some() => {
-                        self.extend_path(e.pos, base, PathShape::Field(name.clone()), None)
-                    }
-                    t @ Type::Struct(_) => {
-                        let (index, fty) = self.env.field(e.pos, &t, name, self.bindings.module)?;
-                        Ok(self.step(base, Step::Field(index), fty))
-                    }
-                    // `p.x` with `p: *Struct` reads through the pointer, like Go.
-                    Type::Ptr(inner) if matches!(*inner, Type::Struct(_)) => {
-                        let (index, fty) = self.env.field(e.pos, &inner, name, self.bindings.module)?;
-                        let ptr = self.read(base);
-                        Ok(self.step_ptr(ptr, Step::Field(index), fty))
-                    }
-                    // `c.x` with `c: cell Struct` is a part of what the cell holds.
-                    Type::Cell(inner) if matches!(*inner, Type::Struct(_)) => {
-                        let (index, fty) = self.env.field(e.pos, &inner, name, self.bindings.module)?;
-                        let cell = self.read(base);
-                        Ok(Place::Cell { cell, path: vec![Step::Field(index)], ty: fty })
-                    }
-                    // `r.x` with `r: ref Struct` reads through the ref.
-                    Type::Ref(inner) if matches!(*inner, Type::Struct(_)) => {
-                        let (index, fty) = self.env.field(e.pos, &inner, name, self.bindings.module)?;
-                        let target = self.deref(base);
-                        Ok(self.step(target, Step::Field(index), fty))
-                    }
-                    t => Err(Error::new(e.pos, format!("type {t} has no fields"))),
-                }
+                self.field_place(e.pos, base, name)
             }
             ExprKind::Index(base_expr, index) => {
                 let base = self.place(base_expr)?;

@@ -154,7 +154,8 @@ impl FnCx<'_> {
             return self.call_inferred(pos, key, decl, args);
         }
         if decl.params.len() != args.len() {
-            let msg = if decl.params.iter().all(|p| !p.comptime || is_type_param(p)) {
+            let module = self.env.fn_module(key);
+            let msg = if decl.params.iter().all(|p| !p.comptime || self.env.is_type_param(module, p)) {
                 format!("`{name}` takes {} arguments ({runtime} without its types), {} given", decl.params.len(), args.len())
             } else {
                 format!("`{name}` takes {} arguments, {} given", decl.params.len(), args.len())
@@ -231,7 +232,7 @@ impl<'p> Env<'p> {
         // Parameter types are written in the owner's module; arguments in `outer`.
         let mut b = Bindings::in_module(owner_module);
         for (p, a) in params_args {
-            if is_type_param(p) {
+            if self.param_bounds(owner_module, p)?.is_some() {
                 let t = self.resolve(&expr_to_type(a)?, outer)?;
                 b.push(&p.name, Binding::Type(t));
             } else {
@@ -264,6 +265,7 @@ impl<'p> Env<'p> {
         decl: &FnDecl,
         b: Bindings,
     ) -> Result<(String, Rc<crate::env::Sig>), Error> {
+        self.check_bounds(pos, &decl.name, self.fn_decl(fn_key).map_or(b.module, |(m, _)| m), &decl.params, &b)?;
         let key = format!("{fn_key}({})", b.key());
         if let Some((name, sig)) = self.find_instance(&key) {
             return sig.map(|s| (name, s));

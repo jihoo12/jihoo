@@ -16,7 +16,7 @@ use jihoo_ir::{Inst, Reg, Type};
 use jihoo_syntax::ast::*;
 use jihoo_syntax::{Error, Pos};
 
-use crate::generic::{expr_to_type, is_type_param, Binding, Bindings};
+use crate::generic::{expr_to_type, Binding, Bindings};
 use crate::FnCx;
 
 /// The type parameters of one call, and what is known of them so far.
@@ -84,7 +84,8 @@ impl FnCx<'_> {
     /// one per runtime parameter.
     pub(crate) fn call_inferred(&mut self, pos: Pos, key: &str, decl: &FnDecl, args: &[Expr]) -> Result<Reg, Error> {
         let name = &decl.name;
-        if let Some(p) = decl.params.iter().find(|p| p.comptime && !is_type_param(p)) {
+        let module = self.env.fn_module(key);
+        if let Some(p) = decl.params.iter().find(|p| p.comptime && !self.env.is_type_param(module, p)) {
             let msg = format!("`{name}` takes {} arguments, {} given; `{}` is not a type, so it cannot be inferred", decl.params.len(), args.len(), p.name);
             return Err(Error::new(pos, msg));
         }
@@ -100,13 +101,33 @@ impl FnCx<'_> {
                 return Err(Error::new(pos, msg));
             }
         }
-        let mut found = Found {
-            module: self.env.fn_module(key),
-            callee: name,
-            params: decl.params.iter().filter(|p| p.comptime).map(|p| p.name.as_str()).collect(),
-            types: HashMap::new(),
-        };
+        let type_params = decl.params.iter().filter(|p| p.comptime).map(|p| p.name.as_str()).collect();
         let params: Vec<&Param> = decl.params.iter().filter(|p| !p.comptime).collect();
+        let how = format!("write the type arguments of `{name}`");
+        let (bindings, regs) = self.infer_args(pos, module, name, type_params, &params, args, &how)?;
+        let (instance, sig) = self.env.instance(pos, key, decl, bindings)?;
+        for ((p, a), (r, want)) in params.iter().zip(args).zip(regs.iter().zip(&sig.params)) {
+            self.expect(a.pos, *r, want, &format!("argument `{}` of `{name}`", p.name))?;
+        }
+        Ok(self.emit_to(sig.ret.clone(), |dst| Inst::Call { dst, func: instance, args: regs }))
+    }
+
+    /// Lowers `args`, one for each of `params`, inferring the types
+    /// `type_params` that the parameter types (written in `module`) mention.
+    /// Gives their bindings and the arguments, not yet checked against the
+    /// parameter types; `how` says how a caller could give them instead.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn infer_args<'d>(
+        &mut self,
+        pos: Pos,
+        module: usize,
+        name: &'d str,
+        type_params: Vec<&'d str>,
+        params: &[&Param],
+        args: &[Expr],
+        how: &str,
+    ) -> Result<(Bindings, Vec<Reg>), Error> {
+        let mut found = Found { module, callee: name, params: type_params, types: HashMap::new() };
 
         // Arguments with a type of their own, or whose parameter type is known,
         // in order; then the others, which wait for the types they need.
@@ -126,7 +147,7 @@ impl FnCx<'_> {
             if want.is_none() {
                 if let (ExprKind::Lambda(_), Some(t)) = (&a.kind, found.unknown_in(&p.ty)) {
                     let msg = format!(
-                        "cannot infer `{t}` of `{name}`: annotate this function's types, or write the type arguments of `{name}`"
+                        "cannot infer `{t}` of `{name}`: annotate this function's types, or {how}"
                     );
                     return Err(Error::new(a.pos, msg));
                 }
@@ -134,16 +155,10 @@ impl FnCx<'_> {
             regs[i] = Some(self.inferring_arg(&mut found, p, a, want)?);
         }
         if let Some(t) = found.params.iter().find(|t| !found.types.contains_key(*t)) {
-            let msg = format!("cannot infer `{t}` of `{name}` from its arguments; write the type arguments of `{name}`");
+            let msg = format!("cannot infer `{t}` of `{name}` from its arguments; {how}");
             return Err(Error::new(pos, msg));
         }
-
-        let (instance, sig) = self.env.instance(pos, key, decl, found.bindings())?;
-        let regs: Vec<Reg> = regs.into_iter().map(Option::unwrap).collect();
-        for ((p, a), (r, want)) in params.iter().zip(args).zip(regs.iter().zip(&sig.params)) {
-            self.expect(a.pos, *r, want, &format!("argument `{}` of `{name}`", p.name))?;
-        }
-        Ok(self.emit_to(sig.ret.clone(), |dst| Inst::Call { dst, func: instance, args: regs }))
+        Ok((found.bindings(), regs.into_iter().map(Option::unwrap).collect()))
     }
 
     /// Lowers argument `a` of parameter `p`, expecting `want`, and matches its

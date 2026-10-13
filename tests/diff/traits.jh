@@ -1,0 +1,105 @@
+// Traits, impls and bounds: calls through a trait are direct calls of the
+// impl's functions, compiled per type, so every profile runs the same code.
+
+trait Shape {
+    fn area(s: Self) -> i64
+    fn sides() -> i64
+
+    // A default, which `Tri` keeps and `Sq` replaces.
+    fn describe(s: Self) -> i64 {
+        return Self.sides() * 1000 + s.area()
+    }
+}
+
+struct Sq {
+    w: i64
+}
+
+struct Tri {
+    base: i64
+    height: i64
+}
+
+struct Pair(T: type) {
+    a: T
+    b: T
+}
+
+impl Shape for Sq {
+    fn area(s: Sq) -> i64 {
+        return s.w * s.w
+    }
+
+    fn sides() -> i64 {
+        return 4
+    }
+
+    fn describe(s: Self) -> i64 {
+        return -s.area()
+    }
+}
+
+impl Shape for Tri {
+    fn area(t: Tri) -> i64 {
+        return t.base * t.height / 2
+    }
+
+    fn sides() -> i64 {
+        return 3
+    }
+}
+
+impl Ord for Tri {
+    fn compare(a: Tri, b: Tri) -> i64 {
+        return a.area().compare(b.area())
+    }
+}
+
+impl Ord for Pair(u8) {
+    fn compare(x: Pair(u8), y: Pair(u8)) -> i64 {
+        if x.a != y.a {
+            return x.a.compare(y.a)
+        }
+        return y.b.compare(x.b)
+    }
+}
+
+// The larger area, and the number of sides of the type.
+fn larger(comptime T: Shape + Ord, x: T, y: T) -> i64 {
+    if x.less(y) {
+        return y.area() + T.sides() * 100
+    }
+    return x.area() + T.sides() * 100
+}
+
+// The least element by `Ord`.
+fn least(comptime T: Ord, comptime N: i64, xs: [T; N]) -> T {
+    let best = xs[0]
+    for x in xs {
+        if x.less(best) {
+            best = x
+        }
+    }
+    return best
+}
+
+fn entry() -> i64 {
+    let s = Sq { w: 5 }
+    let t = Tri { base: 4, height: 3 }
+    out(s.area())                         // 25
+    out(s.describe())                     // -25
+    out(t.describe())                     // 3006
+    out(Shape.area(t) + Sq.sides())       // 10
+    out(larger(t, Tri { base: 2, height: 2 }))  // 306
+    out(larger(Tri { base: 2, height: 2 }, t))  // 306
+    let small: u8 = 250
+    out(small.compare(7))                 // 1
+    out(i16.compare(-3, 4))               // -1
+    out(least(i32, 4, [8, -2, 5, -1]) as i64)   // -2
+    let ps = [Pair(u8) { a: 1, b: 2 }, Pair(u8) { a: 1, b: 9 }, Pair(u8) { a: 0, b: 0 }]
+    let p = least(Pair(u8), 3, ps)
+    out(p.a as i64 * 10 + p.b as i64)     // 0
+    out(ps[1].compare(ps[0]))             // -1: a larger `b` comes first
+    out(Ord.compare(t, Tri { base: 6, height: 2 }))   // 0
+    return least(Tri, 2, [t, Tri { base: 1, height: 2 }]).area()   // 1
+}
