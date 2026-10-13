@@ -363,6 +363,8 @@ fn is_builtin(name: &str) -> bool {
             | "code_text"
             | "to_code"
             | "type_of"
+            | "type_shape"
+            | "to_items"
             | "to_str"
             | "unique"
             | "ident"
@@ -1437,7 +1439,8 @@ impl<'a> FnCx<'a> {
     fn call(&mut self, pos: Pos, name: &str, args: &[Expr], expected: Option<&Type>) -> Result<Reg, Error> {
         match name {
             "print" => {
-                if !Type::can_print(self.profile()) {
+                // Compile-time code runs on the VM, which can always print.
+                if !self.in_macro && !Type::can_print(self.profile()) {
                     let msg = "`print` needs the VM or the C library, so it is not available in freestanding mode \
                                (write to a file descriptor instead, as `io.puts` does)";
                     return Err(Error::new(pos, msg));
@@ -1464,6 +1467,8 @@ impl<'a> FnCx<'a> {
             "stringify" => self.stringify(pos, args),
             "code_text" | "to_code" => self.code_text(pos, name, args),
             "type_of" => self.type_of(pos, args),
+            "type_shape" => self.type_shape(pos, args),
+            "to_items" => self.text_to_items(pos, args),
             "path_index" => self.path_index(pos, args),
             "to_str" => {
                 if self.profile() == Profile::Freestanding && !self.in_macro {

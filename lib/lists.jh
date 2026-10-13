@@ -73,6 +73,36 @@ pub fn sort(comptime T: Ord, xs: [T]) -> [T] {
     return sort_by(xs, fn(a: T, b: T) -> bool { return a.less(b) })
 }
 
+// The least element of `xs` by its `Ord`, the first of equal ones; `None` if
+// `xs` is empty.
+pub fn min(comptime T: Ord, xs: [T]) -> Option(T) {
+    if len(xs) == 0 {
+        return Option.None
+    }
+    let best = xs[0]
+    for x in xs {
+        if x.less(best) {
+            best = x
+        }
+    }
+    return Option.Some(best)
+}
+
+// The greatest element of `xs` by its `Ord`, the first of equal ones; `None`
+// if `xs` is empty.
+pub fn max(comptime T: Ord, xs: [T]) -> Option(T) {
+    if len(xs) == 0 {
+        return Option.None
+    }
+    let best = xs[0]
+    for x in xs {
+        if best.less(x) {
+            best = x
+        }
+    }
+    return Option.Some(best)
+}
+
 // `xs` sorted so that `less(b, a)` is false for every `a` before `b`. The
 // sort is stable (equal elements keep their order) and takes O(n log n) calls
 // of `less`.
@@ -85,8 +115,8 @@ pub fn sort_by(comptime T: type, xs: [T], less: fn(T, T) -> bool) -> [T] {
         let dst: [T] = []
         let lo = 0
         while lo < n {
-            let mid = min(lo + width, n)
-            let hi = min(lo + 2 * width, n)
+            let mid = smaller(lo + width, n)
+            let hi = smaller(lo + 2 * width, n)
             let i = lo
             let j = mid
             while i < mid || j < hi {
@@ -116,7 +146,7 @@ pub fn range(lo: i64, hi: i64) -> [i64] {
     return out
 }
 
-fn min(a: i64, b: i64) -> i64 {
+fn smaller(a: i64, b: i64) -> i64 {
     if a < b {
         return a
     }

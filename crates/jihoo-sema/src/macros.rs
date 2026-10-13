@@ -222,10 +222,75 @@ impl FnCx<'_> {
         Ok(self.emit_to(Type::Str, |dst| Inst::TypeOf { dst, code: r }))
     }
 
+    /// `type_shape(t)`: the parts of the struct or enum type that code `t`
+    /// names where the macro was called, as text: `struct a b` (the field
+    /// names), `enum V/2 E/0` (the variants and how many values each holds),
+    /// or `other`. It asks the compiler as `type_of` does, with the code
+    /// marked `#shape `; `lib/meta.jh` reads the text (`meta.shape`).
+    pub(crate) fn type_shape(&mut self, pos: Pos, args: &[Expr]) -> Result<Reg, Error> {
+        if !self.in_macro {
+            return Err(Error::new(pos, "`type_shape` can only be used inside a macro"));
+        }
+        let [arg] = args else {
+            return Err(Error::new(pos, "`type_shape` takes exactly 1 argument"));
+        };
+        let r = self.expr(arg, None)?;
+        if *self.ty(r) != Type::Expr {
+            return Err(Error::new(arg.pos, format!("`type_shape` needs an `expr`, not {}", self.ty(r))));
+        }
+        let text = self.emit_to(Type::Str, |dst| Inst::CodeText { dst, src: r });
+        let mark = self.emit_to(Type::Str, |dst| Inst::Str { dst, value: SHAPE.to_string() });
+        let marked = self.emit_to(Type::Str, |dst| Inst::Binary { dst, op: jihoo_ir::BinOp::Add, lhs: mark, rhs: text });
+        let code = self.emit_to(Type::Expr, |dst| Inst::CodeText { dst, src: marked });
+        Ok(self.emit_to(Type::Str, |dst| Inst::TypeOf { dst, code }))
+    }
+
+    /// `to_items(s)`: text as items, which an item macro may return.
+    pub(crate) fn text_to_items(&mut self, pos: Pos, args: &[Expr]) -> Result<Reg, Error> {
+        if !self.in_macro {
+            return Err(Error::new(pos, "`to_items` can only be used inside a macro"));
+        }
+        let [arg] = args else {
+            return Err(Error::new(pos, "`to_items` takes exactly 1 argument"));
+        };
+        let r = self.expr(arg, Some(&Type::Str))?;
+        self.expect(arg.pos, r, &Type::Str, "the argument of `to_items`")?;
+        Ok(self.emit_to(Type::Items, |dst| Inst::CodeText { dst, src: r }))
+    }
+
+    /// The parts of the type that `text` names here, for `type_shape`.
+    fn shape_here(&mut self, pos: Pos, text: &str, expansion: &Expansion) -> Result<String, Error> {
+        let code = jihoo_syntax::number_marks(text, expansion.id);
+        let mut e = jihoo_syntax::parse_expr(&code)
+            .map_err(|err| Error::new(pos, plain_names(&format!("`type_shape` got code that does not parse: {} in `{code}`", err.msg))))?;
+        expansion.resolve(self.env, Code::Expr(&mut e), &|n| self.is_local_name(n));
+        set_pos(&mut e, pos);
+        let t = crate::generic::expr_to_type(&e).and_then(|t| self.resolve(&t)).map_err(|err| {
+            Error::new(err.pos, plain_names(&format!("{} (in `type_shape`, which needs a type)", err.msg)))
+        })?;
+        let shape = match &t {
+            Type::Struct(_) if self.env.tuple_parts(&t).is_some() => "other".to_string(),
+            Type::Struct(n) => {
+                let fields = self.env.struct_fields(pos, n)?;
+                std::iter::once("struct".to_string()).chain(fields.iter().map(|(f, _)| f.clone())).collect::<Vec<_>>().join(" ")
+            }
+            Type::Enum(n) => {
+                let variants = self.env.enum_variants(pos, n)?;
+                let parts = variants.iter().map(|(v, ts)| format!("{v}/{}", ts.len()));
+                std::iter::once("enum".to_string()).chain(parts).collect::<Vec<_>>().join(" ")
+            }
+            _ => "other".to_string(),
+        };
+        Ok(shape)
+    }
+
     /// The type `text`, code from expansion `expansion`, has here, where the
     /// macro was called: the code is lowered as it would be, and then taken
     /// out again, so only its type is left.
     fn type_here(&mut self, pos: Pos, text: &str, expansion: &Expansion) -> Result<String, Error> {
+        if let Some(rest) = text.strip_prefix(SHAPE) {
+            return self.shape_here(pos, rest, expansion);
+        }
         let code = jihoo_syntax::number_marks(text, expansion.id);
         let mut e = jihoo_syntax::parse_expr(&code)
             .map_err(|err| Error::new(pos, plain_names(&format!("`type_of` got code that does not parse: {} in `{code}`", err.msg))))?;
@@ -262,6 +327,9 @@ impl FnCx<'_> {
         Ok(self.emit_to(Type::Str, |dst| Inst::CodeText { dst, src: r }))
     }
 }
+
+/// What marks a question of `type_shape` among those of `type_of`.
+const SHAPE: &str = "#shape ";
 
 fn bad_code(pos: Pos, name: &str, err: &Error, code: &str) -> Error {
     let msg = format!("`{name}!` produced code that does not parse: {} in `{code}`", err.msg);

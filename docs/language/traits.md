@@ -198,6 +198,38 @@ numbers, `bool` and `str` (the text itself), and for lists (`[1, 2]`),
 `Option` (`Some(1)`, `None`), `Result` (`Ok(1)`, `Err(why)`) and tuples
 (`(1, a)`) whose parts have one.
 
+## Deriving
+
+Writing `Show`, `Hash` or `Ord` field by field is mechanical, so the
+[`meta`](../reference/standard-library.md#meta) library has an item macro that
+writes the impls:
+
+```jihoo
+import meta
+
+struct Version { major: i64, minor: i64 }
+enum Shape { Circle(i64), Rect(i64, i64), Empty }
+
+meta.derive!(Show, Hash, Ord, Version)
+meta.derive!(Show, Ord, Shape)
+```
+
+- `Show` writes a struct as `Version { major: 1, minor: 2 }` and a variant as
+  `Rect(1, 2)` or `Empty`.
+- `Hash` folds in the fields in order, or the number of the variant and then
+  its values.
+- `Ord` compares the fields in order; variants come in the order they are
+  declared, and the same variant compares its values in order.
+
+Each part needs the trait itself; a part without one is an error where the
+impl is first used, naming the part's type. The impls are written in the
+calling module, as if by hand, so they follow the same rules as one written
+there. `T` may be an instance of a generic type, `meta.derive!(Show, Pair(i64))`;
+a generic impl for every `Pair(T)` is written by hand. The macro reads the
+type with `meta.shape`, which works where the macro is called, and since
+`meta` only runs while compiling, deriving costs a program nothing and works
+in freestanding ones for `Hash` and `Ord`.
+
 ## How it works
 
 Each function of an impl, and each default body, is compiled like a generic

@@ -153,6 +153,7 @@ fn main() {
 |----------|-------------|
 | `sort(T: Ord, xs) -> [T]` | sorted by the elements' [`Ord`](../language/traits.md#ord), least first; stable, O(n log n) (merge sort) |
 | `sort_by(T, xs, less: fn(T, T) -> bool) -> [T]` | sorted by `less`; stable, O(n log n) |
+| `min(T: Ord, xs) -> Option(T)`, `max(T: Ord, xs) -> Option(T)` | the least or greatest element, the first of equal ones; `None` for an empty list |
 | `map(T, U, xs, f: fn(T) -> U) -> [U]` | `f` of each element |
 | `filter(T, xs, keep: fn(T) -> bool) -> [T]` | the elements `keep` is true for |
 | `fold(T, A, xs, init: A, f: fn(A, T) -> A) -> A` | `f(... f(f(init, xs[0]), xs[1]) ...)` |
@@ -270,6 +271,29 @@ it, nor the `strings` it uses, is part of the program
 import it, freestanding ones included. It is written in jihoo on top of
 `code_text` and `to_code` ([Macro builtins](../language/macros.md#macro-builtins)).
 [`lists.fuse!`](#fuse) uses it to read the stages of a pipeline.
+
+`meta.shape(t)` gives the parts of a struct or enum type, where the macro is
+called: `Struct(fields)`, the field names, `Enum(variants)`, each a
+`Variant { name, values }` with how many values it holds, or `Other`.
+
+`meta.derive!(Show, Hash, Ord, T)` is an item macro that writes impls of
+those [traits](../language/traits.md#deriving) for the struct or enum `T`,
+part by part:
+
+```jihoo
+import meta
+
+struct Version { major: i64, minor: i64 }
+enum Token { Num(i64), Op(str, i64), End }
+
+meta.derive!(Show, Hash, Ord, Version)
+meta.derive!(Show, Ord, Token)
+
+fn main() {
+    print(Version { major: 1, minor: 2 })        // Version { major: 1, minor: 2 }
+    print(Token.Op("+", 2) < Token.End)        // true: variants in declared order
+}
+```
 
 ## libc
 

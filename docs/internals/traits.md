@@ -1,8 +1,7 @@
 # Design: traits
 
-Status: steps 1 to 5 (inferred type arguments; traits, impls and bounds; generic
-impls; the standard traits; comparison operators) are done; deriving is
-proposed.
+Status: the six steps are done; what is left is in [Done when](#done-when) and
+[Later](#later).
 
 ## Why
 
@@ -347,7 +346,7 @@ works for anything with an impl, generic ones included: tuples, lists and
 options order when their parts do. `==` is not part of it, and stays
 structural (`tests/diff/orderings.jh`, `orderings_through_ord`).
 
-### 6. Deriving
+### 6. Deriving (done)
 
 Writing `impl Show` and `impl Hash` field by field is what macros are for, but
 a macro cannot yet read a struct's fields: `type_of` gives the type's name, not
@@ -362,6 +361,28 @@ derive!(Show, Hash, Version)
 This belongs to [code as data](code-as-data.md) as much as to traits: it is
 the "deriving equality, printing or serialization" that design names as a
 reason for macros to see types.
+
+Done ([Deriving](../language/traits.md#deriving)), as `meta.derive!(Show, Hash,
+Ord, T)`, for structs and enums. Field types turned out not to be needed:
+an impl only names the parts (`x.a.show()`), and each part's own impl is
+found where the impl is used. So the compiler gives less than proposed:
+
+- `type_shape(t)`, a builtin for macros, gives the field names of a struct,
+  or the variants of an enum with how many values each holds, as text. It
+  asks the compiler the way `type_of` does, with the code marked `#shape `,
+  so neither the VM nor JIR changed. `meta.shape(t)` reads the text into a
+  `Shape`.
+- `to_items(s)` turns text into items, which an item macro returns. The
+  impls are built as text rather than with `quote`, so their names are
+  resolved in the calling module: the traits are the ones it sees, as if the
+  impl were written there.
+- Deriving for a generic struct (`impl(T: Show) Show for Pair(T)`) is left
+  out; an instance (`Pair(i64)`) works.
+
+On the way, `print` became usable in compile-time code of freestanding
+programs, which runs on the VM, so `meta.derive!` can report its errors
+there; and a method called on a variant (`Shape.Empty.compare(x)`) takes the
+variant as a value.
 
 ## Later
 
@@ -380,11 +401,11 @@ reason for macros to see types.
 ## Done when
 
 - `lists.sort(xs)`, a new `lists.max(xs)` and `Map(K, V)` work with user types in
-  hosted and native programs, and `Ord` and `Hash` in freestanding ones;
+  hosted and native programs, and `Ord` and `Hash` in freestanding ones (done);
 - `tests/diff/` has programs with traits and impls that print the same in all
-  three profiles, and `tests/diff-lists/` the same for `Map` and `Show`;
-- the fuzzer writes random impls and calls through bounds;
-- the JIR version is unchanged.
+  three profiles, and `tests/diff-lists/` the same for `Map` and `Show` (done);
+- the fuzzer writes random impls and calls through bounds (not yet);
+- the JIR version is unchanged (done: still 15).
 
 ## Costs and risks
 

@@ -370,3 +370,193 @@ fn hex(b: u8) -> i64 {
     }
     return (b - 55) as i64
 }
+
+// ---- types ----
+
+// The parts of a struct or enum type, for macros that write code for each.
+pub enum Shape {
+    // A struct: its field names, in order.
+    Struct([str])
+    // An enum: its variants, in order.
+    Enum([Variant])
+    // Any other type.
+    Other
+}
+
+// A variant of an enum: its name, and how many values it holds.
+pub struct Variant {
+    pub name: str
+    pub values: i64
+}
+
+// The parts of the type that `t` names where the macro was called: `Point`,
+// `geo.Shape` or `Pair(i64)`.
+pub fn shape(t: expr) -> Shape {
+    let words = strings.split(type_shape(t), " ")
+    if words[0] == "struct" {
+        return Shape.Struct(words[1:])
+    }
+    if words[0] == "enum" {
+        let variants: [Variant] = []
+        for w in words[1:] {
+            let slash = strings.index_of(w, "/")
+            match strings.parse_int(w[slash + 1:]) {
+                Some(n) => push(variants, Variant { name: w[:slash], values: n })
+                None => trap()
+            }
+        }
+        return Shape.Enum(variants)
+    }
+    return Shape.Other
+}
+
+// ---- deriving ----
+
+// `meta.derive!(Show, Hash, Ord, T)`: impls of the named traits for the
+// struct or enum `T`, part by part:
+//
+// - `Show` writes `T { a: 1, b: 2 }` for a struct and `V(1, 2)` or `E` for
+//   a variant;
+// - `Hash` folds in the fields in order, or the variant's number and then
+//   its values;
+// - `Ord` compares the fields in order, or the variants in the order they
+//   are declared and then their values.
+//
+// Every part needs an impl of the trait itself. The impls are written in the
+// calling module, as if by hand, and name the traits as it sees them; `T` may
+// be an instance of a generic type, such as `Pair(i64)`.
+pub macro derive(args: [expr]) -> items {
+    if len(args) < 2 {
+        derive_error("write the traits and then the type: `derive!(Show, Point)`")
+    }
+    let t = args[len(args) - 1]
+    let name = stringify(t)
+    let shape = shape(t)
+    match shape {
+        Other => derive_error("`" + name + "` is not a struct or enum")
+        _ => {}
+    }
+    let out = ""
+    for a in args[:len(args) - 1] {
+        let tr = stringify(a)
+        if tr == "Show" {
+            out = out + derive_show(name, shape)
+        } else if tr == "Hash" {
+            out = out + derive_hash(name, shape)
+        } else if tr == "Ord" {
+            out = out + derive_ord(name, shape)
+        } else {
+            derive_error("cannot derive `" + tr + "`; it derives `Show`, `Hash` and `Ord`")
+        }
+    }
+    return to_items(out)
+}
+
+// Stops the expansion, saying why; the compiler adds where.
+fn derive_error(msg: str) {
+    print("derive!: " + msg)
+    trap()
+}
+
+// `V(v0, v1)`, the pattern of variant `v` with `n` values named `prefix0`...;
+// `V` alone without values.
+fn variant_pattern(v: str, n: i64, prefix: str) -> str {
+    if n == 0 {
+        return v
+    }
+    let names: [str] = []
+    for i in 0..n {
+        push(names, prefix + to_str(i))
+    }
+    return v + "(" + strings.join(names, ", ") + ")"
+}
+
+fn derive_show(name: str, shape: Shape) -> str {
+    let body = ""
+    match shape {
+        Struct(fields) => {
+            let parts: [str] = []
+            for f in fields {
+                push(parts, "\"" + f + ": \" + x." + f + ".show()")
+            }
+            if len(parts) == 0 {
+                body = "return \"" + name + " {}\""
+            } else {
+                body = "return \"" + name + " { \" + " + strings.join(parts, " + \", \" + ") + " + \" }\""
+            }
+        }
+        Enum(variants) => {
+            body = "match x {\n"
+            for v in variants {
+                if v.values == 0 {
+                    body = body + v.name + " => return \"" + v.name + "\"\n"
+                } else {
+                    let parts: [str] = []
+                    for i in 0..v.values {
+                        push(parts, "v" + to_str(i) + ".show()")
+                    }
+                    body = body + variant_pattern(v.name, v.values, "v") + " => return \"" + v.name + "(\" + " + strings.join(parts, " + \", \" + ") + " + \")\"\n"
+                }
+            }
+            body = body + "}"
+        }
+        Other => trap()
+    }
+    return "impl Show for " + name + " {\nfn show(x: " + name + ") -> str {\n" + body + "\n}\n}\n"
+}
+
+fn derive_hash(name: str, shape: Shape) -> str {
+    let body = ""
+    match shape {
+        Struct(fields) => {
+            for f in fields {
+                body = body + "h = x." + f + ".hash(h)\n"
+            }
+            body = body + "return h"
+        }
+        Enum(variants) => {
+            body = "match x {\n"
+            for i, v in variants {
+                body = body + variant_pattern(v.name, v.values, "v") + " => {\nh = i64.hash(" + to_str(i) + ", h)\n"
+                for j in 0..v.values {
+                    body = body + "h = v" + to_str(j) + ".hash(h)\n"
+                }
+                body = body + "return h\n}\n"
+            }
+            body = body + "}"
+        }
+        Other => trap()
+    }
+    return "impl Hash for " + name + " {\nfn hash(x: " + name + ", h: Hasher) -> Hasher {\n" + body + "\n}\n}\n"
+}
+
+fn derive_ord(name: str, shape: Shape) -> str {
+    let body = "let c = 0\n"
+    match shape {
+        Struct(fields) => {
+            for f in fields {
+                body = body + "c = x." + f + ".compare(y." + f + ")\nif c != 0 {\nreturn c\n}\n"
+            }
+            body = body + "return 0"
+        }
+        Enum(variants) => {
+            // The same variant: its values in order. Different ones: their order.
+            body = body + "match (x, y) {\n"
+            for v in variants {
+                body = body + "(" + variant_pattern(v.name, v.values, "a") + ", " + variant_pattern(v.name, v.values, "b") + ") => {\n"
+                for j in 0..v.values {
+                    body = body + "c = a" + to_str(j) + ".compare(b" + to_str(j) + ")\nif c != 0 {\nreturn c\n}\n"
+                }
+                body = body + "return 0\n}\n"
+            }
+            body = body + "_ => {}\n}\n"
+            let index = ""
+            for i, v in variants {
+                index = index + variant_pattern(v.name, v.values, "_") + " => " + to_str(i) + "\n"
+            }
+            body = body + "let i = match x {\n" + index + "}\nlet j = match y {\n" + index + "}\nreturn i.compare(j)"
+        }
+        Other => trap()
+    }
+    return "impl Ord for " + name + " {\nfn compare(x: " + name + ", y: " + name + ") -> i64 {\n" + body + "\n}\n}\n"
+}

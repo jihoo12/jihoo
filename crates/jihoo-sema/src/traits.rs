@@ -23,6 +23,7 @@ use crate::env::{Env, ImplHead};
 use crate::infer::Found;
 use crate::generic::{expr_to_type, is_type_param, Binding, Bindings};
 use crate::hygiene::qualified;
+use crate::place::Place;
 use crate::FnCx;
 
 /// Whether trait function `f` takes `Self` first, and so can be called as a
@@ -418,7 +419,17 @@ impl FnCx<'_> {
         if traits.is_empty() {
             return Ok(None);
         }
-        let place = self.place(base)?;
+        // `Shape.Empty.f()`: a variant is a value, not a place.
+        let variant = match &base.kind {
+            ExprKind::Field(b, _) => self.enum_path(b)?.is_some(),
+            _ => false,
+        };
+        let place = if variant {
+            let root = self.expr(base, None)?;
+            Place::Reg { root, path: vec![], ty: self.ty(root).clone(), readonly: Some("a temporary value") }
+        } else {
+            self.place(base)?
+        };
         if self.env.has_field(place.ty(), name) {
             let field = self.field_place(pos, place, written)?;
             let f = self.read(field);

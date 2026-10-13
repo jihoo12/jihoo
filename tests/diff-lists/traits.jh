@@ -44,5 +44,18 @@ fn entry() -> i64 {
     for l in lists.sort(nested) {
         out(len(l))                           // 0, 2, 1, 2
     }
+    match lists.max(vs) {
+        Some(v) => out(v.major * 10 + v.minor)    // 20
+        None => out(-1)
+    }
+    match lists.min(words) {
+        Some(w) => out(len(w))                    // 5: "apple"
+        None => out(-1)
+    }
+    let empty: [i64] = []
+    match lists.max(empty) {
+        Some(_) => out(1)
+        None => out(0)                            // 0
+    }
     return lists.sort(vs)[2].major
 }

@@ -729,6 +729,17 @@ fn orderings_through_ord() {
     assert_eq!(e, "false\ntrue\n");
 }
 
+#[test]
+fn type_shape_and_to_items_are_for_macros() {
+    assert!(err("struct P { x: i64 }\nfn main() { print(type_shape(P)) }").contains("`type_shape` can only be used inside a macro"));
+    assert!(err("fn main() { let i = to_items(\"\") }").contains("`to_items` can only be used inside a macro"));
+    // An item macro may build its items as text.
+    let src = "struct P { x: i64, y: i64 }\n\
+               macro getters(t: expr) -> items {\n  let s = type_shape(t)\n  return to_items(\"fn shape_text() -> str { return \\\"\" + s + \"\\\" }\")\n}\n\
+               getters!(P)\nfn main() { print(shape_text()) }";
+    assert_eq!(run(src), "struct x y\n");
+}
+
 // ---- function values ----
 
 #[test]

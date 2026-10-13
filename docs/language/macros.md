@@ -254,6 +254,8 @@ macro add(a: expr, b: expr) -> expr {
 | `code_text(e)` | the text of code `e` with the hygiene marks of its names, for code that reads code |
 | `to_code(s)` | text, such as a part of what `code_text` gave, as code again |
 | `type_of(e)` | the type code `e` has where the macro is called, as a `str` for a type hole ([Types of code](#types-of-code)) |
+| `type_shape(t)` | the parts of the struct or enum type `t` names where the macro is called, as text (`struct a b`, `enum V/2 E/0`); [`meta.shape`](../reference/standard-library.md#meta) reads it |
+| `to_items(s)` | text as items, which an item macro may return |
 
 To look inside code, use the [`meta`](../reference/standard-library.md#meta)
 library rather than these two: `meta.node(e)` tells a call from a name, a

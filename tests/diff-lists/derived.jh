@@ -1,0 +1,32 @@
+// `meta.derive!(Show, ...)` writes a struct as `T { a: 1 }` and a variant as
+// `V(1, 2)`; derived `Ord`s sort.
+import lists
+import meta
+
+struct Item {
+    name: str
+    count: i64
+}
+
+enum Token {
+    Num(i64)
+    Op(str, i64)
+    End
+}
+
+meta.derive!(Show, Ord, Item)
+meta.derive!(Show, Ord, Token)
+
+fn entry() -> i64 {
+    let item = Item { name: "pen", count: 3 }
+    out(len(item.show()))                     // 28: Item { name: pen, count: 3 }
+    let items: [Item] = [Item { name: "b", count: 1 }, item, Item { name: "a", count: 9 }]
+    let sorted = lists.sort(items)
+    out(sorted[0].count)                      // 9: "a" first
+    out(len(sorted.show()))                   // the list of three, shown
+    let tokens: [Token] = [Token.End, Token.Op("+", 2), Token.Num(4), Token.Op("+", 1)]
+    for t in lists.sort(tokens) {
+        out(len(t.show()))                    // Num(4) 6, Op(+, 1) 8, Op(+, 2) 8, End 3
+    }
+    return len(Token.Op("-", 10).show())      // 9
+}
