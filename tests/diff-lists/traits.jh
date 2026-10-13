@@ -28,5 +28,21 @@ fn entry() -> i64 {
     out(lists.sort(bytes)[2] as i64)      // 200
     let by_len = lists.sort_by(words, fn(a, b) { return len(a) < len(b) })
     out(len(by_len[0]))                   // 3: "fig"
+    // Options, tuples and lists are ordered when their parts are.
+    let os: [Option(Version)] = [Option.Some(vs[0]), Option.None, Option.Some(vs[2])]
+    for o in lists.sort(os) {
+        match o {
+            Some(v) => out(v.major * 10 + v.minor)    // 12, 20
+            None => out(-1)                         // first
+        }
+    }
+    let pairs: [(str, i64)] = [("b", 1), ("a", 9), ("a", 2)]
+    for p in lists.sort(pairs) {
+        out(p.1)                              // 2, 9, 1
+    }
+    let nested: [[i64]] = [[1, 2], [1], [0, 9], []]
+    for l in lists.sort(nested) {
+        out(len(l))                           // 0, 2, 1, 2
+    }
     return lists.sort(vs)[2].major
 }

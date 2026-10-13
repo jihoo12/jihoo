@@ -146,3 +146,59 @@ impl Ord for str {
         return 0
     }
 }
+
+// `None` first, then the values in order.
+impl(T: Ord) Ord for Option(T) {
+    fn compare(a: Option(T), b: Option(T)) -> i64 {
+        match (a, b) {
+            (Some(x), Some(y)) => return x.compare(y)
+            (None, None) => return 0
+            (None, _) => return -1
+            _ => return 1
+        }
+    }
+}
+
+// Element by element; a list that runs out first comes first.
+impl(T: Ord) Ord for [T] {
+    fn compare(a: [T], b: [T]) -> i64 {
+        for i, x in a {
+            if i >= len(b) {
+                return 1
+            }
+            let c = x.compare(b[i])
+            if c != 0 {
+                return c
+            }
+        }
+        if len(a) < len(b) {
+            return -1
+        }
+        return 0
+    }
+}
+
+// Part by part.
+impl(A: Ord, B: Ord) Ord for (A, B) {
+    fn compare(x: (A, B), y: (A, B)) -> i64 {
+        let c = x.0.compare(y.0)
+        if c != 0 {
+            return c
+        }
+        return x.1.compare(y.1)
+    }
+}
+
+impl(A: Ord, B: Ord, C: Ord) Ord for (A, B, C) {
+    fn compare(x: (A, B, C), y: (A, B, C)) -> i64 {
+        let c = x.0.compare(y.0)
+        if c != 0 {
+            return c
+        }
+        c = x.1.compare(y.1)
+        if c != 0 {
+            return c
+        }
+        return x.2.compare(y.2)
+    }
+}

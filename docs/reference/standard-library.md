@@ -65,7 +65,8 @@ fn main() {
 ```
 
 The prelude also declares the [trait](../language/traits.md#ord) `Ord`, an order
-(`compare` and `less`), with impls for every integer type and `str`.
+(`compare` and `less`), with impls for every integer type and `str`, and for
+`Option(T)`, lists `[T]` and tuples of two or three parts whose parts have one.
 
 A module's own item of the same name comes first, so a program that declares
 its own `Option` uses that one. The compiler carries the prelude in itself, so

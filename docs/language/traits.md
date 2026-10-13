@@ -55,9 +55,40 @@ Every impl in a program is checked, used or not.
   `impl Ord for i64` can only be in the trait's module; a module that wants
   another order for `i64` wraps it in a struct of its own.
 - An impl can be for a concrete instance of a generic type,
-  `impl Ord for Pair(u8)`.
+  `impl Ord for Pair(u8)`, or [generic](#generic-impls).
 - An impl has no name and no `pub`: it applies wherever the trait and the type
   can both be seen.
+
+## Generic impls
+
+An impl with parameters, written as a generic struct's are, is one impl for
+every type of a shape. With `struct Pair(T: type) { a: T, b: T }`:
+
+```jihoo
+impl(T: Ord) Ord for Pair(T) {
+    fn compare(x: Pair(T), y: Pair(T)) -> i64 {
+        let c = x.a.compare(y.a)
+        if c != 0 { return c }
+        return x.b.compare(y.b)
+    }
+}
+```
+
+`Pair(i64)` has an `Ord` because `i64` has one, and `Pair(Pair(i64))` then too.
+To find the impl for a type, its shape is matched against the impl's type,
+`Pair(T)` against `Pair(i64)` giving `T = i64`, and the impl applies when the
+parameters' bounds hold. So `Pair(Point)` has no `Ord` unless `Point` has.
+
+- The parameters are types, `T: type` or `T: Trait`, and each must appear in
+  the impl's type.
+- An impl is for a shape, not for any type: `impl(T: Shape) Ord for T` is an
+  error.
+- Two impls of a trait must not be able to apply to one type: a concrete impl
+  for `Pair(i64)` and a generic one for `Pair(T)` are an error, and so are two
+  generic impls for `Pair(...)`, whatever their parameters.
+- A generic impl's functions are checked against the trait once per type,
+  as the bodies of generic functions are; its other rules are checked where
+  it is declared.
 
 ## Calling trait functions
 
@@ -96,8 +127,10 @@ Bodies are still checked per instance, as for every generic function.
 
 ## `Ord`
 
-The prelude declares `Ord`, an order, and implements it for every integer type
-and `str`:
+The prelude declares `Ord`, an order, and implements it for every integer type,
+`str`, and, when their parts have one, `Option(T)` (`None` first), lists
+(element by element, the shorter first when one is the start of the other) and
+tuples of two or three parts (part by part):
 
 ```jihoo
 pub trait Ord {

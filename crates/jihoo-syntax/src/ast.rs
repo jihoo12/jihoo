@@ -118,6 +118,8 @@ pub struct TraitFn {
 #[derive(Debug, Clone)]
 pub struct ImplDecl {
     pub pos: Pos,
+    /// `impl(T: Ord) Ord for Option(T)`: the impl is generic, one for each `T`.
+    pub params: Vec<Param>,
     /// As written: `Ord`, or `cmp.Ord` for another module's.
     pub trait_name: String,
     pub ty: TypeExpr,
@@ -781,6 +783,7 @@ pub fn set_program_pos(p: &mut Program, pos: Pos) {
         for prm in &mut s.params {
             prm.pos = pos;
             set_type_pos(&mut prm.ty, pos);
+            prm.bounds.iter_mut().for_each(|t| set_type_pos(t, pos));
         }
         for f in &mut s.fields {
             f.pos = pos;
@@ -803,6 +806,11 @@ pub fn set_program_pos(p: &mut Program, pos: Pos) {
     }
     for i in &mut p.impls {
         i.pos = pos;
+        for prm in &mut i.params {
+            prm.pos = pos;
+            set_type_pos(&mut prm.ty, pos);
+            prm.bounds.iter_mut().for_each(|t| set_type_pos(t, pos));
+        }
         set_type_pos(&mut i.ty, pos);
     }
     for f in p.funcs_mut() {
@@ -1078,6 +1086,7 @@ pub fn names_in_program(p: &mut Program, f: &mut dyn FnMut(&mut String, NameRole
         for prm in &mut s.params {
             f(&mut prm.name, NameRole::Binds);
             names_in_type(&mut prm.ty, f);
+            prm.bounds.iter_mut().for_each(|t| names_in_type(t, f));
         }
         s.fields.iter_mut().for_each(|fd| names_in_type(&mut fd.ty, f));
         for v in s.variants.iter_mut().flatten() {
@@ -1092,6 +1101,11 @@ pub fn names_in_program(p: &mut Program, f: &mut dyn FnMut(&mut String, NameRole
     }
     for i in &mut p.impls {
         f(&mut i.trait_name, NameRole::Uses);
+        for prm in &mut i.params {
+            f(&mut prm.name, NameRole::Binds);
+            names_in_type(&mut prm.ty, f);
+            prm.bounds.iter_mut().for_each(|t| names_in_type(t, f));
+        }
         names_in_type(&mut i.ty, f);
     }
     for func in p.funcs_mut() {

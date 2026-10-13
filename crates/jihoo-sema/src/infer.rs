@@ -17,17 +17,22 @@ use jihoo_syntax::ast::*;
 use jihoo_syntax::{Error, Pos};
 
 use crate::generic::{expr_to_type, Binding, Bindings};
+use crate::env::Env;
 use crate::FnCx;
 
-/// The type parameters of one call, and what is known of them so far.
-struct Found<'d> {
+/// The type parameters of one call, or of an impl, and what is known of them
+/// so far.
+pub(crate) struct Found<'d> {
     /// The callee's module, where its parameter types are written.
-    module: usize,
+    pub module: usize,
     /// The callee's name, for messages.
-    callee: &'d str,
+    pub callee: &'d str,
     /// The type parameters in declaration order.
-    params: Vec<&'d str>,
-    types: HashMap<&'d str, (Type, Pos)>,
+    pub params: Vec<&'d str>,
+    pub types: HashMap<&'d str, (Type, Pos)>,
+    /// Whether a type must match exactly (an impl's), rather than give what
+    /// it can (a call's).
+    pub strict: bool,
 }
 
 impl<'d> Found<'d> {
@@ -36,7 +41,7 @@ impl<'d> Found<'d> {
     }
 
     /// The first type parameter that `t` mentions and that is not known yet.
-    fn unknown_in(&self, t: &TypeExpr) -> Option<&'d str> {
+    pub fn unknown_in(&self, t: &TypeExpr) -> Option<&'d str> {
         match &t.kind {
             TypeExprKind::Named(n) => self.params.iter().copied().find(|p| p == n && !self.types.contains_key(p)),
             TypeExprKind::Ptr(x)
@@ -56,7 +61,7 @@ impl<'d> Found<'d> {
     }
 
     /// The bindings of the parameters known so far, in declaration order.
-    fn bindings(&self) -> Bindings {
+    pub fn bindings(&self) -> Bindings {
         let mut b = Bindings::in_module(self.module);
         for p in &self.params {
             if let Some((t, _)) = self.types.get(p) {
@@ -127,7 +132,7 @@ impl FnCx<'_> {
         args: &[Expr],
         how: &str,
     ) -> Result<(Bindings, Vec<Reg>), Error> {
-        let mut found = Found { module, callee: name, params: type_params, types: HashMap::new() };
+        let mut found = Found { module, callee: name, params: type_params, types: HashMap::new(), strict: false };
 
         // Arguments with a type of their own, or whose parameter type is known,
         // in order; then the others, which wait for the types they need.
@@ -166,7 +171,7 @@ impl FnCx<'_> {
     fn inferring_arg(&mut self, found: &mut Found, p: &Param, a: &Expr, want: Option<Type>) -> Result<Reg, Error> {
         let r = self.expr(a, want.as_ref())?;
         let got = self.ty(r).clone();
-        self.unify(found, &p.ty, &got, a.pos)?;
+        self.env.unify(found, &p.ty, &got, a.pos)?;
         Ok(r)
     }
 
@@ -198,16 +203,22 @@ impl FnCx<'_> {
         };
         Ok(Some(Type::Fn(params, Box::new(ret))))
     }
+}
 
-    /// Matches parameter type `t` against the type `got` of its argument,
-    /// learning type parameters. Where the shapes differ nothing is learned;
-    /// the argument's type is checked against the instance's signature later.
-    fn unify(&self, found: &mut Found, t: &TypeExpr, got: &Type, pos: Pos) -> Result<(), Error> {
-        match (&t.kind, got) {
+impl Env<'_> {
+    /// Matches type `t`, written in `found.module`, against `got`, learning
+    /// the type parameters of `found`. Says whether they match: where the
+    /// shapes differ, a strict match fails, and any other learns nothing (the
+    /// argument's type is checked against the instance's signature later).
+    pub(crate) fn unify(&self, found: &mut Found, t: &TypeExpr, got: &Type, pos: Pos) -> Result<bool, Error> {
+        let ok = match (&t.kind, got) {
             (TypeExprKind::Named(n), _) if found.is_param(n) => {
                 let n = found.params.iter().copied().find(|p| p == n).unwrap();
                 match found.types.get(n) {
                     Some((before, _)) if before != got => {
+                        if found.strict {
+                            return Ok(false);
+                        }
                         let msg = format!("`{n}` of `{}` is {got} here, but {before} from an earlier argument", found.callee);
                         return Err(Error::new(pos, msg));
                     }
@@ -216,44 +227,57 @@ impl FnCx<'_> {
                         found.types.insert(n, (got.clone(), pos));
                     }
                 }
+                true
             }
             (TypeExprKind::Ptr(x), Type::Ptr(y))
             | (TypeExprKind::List(x), Type::List(y))
-            | (TypeExprKind::Array(x, _), Type::Array(y, _))
             | (TypeExprKind::Ref(x), Type::Ref(y))
             | (TypeExprKind::Chan(x), Type::Chan(y))
             | (TypeExprKind::Cell(x), Type::Cell(y)) => self.unify(found, x, y, pos)?,
+            (TypeExprKind::Array(x, n), Type::Array(y, len)) => {
+                let ok = self.unify(found, x, y, pos)?;
+                ok && (!found.strict || self.array_len(n, &Rc::new(found.bindings())).is_ok_and(|n| n == *len))
+            }
             (TypeExprKind::Fn(ps, r), Type::Fn(qs, s)) if ps.len() == qs.len() => {
+                let mut ok = true;
                 for (p, q) in ps.iter().zip(qs) {
-                    self.unify(found, p, q, pos)?;
+                    ok &= self.unify(found, p, q, pos)?;
                 }
-                if let Some(r) = r {
-                    self.unify(found, r, s, pos)?;
+                match r {
+                    Some(r) => ok &= self.unify(found, r, s, pos)?,
+                    None => ok &= **s == Type::Unit,
                 }
+                ok
             }
-            (TypeExprKind::Tuple(ps), _) => {
-                if let Some(parts) = self.env.tuple_parts(got) {
-                    if parts.len() == ps.len() {
-                        for (p, (_, q)) in ps.iter().zip(parts.iter()) {
-                            self.unify(found, p, q, pos)?;
-                        }
+            (TypeExprKind::Tuple(ps), _) => match self.tuple_parts(got) {
+                Some(parts) if parts.len() == ps.len() => {
+                    let mut ok = true;
+                    for (p, (_, q)) in ps.iter().zip(parts.iter()) {
+                        ok &= self.unify(found, p, q, pos)?;
                     }
+                    ok
                 }
-            }
+                _ => false,
+            },
             (TypeExprKind::Generic(g, args), Type::Struct(n) | Type::Enum(n)) => {
-                let Some((decl_key, bound)) = self.env.instance_bindings(n) else { return Ok(()) };
-                if self.env.key(found.module, g).as_deref() != Some(decl_key.as_str()) {
-                    return Ok(());
+                let Some((decl_key, bound)) = self.instance_bindings(n) else { return Ok(!found.strict) };
+                if self.key(found.module, g).as_deref() != Some(decl_key.as_str()) {
+                    return Ok(!found.strict);
                 }
-                let (_, decl) = self.env.type_decl(&decl_key).unwrap();
+                let (_, decl) = self.type_decl(&decl_key).unwrap();
+                let mut ok = true;
                 for (p, a) in decl.params.iter().zip(args) {
-                    if let (Some(Binding::Type(q)), Ok(a)) = (bound.get(&p.name), expr_to_type(a)) {
-                        self.unify(found, &a, &q.clone(), pos)?;
+                    match (bound.get(&p.name), expr_to_type(a)) {
+                        (Some(Binding::Type(q)), Ok(a)) => ok &= self.unify(found, &a, &q.clone(), pos)?,
+                        _ => ok = false,
                     }
                 }
+                ok
             }
-            _ => {}
-        }
-        Ok(())
+            // A type without parameters in it, such as `i64` in `Pair(T, i64)`.
+            (TypeExprKind::Named(_), _) if found.strict => self.resolve(t, &Rc::new(found.bindings())).is_ok_and(|t| t == *got),
+            _ => false,
+        };
+        Ok(ok || !found.strict)
     }
 }

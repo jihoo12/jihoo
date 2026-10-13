@@ -1,7 +1,7 @@
 # Design: traits
 
-Status: steps 1 (inferred type arguments) and 2 (traits, impls and bounds) are
-done; the rest is proposed.
+Status: steps 1 (inferred type arguments), 2 (traits, impls and bounds) and 3
+(generic impls) are done; the rest is proposed.
 
 ## Why
 
@@ -258,12 +258,35 @@ made on the way:
 profile, and `traits_and_impls` and `trait_errors` in
 `crates/jihoo-sema/src/tests.rs` the rules and the messages.
 
-### 3. Generic impls and bounded structs
+### 3. Generic impls and bounded structs (done)
 
 `impl(T: Ord) Ord for Option(T)`, impls for lists and tuples, bounds on
 struct and enum parameters, and the overlap check.
 
 Done when `lists.sort` sorts lists of `Option(i64)` and of tuples.
+
+Done ([Generic impls](../language/traits.md#generic-impls)). The prelude orders
+`Option(T)`, lists and tuples of two and three parts. Matching an impl's type
+against a type is the unifier of step 1, moved to `Env` and given a strict
+mode, in which a part that differs fails the match instead of being left for
+later. Choices made on the way:
+
+- A generic impl's signatures are checked per instance, like generic bodies:
+  checking them once would need types for `T` that are not any type.
+- The overlap check is conservative. A concrete impl overlaps a generic one
+  when the generic one matches its type, bounds aside; two generic impls
+  overlap when their types have the same outermost constructor, so
+  `Pair(T, i64)` and `Pair(i64, T)` are rejected, but so are `Pair(T, i64)`
+  and `Pair(T, u8)`, which could not meet.
+- An impl's parameters must be types that appear in its type, and an impl
+  cannot be for a bare parameter (`impl(T: A) B for T`), which would overlap
+  every other impl of `B`.
+- `E.name(...)` on an enum calls a trait function when the enum has no
+  variant `name`, so a default body's `Self.compare(a, b)` works when `Self`
+  is `Option(i64)`.
+
+`generic_impls` and `generic_impl_errors` in `crates/jihoo-sema/src/tests.rs`,
+`tests/diff/generic_impls.jh` and `tests/diff-lists/traits.jh` check them.
 
 ### 4. The standard traits
 

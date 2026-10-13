@@ -17,7 +17,7 @@ item       = "import" path ("as" NAME)?
            | "pub"? "enum" NAME ("(" params ")")? "{" (NAME ("(" types ")")?) sep* "}"
            | "pub"? "const" NAME (":" type)? "=" expr
            | "pub"? "trait" NAME "{" ("fn" NAME "(" params ")" ("->" type)? block?)* "}"
-           | "impl" path "for" type "{" ("fn" NAME "(" params ")" ("->" type)? block)* "}"
+           | "impl" ("(" params ")")? path "for" type "{" ("fn" NAME "(" params ")" ("->" type)? block)* "}"
            | "pub"? "macro" NAME "(" params ")" "->" ("expr" | "stmts" | "items") block
            | path "!" "(" exprs ")"                       ; an item macro
 params     = (("comptime")? NAME ":" type ("+" path)*),*   ; `+ path`: more traits

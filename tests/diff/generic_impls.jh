@@ -1,0 +1,69 @@
+// Generic impls: one impl for every type of a shape, used when the types it
+// is made of have the impls its parameters ask for.
+
+trait Weight {
+    fn weight(x: Self) -> i64
+}
+
+struct Pair(T: type) {
+    a: T
+    b: T
+}
+
+impl Weight for i64 {
+    fn weight(x: i64) -> i64 {
+        return x
+    }
+}
+
+impl Weight for u8 {
+    fn weight(x: u8) -> i64 {
+        return x as i64 * 2
+    }
+}
+
+impl(T: Weight) Weight for Pair(T) {
+    fn weight(p: Pair(T)) -> i64 {
+        return p.a.weight() + p.b.weight()
+    }
+}
+
+impl(A: Weight, B: Weight) Weight for (A, B) {
+    fn weight(t: Self) -> i64 {
+        return t.0.weight() * 10 + t.1.weight()
+    }
+}
+
+impl(T: Weight) Weight for Option(T) {
+    fn weight(o: Option(T)) -> i64 {
+        match o {
+            Some(x) => return x.weight() + 1
+            None => return 0
+        }
+    }
+}
+
+fn heavier(comptime T: Weight, x: T, y: T) -> T {
+    if x.weight() < y.weight() {
+        return y
+    }
+    return x
+}
+
+fn entry() -> i64 {
+    let small: u8 = 20
+    let p = Pair(u8) { a: small, b: 3 }
+    out(p.weight())                                   // 46
+    out(Pair(Pair(i64)) { a: Pair(i64) { a: 1, b: 2 }, b: Pair(i64) { a: 3, b: 4 } }.weight())   // 10
+    out((p, 5).weight())                              // 465
+    let none: Option(Pair(u8)) = Option.None
+    out(none.weight())                                // 0
+    out(Option.Some(p).weight())                      // 47
+    out(heavier((1, small), (4, small)).0)            // 4
+    // The prelude's generic `Ord`s: options, tuples.
+    let a: Option(i64) = Option.Some(-3)
+    out(a.compare(Option.None))                       // 1
+    out((2, small).compare((2, 30)))                  // -1
+    out((1, 2, 3).less((1, 2, 3)) as i64)             // 0
+    return Option.Some((1, 2)).compare(Option.Some((1, 1)))   // 1
+}

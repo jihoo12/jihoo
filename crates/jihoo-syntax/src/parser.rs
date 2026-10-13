@@ -365,27 +365,37 @@ impl Parser {
         Ok(ConstDecl { pos, is_pub, name, ty, value })
     }
 
-    /// `struct Name(params) { fields }` or `enum Name(params) { variants }`.
-    fn struct_decl(&mut self, is_pub: bool) -> PResult<StructDecl> {
-        let is_enum = *self.peek() == Tok::Enum;
-        let pos = self.bump().pos; // `struct` or `enum`
-        let (_, name) = self.ident("struct name")?;
+    /// `(T: type, N: i64)` after a struct, enum or `impl`: compile-time
+    /// parameters, `comptime` optional; none without the parentheses.
+    fn item_params(&mut self) -> PResult<Vec<Param>> {
         let mut params = Vec::new();
         if self.eat(&Tok::LParen) {
             while *self.peek() != Tok::RParen {
-                // Every struct parameter is compile-time; `comptime` is optional.
                 self.eat(&Tok::Comptime);
                 let (ppos, pname) = self.ident("parameter name")?;
                 self.mark();
                 self.expect(&Tok::Colon, "`:` and a parameter type")?;
                 let ty = self.type_expr()?;
-                params.push(Param { pos: ppos, comptime: true, name: pname, ty, bounds: vec![] });
+                let mut bounds = Vec::new();
+                while self.eat(&Tok::Plus) {
+                    bounds.push(self.type_expr()?);
+                }
+                params.push(Param { pos: ppos, comptime: true, name: pname, ty, bounds });
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
             }
             self.expect(&Tok::RParen, "`)`")?;
         }
+        Ok(params)
+    }
+
+    /// `struct Name(params) { fields }` or `enum Name(params) { variants }`.
+    fn struct_decl(&mut self, is_pub: bool) -> PResult<StructDecl> {
+        let is_enum = *self.peek() == Tok::Enum;
+        let pos = self.bump().pos; // `struct` or `enum`
+        let (_, name) = self.ident("struct name")?;
+        let params = self.item_params()?;
         if is_enum {
             let variants = self.braced_list(|p| {
                 let (pos, name) = p.ident("variant name")?;
@@ -489,6 +499,7 @@ impl Parser {
     /// `impl Trait for Type { fn ... }`.
     fn impl_decl(&mut self) -> PResult<ImplDecl> {
         let pos = self.expect(&Tok::Impl, "`impl`")?.pos;
+        let params = self.item_params()?;
         let mut trait_name = self.ident("trait name")?.1;
         self.mark();
         if self.eat(&Tok::Dot) {
@@ -504,7 +515,7 @@ impl Parser {
             }
             funcs.push(self.fn_decl(false)?);
         }
-        Ok(ImplDecl { pos, trait_name, ty, funcs })
+        Ok(ImplDecl { pos, params, trait_name, ty, funcs })
     }
 
     fn type_expr(&mut self) -> PResult<TypeExpr> {

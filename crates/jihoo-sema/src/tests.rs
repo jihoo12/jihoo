@@ -647,6 +647,48 @@ fn trait_errors() {
     assert!(e.contains("trait functions cannot have `comptime` parameters"), "{e}");
 }
 
+const SHOW: &str = "trait Show {\n  fn show(s: Self) -> i64\n}\nimpl Show for i64 {\n  fn show(s: i64) -> i64 { return s }\n}\nstruct P { x: i64 }\n";
+
+#[test]
+fn generic_impls() {
+    let src = format!(
+        "{SHOW}{PAIR}impl(T: Show) Show for Pair(T) {{\n  fn show(p: Pair(T)) -> i64 {{ return p.a.show() * 10 + p.b.show() }}\n}}\n\
+         impl(A: Show, B: Show) Show for (A, B) {{\n  fn show(t: Self) -> i64 {{ return t.0.show() * 100 + t.1.show() }}\n}}\n\
+         struct Sorted(T: Ord) {{ xs: [T] }}\n\
+         fn main() {{\n  print(Pair(i64) {{ a: 1, b: 2 }}.show())\n  print(Show.show(Pair(Pair(i64)) {{ a: Pair(i64) {{ a: 1, b: 2 }}, b: Pair(i64) {{ a: 3, b: 4 }} }}))\n\
+           print((Pair(i64) {{ a: 5, b: 6 }}, 7).show())\n\
+           let o: Option(i64) = Option.None\n  print(o.compare(Option.Some(-9)))\n  print(Option.Some(2).compare(Option.Some(1)))\n\
+           print((1, \"b\").compare((1, \"a\")))\n  print((1, 2, 3).less((1, 2, 4)))\n  let xs: [u8] = [1, 2]\n  let ys: [u8] = [1]\n  print(xs.compare(ys))\n\
+           let s = Sorted(str) {{ xs: [\"a\"] }}\n  print(len(s.xs))\n}}"
+    );
+    assert_eq!(run(&src), "12\n154\n5607\n-1\n1\n1\ntrue\n1\n1\n");
+}
+
+#[test]
+fn generic_impl_errors() {
+    let pair_show = "impl(T: Show) Show for Pair(T) {\n  fn show(p: Pair(T)) -> i64 { return 0 }\n}\n";
+    let e = err(&format!("{SHOW}{PAIR}{pair_show}impl Show for Pair(i64) {{\n  fn show(p: Pair(i64)) -> i64 {{ return 0 }}\n}}\nfn main() {{}}"));
+    assert!(e.contains("`Show` is implemented for Pair(i64) twice"), "{e}");
+    let e = err(&format!("{SHOW}{PAIR}{pair_show}impl(U: type) Show for Pair(U) {{\n  fn show(p: Pair(U)) -> i64 {{ return 0 }}\n}}\nfn main() {{}}"));
+    assert!(e.contains("`Show` is implemented for Pair(U) twice"), "{e}");
+    // A generic impl's signatures are checked per instance.
+    let e = err(&format!("{SHOW}{PAIR}impl(T: Show) Show for Pair(T) {{\n  fn show(p: Pair(T)) -> bool {{ return true }}\n}}\nfn main() {{ print(Pair(i64) {{ a: 1, b: 2 }}.show()) }}"));
+    assert!(e.contains("`show` of `Show` for Pair(i64) must be fn(Pair(i64)) -> i64, not fn(Pair(i64)) -> bool"), "{e}");
+    // An impl applies only when its parameters' bounds hold.
+    let e = err(&format!("{SHOW}{PAIR}{pair_show}fn main() {{ print(Pair(P) {{ a: P {{ x: 1 }}, b: P {{ x: 2 }} }}.show()) }}"));
+    assert!(e.contains("Pair(P) does not implement `Show`, which has `show`"), "{e}");
+    let e = err(&format!("{SHOW}impl(T: Show) Show for T {{\n  fn show(p: T) -> i64 {{ return 0 }}\n}}\nfn main() {{}}"));
+    assert!(e.contains("an impl must be for a type, not for any `T`"), "{e}");
+    let e = err(&format!("{SHOW}{PAIR}impl(T: Show, U: type) Show for Pair(T) {{\n  fn show(p: Pair(T)) -> i64 {{ return 0 }}\n}}\nfn main() {{}}"));
+    assert!(e.contains("`U` is not part of the impl's type"), "{e}");
+    let e = err(&format!("{SHOW}impl(N: i64) Show for [i64; N] {{\n  fn show(p: [i64; N]) -> i64 {{ return 0 }}\n}}\nfn main() {{}}"));
+    assert!(e.contains("the parameters of an impl are types"), "{e}");
+    let e = err("impl(T: Ord) Ord for [[T]] {\n  fn compare(a: [[T]], b: [[T]]) -> i64 { return 0 }\n}\nfn main() {}");
+    assert!(e.contains("an impl of `Ord` for [[T]] must be in the module of `Ord`"), "{e}");
+    let e = err("struct P { x: i64 }\nstruct Sorted(T: Ord) { xs: [T] }\nfn main() { let s = Sorted(P) { xs: [] } }");
+    assert!(e.contains("P does not implement `Ord`, which `T` of `Sorted` needs"), "{e}");
+}
+
 // ---- function values ----
 
 #[test]

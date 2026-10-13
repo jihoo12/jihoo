@@ -27,8 +27,8 @@ pub(crate) struct Sig {
 }
 
 pub(crate) type Fields = Rc<Vec<(String, Type)>>;
-/// What an impl is of: the key of its trait, and its type.
-pub(crate) type ImplHead = (String, Type);
+/// What an impl is of: the key of its trait, and its type unless it is generic.
+pub(crate) type ImplHead = (String, Option<Type>);
 /// The variants of an enum: names and payload types.
 pub(crate) type Variants = Rc<Vec<(String, Vec<Type>)>>;
 

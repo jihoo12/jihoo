@@ -1095,6 +1095,10 @@ impl<'a> FnCx<'a> {
                 // `geo.Shape.Circle(1)`, `Option(i64).Some(1)`: a variant.
                 if let ExprKind::Field(base, variant) = &f.kind {
                     if let Some(en) = self.enum_path(base)? {
+                        // `Option(i64).compare(a, b)`: a trait function of the enum.
+                        if let (false, crate::enums::EnumRef::Known(ty)) = (self.is_variant_call(&en, variant), &en) {
+                            return self.type_call(e.pos, ty.clone(), variant, args);
+                        }
                         return self.construct(e.pos, en, variant, Some(args), expected);
                     }
                     // `shapes.Shape.area(s)`: a function of another module's
@@ -1536,7 +1540,7 @@ impl<'a> FnCx<'a> {
                         return self.call_value(pos, r, &format!("`{name}`"), args);
                     }
                     // `Shape.Circle(1)`: a variant of an enum.
-                    if let Some(en) = self.enum_path(&base_expr)? {
+                    if let Some(en) = self.enum_path(&base_expr)?.filter(|en| self.is_variant_call(en, field)) {
                         return self.construct(pos, en, field, Some(args), expected);
                     }
                     // `Ord.compare(a, b)`, `T.zero()`: a function of a trait or type.

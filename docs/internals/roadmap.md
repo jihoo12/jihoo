@@ -85,6 +85,9 @@
     directly, so JIR is unchanged; impls live in the trait's or the type's
     module, and every one is checked. The prelude has `Ord`, for integers
     and `str`, and `lists.sort(xs)` sorts by it.
+    Generic impls (`impl(T: Ord) Ord for Option(T)`), matched against a
+    type's shape and applying when their parameters' bounds hold; the prelude
+    orders options, lists and tuples.
 
 ## Next
 
@@ -98,9 +101,8 @@
   `#![comptime]` modules, so `meta` costs programs nothing and works in
   freestanding ones; random pipelines in the fuzzer, each checked against
   the same stages written out as a loop.
-- **Traits** ([design](traits.md)), before v1: generic impls
-  (`impl(T: Ord) Ord for Option(T)`), then `Hash` and `Show` in the prelude,
-  a `Map(K, V)`, comparison operators through `Ord`, and deriving.
+- **Traits** ([design](traits.md)), before v1: `Hash` and `Show` in the
+  prelude, a `Map(K, V)`, comparison operators through `Ord`, and deriving.
 - **Memory:** a report of where native code copies lists (`jihoo build
   --cost`), which needs source positions in JIR; moving a field out of a
   value at its last use instead of copying it.
