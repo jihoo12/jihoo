@@ -1,0 +1,38 @@
+// `Hash` and `hash_of` give the same hash in every profile, equal for equal
+// values; `Ord` orders floats totally.
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+impl Hash for Point {
+    fn hash(p: Point, h: Hasher) -> Hasher {
+        return p.y.hash(p.x.hash(h))
+    }
+}
+
+fn same(comptime T: Hash, a: T, b: T) -> i64 {
+    if hash_of(a) == hash_of(b) {
+        return 1
+    }
+    return 0
+}
+
+fn entry() -> i64 {
+    out(hash_of(42) as i64)                   // the same number everywhere
+    out(hash_of(-1) as i64)
+    let small: u8 = 7
+    out(hash_of((small, true)) as i64)
+    let some: Option(i64) = Option.Some(3)
+    out(hash_of(some) as i64)
+    out(same(Point { x: 1, y: 2 }, Point { x: 1, y: 2 }))   // 1
+    out(same(Point { x: 1, y: 2 }, Point { x: 2, y: 1 }))   // 0
+    out(same((1, 2, 3), (1, 2, 3)))           // 1
+    // Floats in total order: -0.0 before 0.0, NaN after infinity.
+    out((-0.0).compare(0.0))                  // -1
+    out((0.0 / 0.0).compare(1.0 / 0.0))       // 1
+    let f: f32 = -2.5
+    out(f.compare(-1.0))                      // -1
+    return (1.5).compare(1.5)                 // 0
+}

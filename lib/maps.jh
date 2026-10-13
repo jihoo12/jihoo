@@ -1,0 +1,142 @@
+// Hash maps for hosted and native programs: a `Map(K, V)` holds a value for
+// each of some keys, found by the keys' `Hash` and `==`. A map is a value, as
+// a list is: `set` and `remove` give a new map and leave the one passed in
+// alone, and `m = maps.set(m, k, v)` changes `m` in place, copying nothing.
+//
+//   import maps
+//   let ages = maps.new(str, i64)
+//   ages = maps.set(ages, "ann", 31)
+//   match maps.get(ages, "ann") {
+//       Some(a) => print(a)                   // 31
+//       None => print("unknown")
+//   }
+//
+// The keys are kept in buckets by their hash, so `keys`, `values` and
+// `entries` give them in no useful order, but in the same order in every
+// profile.
+
+pub struct Map(K: Hash, V: type) {
+    buckets: [[(K, V)]]
+    count: i64
+}
+
+// An empty map.
+pub fn new(comptime K: Hash, comptime V: type) -> Map(K, V) {
+    return Map(K, V) { buckets: empty_buckets(K, V, 8), count: 0 }
+}
+
+// How many keys `m` has.
+pub fn size(comptime K: Hash, comptime V: type, m: Map(K, V)) -> i64 {
+    return m.count
+}
+
+// The value `m` has for `k`, if any.
+pub fn get(comptime K: Hash, comptime V: type, m: Map(K, V), k: K) -> Option(V) {
+    for e in m.buckets[slot(k, len(m.buckets))] {
+        if e.0 == k {
+            return Option.Some(e.1)
+        }
+    }
+    return Option.None
+}
+
+// Whether `m` has a value for `k`.
+pub fn has(comptime K: Hash, comptime V: type, m: Map(K, V), k: K) -> bool {
+    for e in m.buckets[slot(k, len(m.buckets))] {
+        if e.0 == k {
+            return true
+        }
+    }
+    return false
+}
+
+// `m` with `v` for `k`, in place of the value it had.
+pub fn set(comptime K: Hash, comptime V: type, m: Map(K, V), k: K, v: V) -> Map(K, V) {
+    let i = slot(k, len(m.buckets))
+    for j, e in m.buckets[i] {
+        if e.0 == k {
+            m.buckets[i][j] = (k, v)
+            return m
+        }
+    }
+    push(m.buckets[i], (k, v))
+    m.count += 1
+    // Two keys a bucket on average at most, so a lookup compares few keys.
+    if m.count > 2 * len(m.buckets) {
+        return grown(m)
+    }
+    return m
+}
+
+// `m` without `k`, if it has it.
+pub fn remove(comptime K: Hash, comptime V: type, m: Map(K, V), k: K) -> Map(K, V) {
+    let i = slot(k, len(m.buckets))
+    let kept: [(K, V)] = []
+    for e in m.buckets[i] {
+        if e.0 != k {
+            push(kept, e)
+        }
+    }
+    m.count -= len(m.buckets[i]) - len(kept)
+    m.buckets[i] = kept
+    return m
+}
+
+// The keys of `m`.
+pub fn keys(comptime K: Hash, comptime V: type, m: Map(K, V)) -> [K] {
+    let out: [K] = []
+    for b in m.buckets {
+        for e in b {
+            push(out, e.0)
+        }
+    }
+    return out
+}
+
+// The values of `m`, in the order of `keys`.
+pub fn values(comptime K: Hash, comptime V: type, m: Map(K, V)) -> [V] {
+    let out: [V] = []
+    for b in m.buckets {
+        for e in b {
+            push(out, e.1)
+        }
+    }
+    return out
+}
+
+// The keys of `m` with their values, in the order of `keys`.
+pub fn entries(comptime K: Hash, comptime V: type, m: Map(K, V)) -> [(K, V)] {
+    let out: [(K, V)] = []
+    for b in m.buckets {
+        for e in b {
+            push(out, e)
+        }
+    }
+    return out
+}
+
+// The bucket of key `k` among `n`.
+fn slot(comptime K: Hash, k: K, n: i64) -> i64 {
+    return (hash_of(k) % n as u64) as i64
+}
+
+fn empty_buckets(comptime K: Hash, comptime V: type, n: i64) -> [[(K, V)]] {
+    let buckets: [[(K, V)]] = []
+    for _ in 0..n {
+        let b: [(K, V)] = []
+        push(buckets, b)
+    }
+    return buckets
+}
+
+// `m` with twice the buckets.
+fn grown(comptime K: Hash, comptime V: type, m: Map(K, V)) -> Map(K, V) {
+    let n = len(m.buckets) * 2
+    let buckets = empty_buckets(K, V, n)
+    for b in m.buckets {
+        for e in b {
+            push(buckets[slot(e.0, n)], e)
+        }
+    }
+    return Map(K, V) { buckets: buckets, count: m.count }
+}

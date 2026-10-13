@@ -125,10 +125,14 @@ function, so `larger(s, Sq { w: 4 })` needs no `Sq`.
 
 Bodies are still checked per instance, as for every generic function.
 
-## `Ord`
+## The standard traits
 
-The prelude declares `Ord`, an order, and implements it for every integer type,
-`str`, and, when their parts have one, `Option(T)` (`None` first), lists
+The prelude declares three traits, so every module can use them without an
+import.
+
+### `Ord`
+
+An order. The prelude implements it for every number type, `str`, and, when their parts have one, `Option(T)` (`None` first), lists
 (element by element, the shorter first when one is the start of the other) and
 tuples of two or three parts (part by part):
 
@@ -139,8 +143,55 @@ pub trait Ord {
 }
 ```
 
+Floats are ordered by IEEE 754's total order, `-inf < ... < -0.0 < 0.0 < ... <
+inf < NaN`, so that sorting them always ends; `<` on floats keeps its IEEE
+meaning, in which NaN is unordered and `-0.0 == 0.0`.
+
 [`lists.sort`](../reference/standard-library.md#lists) sorts by it, so
 `lists.sort(xs)` works for any element type with an `Ord`.
+
+### `Hash`
+
+Values that can be hashed, for [`maps`](../reference/standard-library.md#maps).
+A hasher is a value that `hash` folds a value into and returns, so hashing
+needs no pointers and works in every profile:
+
+```jihoo
+pub trait Hash {
+    fn hash(x: Self, h: Hasher) -> Hasher
+}
+
+struct Point { x: i64, y: i64 }
+
+impl Hash for Point {
+    fn hash(p: Point, h: Hasher) -> Hasher {
+        return p.y.hash(p.x.hash(h))       // the fields in turn
+    }
+}
+
+print(hash_of(Point { x: 1, y: 2 }))       // a u64, the same in every profile
+```
+
+Equal values (by `==`) must hash the same, which folding every field that
+`==` compares gives. The prelude implements `Hash` for integers, `bool`, `str`,
+and lists, `Option` and tuples of hashable parts; not for floats, whose `==`
+holds for `0.0` and `-0.0` and never for NaN.
+
+### `Show`
+
+Values that can be written as text:
+
+```jihoo
+pub trait Show {
+    fn show(x: Self) -> str
+}
+```
+
+`print(x)` prints `x.show()` for a value that is not a number, a `bool` or a
+`str`, so a type with a `Show` prints as itself. The prelude implements it for
+numbers, `bool` and `str` (the text itself), and for lists (`[1, 2]`),
+`Option` (`Some(1)`, `None`), `Result` (`Ok(1)`, `Err(why)`) and tuples
+(`(1, a)`) whose parts have one.
 
 ## How it works
 

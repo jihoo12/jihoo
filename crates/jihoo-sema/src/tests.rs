@@ -689,6 +689,27 @@ fn generic_impl_errors() {
     assert!(e.contains("P does not implement `Ord`, which `T` of `Sorted` needs"), "{e}");
 }
 
+#[test]
+fn standard_traits() {
+    let src = "struct P { x: i64, y: i64 }\n\
+               impl Show for P {\n  fn show(p: P) -> str { return \"P\" + p.x.show() + p.y.show() }\n}\n\
+               impl Hash for P {\n  fn hash(p: P, h: Hasher) -> Hasher { return p.y.hash(p.x.hash(h)) }\n}\n\
+               fn main() {\n  print(P { x: 1, y: 2 })\n  let xs: [u8] = [3, 1]\n  print(xs)\n  print((1.5, \"a\", true))\n\
+                 let o: Option(P) = Option.Some(P { x: 0, y: 9 })\n  print(o)\n  let r: Result(i64, str) = Result.Err(\"no\")\n  print(r)\n\
+                 print(hash_of(P { x: 1, y: 2 }) == hash_of(P { x: 1, y: 2 }))\n  print(hash_of(P { x: 1, y: 2 }) == hash_of(P { x: 2, y: 1 }))\n\
+                 print(hash_of(\"ab\") == hash_of(\"a\" + \"b\"))\n  print((-0.0).compare(0.0))\n  print((0.0 / 0.0).less(1.0 / 0.0))\n}";
+    assert_eq!(run(src), "P12\n[3, 1]\n(1.5, a, true)\nSome(P09)\nErr(no)\ntrue\nfalse\ntrue\n-1\nfalse\n");
+    let e = err("struct P { x: i64 }\nfn main() { print(P { x: 1 }) }");
+    assert!(e.contains("cannot print a value of type P; give the type a `Show`"), "{e}");
+    // The prelude's plain functions and types are only in programs that use them.
+    let m = check("fn main() { print(1) }").unwrap();
+    assert!(m.structs.is_empty() && m.funcs.len() == 1, "{m}");
+    let m = check("fn main() { print(hash_of(1)) }").unwrap();
+    assert!(m.structs.iter().any(|s| s.name == "prelude.Hasher") && m.funcs.iter().any(|f| f.name == "prelude.mix"), "{m}");
+    // Hashing works in freestanding programs too; showing needs `str`.
+    check(&fs("struct P { x: i64 }\nfn f() -> u64 { return hash_of((1, true)) ^ hash_of(Option.Some(2)) }")).unwrap();
+}
+
 // ---- function values ----
 
 #[test]

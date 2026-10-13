@@ -202,3 +202,290 @@ impl(A: Ord, B: Ord, C: Ord) Ord for (A, B, C) {
         return x.2.compare(y.2)
     }
 }
+
+// Floats in IEEE 754's total order: -inf < ... < -0.0 < 0.0 < ... < inf < NaN
+// (jihoo has one NaN). Sorting floats with it always ends; `<` keeps its IEEE
+// meaning, in which NaN is unordered and -0.0 == 0.0.
+impl Ord for f64 {
+    fn compare(a: f64, b: f64) -> i64 {
+        let x = to_bits(a) as i64
+        let y = to_bits(b) as i64
+        if x < 0 {
+            x = x ^ 9223372036854775807
+        }
+        if y < 0 {
+            y = y ^ 9223372036854775807
+        }
+        return x.compare(y)
+    }
+}
+
+impl Ord for f32 {
+    fn compare(a: f32, b: f32) -> i64 {
+        let x = to_bits(a) as i32
+        let y = to_bits(b) as i32
+        if x < 0 {
+            x = x ^ 2147483647
+        }
+        if y < 0 {
+            y = y ^ 2147483647
+        }
+        return x.compare(y)
+    }
+}
+
+// ---- hashing ----
+
+// What `Hash` folds values into. It is a value, so hashing needs no pointers
+// and works in every profile.
+pub struct Hasher {
+    state: u64
+}
+
+// Values that can be hashed: equal values (by `==`) must fold the same words
+// into the hasher. A struct's impl folds its fields in turn:
+//
+//   fn hash(p: Point, h: Hasher) -> Hasher {
+//       return p.y.hash(p.x.hash(h))
+//   }
+pub trait Hash {
+    fn hash(x: Self, h: Hasher) -> Hasher
+}
+
+// The hash of `x`: the same for equal values, in every profile.
+pub fn hash_of(comptime T: Hash, x: T) -> u64 {
+    let z = x.hash(Hasher { state: 14695981039346656037 }).state
+    // The finish of splitmix64, so that every bit of the input moves every
+    // bit of the hash.
+    z = (z ^ (z >> 30)) * 13787848793156543929
+    z = (z ^ (z >> 27)) * 10723151780598845931
+    return z ^ (z >> 31)
+}
+
+// `h` with the word `x` folded in.
+fn mix(h: Hasher, x: u64) -> Hasher {
+    let s = (h.state ^ x) * 11400714819323198485
+    return Hasher { state: s ^ (s >> 32) }
+}
+
+impl Hash for i8 {
+    fn hash(x: i8, h: Hasher) -> Hasher {
+        return mix(h, x as u64)
+    }
+}
+
+impl Hash for i16 {
+    fn hash(x: i16, h: Hasher) -> Hasher {
+        return mix(h, x as u64)
+    }
+}
+
+impl Hash for i32 {
+    fn hash(x: i32, h: Hasher) -> Hasher {
+        return mix(h, x as u64)
+    }
+}
+
+impl Hash for i64 {
+    fn hash(x: i64, h: Hasher) -> Hasher {
+        return mix(h, x as u64)
+    }
+}
+
+impl Hash for u8 {
+    fn hash(x: u8, h: Hasher) -> Hasher {
+        return mix(h, x as u64)
+    }
+}
+
+impl Hash for u16 {
+    fn hash(x: u16, h: Hasher) -> Hasher {
+        return mix(h, x as u64)
+    }
+}
+
+impl Hash for u32 {
+    fn hash(x: u32, h: Hasher) -> Hasher {
+        return mix(h, x as u64)
+    }
+}
+
+impl Hash for u64 {
+    fn hash(x: u64, h: Hasher) -> Hasher {
+        return mix(h, x as u64)
+    }
+}
+
+impl Hash for bool {
+    fn hash(x: bool, h: Hasher) -> Hasher {
+        return mix(h, x as u64)
+    }
+}
+
+impl Hash for str {
+    fn hash(s: str, h: Hasher) -> Hasher {
+        h = mix(h, len(s) as u64)
+        for b in s {
+            h = mix(h, b as u64)
+        }
+        return h
+    }
+}
+
+impl(T: Hash) Hash for [T] {
+    fn hash(xs: [T], h: Hasher) -> Hasher {
+        h = mix(h, len(xs) as u64)
+        for x in xs {
+            h = x.hash(h)
+        }
+        return h
+    }
+}
+
+impl(T: Hash) Hash for Option(T) {
+    fn hash(o: Option(T), h: Hasher) -> Hasher {
+        match o {
+            Some(x) => return x.hash(mix(h, 1))
+            None => return mix(h, 0)
+        }
+    }
+}
+
+impl(A: Hash, B: Hash) Hash for (A, B) {
+    fn hash(t: (A, B), h: Hasher) -> Hasher {
+        return t.1.hash(t.0.hash(h))
+    }
+}
+
+impl(A: Hash, B: Hash, C: Hash) Hash for (A, B, C) {
+    fn hash(t: (A, B, C), h: Hasher) -> Hasher {
+        return t.2.hash(t.1.hash(t.0.hash(h)))
+    }
+}
+
+// ---- showing ----
+
+// Values that can be written as text. `print(x)` prints `x.show()` for a
+// value that is not a number, a bool or a `str`.
+pub trait Show {
+    fn show(x: Self) -> str
+}
+
+impl Show for i8 {
+    fn show(x: i8) -> str {
+        return to_str(x)
+    }
+}
+
+impl Show for i16 {
+    fn show(x: i16) -> str {
+        return to_str(x)
+    }
+}
+
+impl Show for i32 {
+    fn show(x: i32) -> str {
+        return to_str(x)
+    }
+}
+
+impl Show for i64 {
+    fn show(x: i64) -> str {
+        return to_str(x)
+    }
+}
+
+impl Show for u8 {
+    fn show(x: u8) -> str {
+        return to_str(x)
+    }
+}
+
+impl Show for u16 {
+    fn show(x: u16) -> str {
+        return to_str(x)
+    }
+}
+
+impl Show for u32 {
+    fn show(x: u32) -> str {
+        return to_str(x)
+    }
+}
+
+impl Show for u64 {
+    fn show(x: u64) -> str {
+        return to_str(x)
+    }
+}
+
+impl Show for f32 {
+    fn show(x: f32) -> str {
+        return to_str(x)
+    }
+}
+
+impl Show for f64 {
+    fn show(x: f64) -> str {
+        return to_str(x)
+    }
+}
+
+impl Show for bool {
+    fn show(x: bool) -> str {
+        return to_str(x)
+    }
+}
+
+impl Show for str {
+    fn show(s: str) -> str {
+        return s
+    }
+}
+
+// `[1, 2, 3]`.
+impl(T: Show) Show for [T] {
+    fn show(xs: [T]) -> str {
+        let s = "["
+        for i, x in xs {
+            if i > 0 {
+                s = s + ", "
+            }
+            s = s + x.show()
+        }
+        return s + "]"
+    }
+}
+
+// `Some(3)` or `None`.
+impl(T: Show) Show for Option(T) {
+    fn show(o: Option(T)) -> str {
+        match o {
+            Some(x) => return "Some(" + x.show() + ")"
+            None => return "None"
+        }
+    }
+}
+
+// `Ok(3)` or `Err(why)`.
+impl(T: Show, E: Show) Show for Result(T, E) {
+    fn show(r: Result(T, E)) -> str {
+        match r {
+            Ok(x) => return "Ok(" + x.show() + ")"
+            Err(e) => return "Err(" + e.show() + ")"
+        }
+    }
+}
+
+// `(1, a)`.
+impl(A: Show, B: Show) Show for (A, B) {
+    fn show(t: (A, B)) -> str {
+        return "(" + t.0.show() + ", " + t.1.show() + ")"
+    }
+}
+
+impl(A: Show, B: Show, C: Show) Show for (A, B, C) {
+    fn show(t: (A, B, C)) -> str {
+        return "(" + t.0.show() + ", " + t.1.show() + ", " + t.2.show() + ")"
+    }
+}

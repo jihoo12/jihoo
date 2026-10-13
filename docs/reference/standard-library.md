@@ -6,9 +6,10 @@ One of them, the prelude, needs no import.
 
 | module | profiles | what |
 |--------|----------|------|
-| [prelude](#prelude) | all | `Option(T)` and `Result(T, E)`, without an import |
+| [prelude](#prelude) | all | `Option(T)`, `Result(T, E)` and the traits `Ord`, `Hash` and `Show`, without an import |
 | [`strings`](#strings) | hosted, native | searching, splitting, joining, trimming and parsing text |
 | [`lists`](#lists) | hosted, native | sorting, mapping and searching lists, and fused pipelines (`fuse!`) |
+| [`maps`](#maps) | hosted, native | hash maps, `Map(K, V)`, for keys with `Hash` and `==` |
 | [`meta`](#meta) | all, while compiling | the shape of code, for macros that read the code they are given |
 | [`libc`](#libc) | native | declarations of C library functions |
 | [`sys`](#sys) | native, freestanding | Linux syscall numbers of the target |
@@ -19,7 +20,7 @@ One of them, the prelude, needs no import.
 | [`thread`](#thread) | native | threads on all cores, with POSIX threads |
 | [`channel`](#channel) | native | channels between threads, with `close` |
 
-`strings` and `lists` work on `str` and lists, which hosted and native programs have.
+`strings`, `lists` and `maps` work on `str` and lists, which hosted and native programs have.
 `sys`, `alloc`, `io` and `sync` are marked `#![freestanding]`: they use neither
 GC nor libc, only `syscall`, so native programs can import them too. `coro`,
 `thread` and `channel` are marked `#![native]`: they use the C library to
@@ -64,14 +65,26 @@ fn main() {
 }
 ```
 
-The prelude also declares the [trait](../language/traits.md#ord) `Ord`, an order
-(`compare` and `less`), with impls for every integer type and `str`, and for
-`Option(T)`, lists `[T]` and tuples of two or three parts whose parts have one.
+The prelude also declares three [traits](../language/traits.md#the-standard-traits):
+
+| trait | functions | implemented for |
+|-------|-----------|-----------------|
+| `Ord` | `compare(a, b) -> i64`, `less(a, b) -> bool` | numbers (floats in IEEE total order), `str`, and `Option`, lists and tuples of two or three parts whose parts have one |
+| `Hash` | `hash(x, h: Hasher) -> Hasher` | integers, `bool`, `str`, and lists, `Option` and tuples of hashable parts |
+| `Show` | `show(x) -> str` | numbers, `bool`, `str`, and lists, `Option`, `Result` and tuples of parts with one |
+
+`hash_of(x) -> u64` is the hash of a value with `Hash`, the same in every
+profile. `print(x)` prints `x.show()` for a value that is not a number, a
+`bool` or a `str`. `Show` and the impls for `str` and lists need what hosted and
+native programs have; `Ord` and `Hash` for the other types work in every
+profile.
 
 A module's own item of the same name comes first, so a program that declares
-its own `Option` uses that one. The compiler carries the prelude in itself, so
-it is the one it was built with whatever the search path holds; in JIR its
-types are named `prelude.Option(i64)` and so on.
+its own `Option` uses that one. The prelude's functions, types and impls are
+only part of a program that uses them, so it costs nothing otherwise. The
+compiler carries the prelude in itself, so it is the one it was built with
+whatever the search path holds; in JIR its types are named
+`prelude.Option(i64)` and so on.
 
 ## strings
 
@@ -178,6 +191,44 @@ The functions are evaluated once, before the loop. `fuse!` is a
 [`meta`](#meta) and asks `type_of` for the type the last stage gives. A stage
 it does not know stops the compilation with a message that names it.
 `examples/pipe.jh` compares it with `map`, `filter` and `fold`.
+
+## maps
+
+Hash maps for hosted and native programs. A `Map(K, V)` holds a value for each
+of some keys, found by the keys' [`Hash`](../language/traits.md#the-standard-traits)
+and `==`. A map is a value, like a list: `set` and `remove` return a new map
+and leave the one passed in alone, and `m = maps.set(m, k, v)` changes `m` in
+place, natively without copying it.
+
+```jihoo
+import maps
+
+fn main() {
+    let counts = maps.new(str, i64)
+    for w in ["to", "be", "or", "not", "to"] {
+        match maps.get(counts, w) {
+            Some(n) => counts = maps.set(counts, w, n + 1)
+            None => counts = maps.set(counts, w, 1)
+        }
+    }
+    print(maps.get(counts, "to"))           // Some(2)
+    print(maps.size(counts))                // 4
+}
+```
+
+| function | description |
+|----------|-------------|
+| `new(K: Hash, V) -> Map(K, V)` | an empty map |
+| `size(m) -> i64` | how many keys `m` has |
+| `get(m, k) -> Option(V)` | the value for `k`, if any |
+| `has(m, k) -> bool` | whether there is a value for `k` |
+| `set(m, k, v) -> Map(K, V)` | `m` with `v` for `k` |
+| `remove(m, k) -> Map(K, V)` | `m` without `k` |
+| `keys(m) -> [K]`, `values(m) -> [V]`, `entries(m) -> [(K, V)]` | its contents, in no useful order but the same in every profile |
+
+The keys are kept in buckets by their hash, two to a bucket on average at
+most; a lookup hashes the key once and compares it with the few keys in its
+bucket.
 
 ## meta
 

@@ -114,17 +114,18 @@ and `f32`/`f64`, with exact float builtins (`sqrt`, `floor`, `round`, ...);
 structs, tuples, bounds-checked arrays and enums with `match`, `Option` and `Result`;
 `while` and `for` loops (over ranges, arrays, lists and strings); blocks as
 expressions; function values; generic functions and structs, with inferred
-type arguments; traits with impls and bounds (`comptime T: Ord`); modules
-with private items and fields; compile-time evaluation (`const`, `comptime`)
-and macros, both run on the VM, with functions on code, `meta` to look
-inside code and `type_of` to ask its type.
+type arguments; traits with impls and bounds (`comptime T: Ord`), and the
+standard traits `Ord`, `Hash` and `Show`; modules with private items and
+fields; compile-time evaluation (`const`, `comptime`) and macros, both run on
+the VM, with functions on code, `meta` to look inside code and `type_of` to
+ask its type.
 
 - **native and hosted:** `str` (bytes, slices, ordering), lists `[T]` with
   `push` and `pop`, `print` and `read_line`, `ref` for recursive data, `cell`
-  for shared state, closures, tasks with channels and `select`; the `strings`
-  and `lists` libraries. Natively these are freed by the compiler and tasks are
-  threads, which share no cells; on the VM a GC frees them and tasks take
-  turns on one thread.
+  for shared state, closures, tasks with channels and `select`; the `strings`,
+  `lists` and `maps` libraries. Natively these are freed by the compiler and
+  tasks are threads, which share no cells; on the VM a GC frees them and tasks
+  take turns on one thread.
 - **native and freestanding:** pointers, `syscall` and inline asm, for x86_64
   and aarch64 Linux (`--target` builds for either, and modules can have one
   file per target); closures passed to `comptime` parameters; functions C can

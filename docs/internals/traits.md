@@ -1,7 +1,7 @@
 # Design: traits
 
-Status: steps 1 (inferred type arguments), 2 (traits, impls and bounds) and 3
-(generic impls) are done; the rest is proposed.
+Status: steps 1 to 4 (inferred type arguments; traits, impls and bounds; generic
+impls; the standard traits) are done; the rest is proposed.
 
 ## Why
 
@@ -288,7 +288,7 @@ later. Choices made on the way:
 `generic_impls` and `generic_impl_errors` in `crates/jihoo-sema/src/tests.rs`,
 `tests/diff/generic_impls.jh` and `tests/diff-lists/traits.jh` check them.
 
-### 4. The standard traits
+### 4. The standard traits (done)
 
 - `Ord` in the prelude, as above. Floats get `compare` by IEEE 754
   `totalOrder` (`-NaN < -inf < ... < -0.0 < 0.0 < ... < inf < NaN`), so
@@ -306,6 +306,31 @@ later. Choices made on the way:
 `==` stays built in and structural; there is no `Eq` trait, because there is
 no type whose equality a user should be able to make disagree with its
 structure without wrapping it.
+
+Done ([The standard traits](../language/traits.md#the-standard-traits),
+[`maps`](../reference/standard-library.md#maps)). As planned, with these
+choices:
+
+- `hash_of(x) -> u64` gives a hash: it starts the hasher, which only the
+  prelude can make, and ends with splitmix64's finish. Each word is folded
+  in by a multiply and a shift. The hashes are the same in every profile,
+  which `tests/diff/hashing.jh` checks, so a map's order is too.
+- Floats have no `Hash`, since `==` on them is not structural (`0.0 ==
+  -0.0`, NaN unequal to itself).
+- `Show` is display, not debugging: a `str` shows as itself, so `("a", 1)`
+  shows as `(a, 1)`. `Result` has one too.
+- The prelude's plain functions and types (`Hasher`, and `mix`, which folds a
+  word in) are compiled only when a program uses them, as its generic items
+  always were, so a program that does not hash has neither in its JIR. A
+  module's own trait hides the prelude's of the same name, as its other items
+  do.
+- `maps` has `new`, `size`, `get`, `has`, `set`, `remove`, `keys`, `values`
+  and `entries`, on buckets of `(K, V)` lists that double when there are
+  more than two keys a bucket. `m = maps.set(m, k, v)` is a consuming call
+  natively: 200 000 inserts and lookups take a fraction of a second.
+
+`standard_traits` in `crates/jihoo-sema/src/tests.rs`, `tests/diff/hashing.jh`
+and `tests/diff-lists/maps.jh` (also under valgrind) check them.
 
 ### 5. Comparison operators through `Ord`
 

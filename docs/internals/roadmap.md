@@ -88,6 +88,9 @@
     Generic impls (`impl(T: Ord) Ord for Option(T)`), matched against a
     type's shape and applying when their parameters' bounds hold; the prelude
     orders options, lists and tuples.
+    The standard traits: `Ord` (floats in total order), `Hash` with
+    `hash_of`, and `Show`, which `print` uses; `lib/maps.jh`, hash maps
+    `Map(K, V)` for keys with `Hash` and `==`.
 
 ## Next
 
@@ -101,8 +104,8 @@
   `#![comptime]` modules, so `meta` costs programs nothing and works in
   freestanding ones; random pipelines in the fuzzer, each checked against
   the same stages written out as a loop.
-- **Traits** ([design](traits.md)), before v1: `Hash` and `Show` in the
-  prelude, a `Map(K, V)`, comparison operators through `Ord`, and deriving.
+- **Traits** ([design](traits.md)), before v1: comparison operators through
+  `Ord`, and deriving `Show` and `Hash` with macros.
 - **Memory:** a report of where native code copies lists (`jihoo build
   --cost`), which needs source positions in JIR; moving a field out of a
   value at its last use instead of copying it.
@@ -114,7 +117,7 @@
 - **Concurrency:** weaker memory orders (acquire/release) for code that needs
   the speed; threads in freestanding programs, over `clone`; tasks on more
   than one core in the VM, which needs a GC that threads can share.
-- **Hosted library:** a map keyed by `str`; files; parsing floats.
+- **Hosted library:** files; parsing floats.
 
 ## Library layers
 

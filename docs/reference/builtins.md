@@ -52,7 +52,7 @@ function called `sqrt` (or declares `extern fn sqrt`) calls its own `sqrt`.
 
 | builtin | result | description |
 |---------|--------|-------------|
-| `print(x)` | `unit` | writes a number, `bool` or text and a newline to stdout: a `str`, or natively also a NUL-terminated `*u8` |
+| `print(x)` | `unit` | writes a number, `bool` or text and a newline to stdout: a `str`, natively also a NUL-terminated `*u8`, or `x.show()` for a value with a [`Show`](../language/traits.md#show) |
 | `push(xs, v)` | `unit` | appends `v` to the [list](../language/lists.md) `xs`, which must be assignable |
 | `pop(xs)` | `T` | removes the last element of the list `xs: [T]` and gives it; the program stops if it is empty |
 | `to_str(x)` | `str` | a number or `bool` as text, as `print` would write it (also in macros) |
@@ -61,8 +61,8 @@ function called `sqrt` (or declares `extern fn sqrt`) calls its own `sqrt`.
 
 `print` writes integers in decimal, bools as `true`/`false`, and floats as the
 shortest text that reads back as the same value (`0.1`, `1.0`, `1e100`, `inf`,
-`NaN`), the same on the VM and natively. To print other values, print their
-parts. During compile-time evaluation `print` writes to stderr. Natively it
+`NaN`), the same on the VM and natively. Other values print as their
+[`Show`](../language/traits.md#show), or else are an error. During compile-time evaluation `print` writes to stderr. Natively it
 writes through the C library's `stdout`, which is buffered: output written
 other ways (`libc.write`, `syscall`) can come before it, and a program that
 traps loses what is still buffered. Freestanding programs have no `print`; the

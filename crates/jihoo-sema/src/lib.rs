@@ -143,6 +143,10 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
     for (m, module) in mods.iter().enumerate() {
         for s in module.program.structs.iter().filter(|s| s.params.is_empty()) {
             let key = env.key(m, &s.name).unwrap();
+            // The prelude's types are only defined when used, at the end.
+            if env.in_prelude(&key) {
+                continue;
+            }
             let t = if s.is_enum() { Type::Enum(key) } else { Type::Struct(key) };
             define(t, s.pos, &mut errors);
         }
@@ -178,6 +182,8 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
                     Some(Err(e)) => errors.push(e),
                     None => {}
                 }
+            } else if env.in_prelude(&key) {
+                // The prelude's functions are compiled when used (`Env::ir_name`).
             } else if (f.is_macro || env.is_code_fn(&key)) && env.generic(&key).is_none() {
                 macros.push(key);
             } else if env.generic(&key).is_none() {
@@ -224,6 +230,9 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
     }
     funcs.extend(env.lambdas());
 
+    for t in env.used_prelude_types() {
+        define(t, Pos::new(1, 1), &mut errors);
+    }
     for t in env.struct_instances() {
         define(t, Pos::new(1, 1), &mut errors);
     }
@@ -1426,11 +1435,18 @@ impl<'a> FnCx<'a> {
                 let [arg] = args else {
                     return Err(Error::new(pos, "`print` takes exactly 1 argument"));
                 };
-                let r = self.expr(arg, None)?;
+                let mut r = self.expr(arg, None)?;
                 // Macros run on the VM, where text is a `str`.
                 let profile = if self.in_macro { Profile::Hosted } else { self.profile() };
                 if !self.ty(r).is_printable(profile) {
-                    return Err(Error::new(arg.pos, format!("cannot print a value of type {}", self.ty(r))));
+                    // A value with a `Show` prints as its text.
+                    match self.show_value(arg.pos, r)? {
+                        Some(text) => r = text,
+                        None => {
+                            let msg = format!("cannot print a value of type {}; give the type a `Show`", self.ty(r));
+                            return Err(Error::new(arg.pos, msg));
+                        }
+                    }
                 }
                 self.emit(Inst::Print { src: r });
                 Ok(self.unit())

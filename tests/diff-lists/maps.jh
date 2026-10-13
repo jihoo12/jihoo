@@ -1,0 +1,42 @@
+// `maps`: hash maps keyed by anything with `Hash` and `==`, values like lists.
+import lists
+import maps
+
+fn entry() -> i64 {
+    let counts = maps.new(str, i64)
+    let words: [str] = ["to", "be", "or", "not", "to", "be", "to"]
+    for w in words {
+        match maps.get(counts, w) {
+            Some(n) => counts = maps.set(counts, w, n + 1)
+            None => counts = maps.set(counts, w, 1)
+        }
+    }
+    out(maps.size(counts))                    // 4
+    for e in lists.sort(maps.entries(counts)) {
+        out(len(e.0) * 10 + e.1)              // be 22, not 31, or 21, to 23
+    }
+    // A copy is its own map.
+    let before = counts
+    counts = maps.remove(counts, "to")
+    out(maps.size(counts) * 10 + maps.size(before))   // 34
+    out(maps.has(before, "to") as i64 - maps.has(counts, "to") as i64)   // 1
+
+    // Enough keys to grow, keyed by tuples.
+    let grid = maps.new((i64, i64), i64)
+    for i in 0..300 {
+        grid = maps.set(grid, (i % 20, i / 20), i)
+    }
+    out(maps.size(grid))                      // 300
+    match maps.get(grid, (5, 7)) {
+        Some(v) => out(v)                     // 145
+        None => out(-1)
+    }
+    let total = 0
+    for v in maps.values(grid) {
+        total += v
+    }
+    out(total)                                // 44850
+    // `print` of a value with `Show` prints its text.
+    out(len(Option.Some((1, "ab")).show()))   // 13: Some((1, ab))
+    return len(maps.keys(grid))
+}

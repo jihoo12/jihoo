@@ -219,15 +219,20 @@ impl<'p> Env<'p> {
         Some((fn_key, m, decl, own))
     }
 
-    /// The traits that code in `module` can use: its own, the prelude's, and
-    /// the public ones of the modules it imports, in a fixed order.
+    /// The traits that code in `module` can use: its own, the public ones of
+    /// the modules it imports, and the prelude's, unless the module has an item
+    /// of the same name; in a fixed order.
     fn visible_traits(&self, module: usize) -> Vec<String> {
-        let mut modules: HashSet<usize> = self.imports_of(module).collect();
-        modules.extend(self.prelude_module());
+        let modules: HashSet<usize> = self.imports_of(module).collect();
+        let prelude = self.prelude_module();
         let mut keys: Vec<String> = self
             .trait_decls
             .iter()
-            .filter(|(_, &(m, t))| m == module || (modules.contains(&m) && t.is_pub))
+            .filter(|(_, &(m, t))| {
+                m == module
+                    || (modules.contains(&m) && t.is_pub)
+                    || (Some(m) == prelude && t.is_pub && !self.defines(module, &t.name))
+            })
             .map(|(k, _)| k.clone())
             .collect();
         keys.sort();
@@ -566,5 +571,17 @@ impl FnCx<'_> {
                 .unwrap_or_default(),
         };
         variants.iter().any(|v| v == name) || !self.env.visible_traits(module).iter().any(|k| self.env.trait_fn(k, name).is_some())
+    }
+}
+
+impl FnCx<'_> {
+    /// `x.show()` for the value `r`, if its type has the prelude's `Show`.
+    pub(crate) fn show_value(&mut self, pos: Pos, r: Reg) -> Result<Option<Reg>, Error> {
+        let Some(key) = self.env.prelude_module().and_then(|p| self.env.trait_key(p, "Show")) else { return Ok(None) };
+        let ty = self.ty(r).clone();
+        if self.env.find_impl(&key, &ty).is_none() {
+            return Ok(None);
+        }
+        self.call_trait_fn(pos, &key, "show", ty, Some(r), &[]).map(Some)
     }
 }

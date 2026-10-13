@@ -173,6 +173,8 @@ pub(crate) struct Env<'p> {
     pending: RefCell<VecDeque<String>>,
     /// The C symbols of the extern functions code uses (see `ir_name`).
     used_externs: RefCell<HashSet<String>>,
+    /// The prelude's plain functions and types that code uses (see `in_prelude`).
+    prelude_used: RefCell<HashSet<String>>,
 }
 
 impl<'p> Env<'p> {
@@ -222,6 +224,7 @@ impl<'p> Env<'p> {
             tuples: RefCell::new(Vec::new()),
             pending: RefCell::new(VecDeque::new()),
             used_externs: RefCell::new(HashSet::new()),
+            prelude_used: RefCell::new(HashSet::new()),
         };
         for (m, module) in mods.iter().enumerate() {
             let prog = &module.program;
@@ -549,6 +552,9 @@ impl<'p> Env<'p> {
                     }
                     let key = self.key(b.module, name).unwrap();
                     self.check_visible(t.pos, self.viewer(b.module, name), &key)?;
+                    if self.in_prelude(&key) {
+                        self.prelude_used.borrow_mut().insert(key.clone());
+                    }
                     Ok(named(decl, key))
                 } else if name.contains('.') && self.key(b.module, name).is_none() {
                     Err(self.key_or_err(t.pos, b, name).unwrap_err())
@@ -879,15 +885,36 @@ impl<'p> Env<'p> {
     }
 
     /// The JIR name of function `key`, for code that calls it or takes it as
-    /// a value. Notes the C functions used this way.
+    /// a value. Notes the C functions used this way, and asks for the
+    /// prelude's functions, which are only compiled when used.
     pub fn ir_name(&self, key: &str) -> String {
         match self.extern_decl(key) {
             Some(d) => {
                 self.used_externs.borrow_mut().insert(d.name.clone());
                 d.name.clone()
             }
-            None => key.to_string(),
+            None => {
+                if self.in_prelude(key) && self.generic(key).is_none() && self.prelude_used.borrow_mut().insert(key.to_string()) {
+                    self.pending.borrow_mut().push_back(key.to_string());
+                }
+                key.to_string()
+            }
         }
+    }
+
+    /// Whether item `key` (a function or type) is the prelude's. The prelude's
+    /// plain functions and types are only part of a program that uses them, so
+    /// that it costs nothing otherwise.
+    pub fn in_prelude(&self, key: &str) -> bool {
+        let module = self.fn_decls.get(key).map(|&(m, _)| m).or_else(|| self.struct_decls.get(key).map(|&(m, _)| m));
+        module.is_some() && module == self.prelude
+    }
+
+    /// The prelude's plain structs and enums that code has used.
+    pub fn used_prelude_types(&self) -> Vec<Type> {
+        let mut keys: Vec<String> = self.prelude_used.borrow().iter().filter(|k| self.struct_decls.contains_key(*k)).cloned().collect();
+        keys.sort();
+        keys.into_iter().map(|k| named(self.struct_decls[&k].1, k)).collect()
     }
 
     /// True if code calls C function `symbol` or takes it as a value.
