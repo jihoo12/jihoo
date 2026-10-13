@@ -7,8 +7,20 @@
 
 #![allow(dead_code)] // each test file uses part of it
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+/// How long building or running one program may take: `JIHOO_TEST_TIMEOUT`
+/// seconds, 120 by default. Test programs take milliseconds (seconds under
+/// valgrind); one that is still going after this is stuck, say in a loop that
+/// a miscompiled condition never leaves, and fails instead of stopping the
+/// whole test run.
+fn limit() -> Duration {
+    let secs = std::env::var("JIHOO_TEST_TIMEOUT").ok().map(|v| v.parse().expect("JIHOO_TEST_TIMEOUT is not a number"));
+    Duration::from_secs(secs.unwrap_or(120))
+}
 
 pub const JIHOO: &str = env!("CARGO_BIN_EXE_jihoo");
 
@@ -74,22 +86,50 @@ pub fn run_under(body: &str, profile: Profile, work: &Path, name: &str, runner: 
     let src = work.join(format!("{name}.{}.jh", profile.name()));
     std::fs::write(&src, wrap(body, profile)).unwrap();
     let out = if profile == Profile::Hosted {
-        Command::new(JIHOO).arg("run").arg(&src).output().unwrap()
+        within(Command::new(JIHOO).arg("run").arg(&src))?
     } else {
         let bin = work.join(format!("{name}.{}", profile.name()));
-        let build = Command::new(JIHOO).arg("build").arg(&src).arg("-o").arg(&bin).output().unwrap();
+        let build = within(Command::new(JIHOO).arg("build").arg(&src).arg("-o").arg(&bin))?;
         if !build.status.success() {
             return Err(format!("`jihoo build` failed: {}", String::from_utf8_lossy(&build.stderr)));
         }
         let out = match runner {
-            Some([tool, args @ ..]) => Command::new(tool).args(args).arg(&bin).output().unwrap(),
-            _ => Command::new(&bin).output().unwrap(),
+            Some([tool, args @ ..]) => within(Command::new(tool).args(args).arg(&bin))?,
+            _ => within(&mut Command::new(&bin))?,
         };
         std::fs::remove_file(&bin).unwrap();
         out
     };
     std::fs::remove_file(&src).unwrap();
     outcome(out)
+}
+
+/// Runs `cmd` to the end, or kills it after `limit()`.
+fn within(cmd: &mut Command) -> Result<Output, String> {
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    // Read both pipes as the program writes, so a full pipe never blocks it.
+    let reader = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            pipe.read_to_end(&mut buf).unwrap();
+            buf
+        })
+    };
+    let stdout = reader(Box::new(child.stdout.take().unwrap()));
+    let stderr = reader(Box::new(child.stderr.take().unwrap()));
+    let (start, limit) = (Instant::now(), limit());
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > limit {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            return Err(format!("`{}` did not finish within {} seconds", cmd.get_program().display(), limit.as_secs()));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    Ok(Output { status, stdout: stdout.join().unwrap(), stderr: stderr.join().unwrap() })
 }
 
 fn outcome(out: Output) -> Result<Outcome, String> {
