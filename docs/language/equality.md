@@ -38,7 +38,9 @@ either, and the error says which part is to blame.
 
 Both sides must have the same type. Strings are also ordered: `<`, `<=`, `>`
 and `>=` compare them byte by byte, a prefix first (`"app" < "apple"`). There
-is no ordering on structs, enums, arrays or lists.
+is no built-in ordering on structs, enums, arrays or lists; a type with an
+[`Ord`](traits.md#ord) is ordered by it, and `==` stays structural whatever
+`compare` says.
 
 ## How it works
 

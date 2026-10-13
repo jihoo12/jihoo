@@ -585,3 +585,20 @@ impl FnCx<'_> {
         self.call_trait_fn(pos, &key, "show", ty, Some(r), &[]).map(Some)
     }
 }
+
+impl FnCx<'_> {
+    /// `lhs op rhs`, an ordering (`<`, `<=`, `>`, `>=`) of two values of a type
+    /// without an order of its own, as `compare(lhs, rhs) op 0` through the
+    /// prelude's `Ord`, if the type has one.
+    pub(crate) fn ordered(&mut self, pos: Pos, op: jihoo_ir::BinOp, lhs: Reg, rhs: Reg) -> Result<Option<Reg>, Error> {
+        let Some(key) = self.env.prelude_module().and_then(|p| self.env.trait_key(p, "Ord")) else { return Ok(None) };
+        let ty = self.ty(lhs).clone();
+        if self.env.find_impl(&key, &ty).is_none() {
+            return Ok(None);
+        }
+        let (func, _) = self.trait_instance(pos, &key, "compare", ty)?;
+        let c = self.emit_to(Type::I64, |dst| Inst::Call { dst, func, args: vec![lhs, rhs] });
+        let zero = self.konst(Type::I64, 0);
+        Ok(Some(self.emit_to(Type::Bool, |dst| Inst::Binary { dst, op, lhs: c, rhs: zero })))
+    }
+}

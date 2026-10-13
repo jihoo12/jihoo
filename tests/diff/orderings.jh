@@ -1,0 +1,63 @@
+// `<`, `<=`, `>` and `>=` on a type with an `Ord` call its `compare`, so
+// generic code written with operators works for it unchanged.
+
+struct Version {
+    major: i64
+    minor: i64
+}
+
+impl Ord for Version {
+    fn compare(a: Version, b: Version) -> i64 {
+        if a.major != b.major {
+            return a.major.compare(b.major)
+        }
+        return a.minor.compare(b.minor)
+    }
+}
+
+enum Level {
+    Low
+    High(i64)
+}
+
+impl Ord for Level {
+    fn compare(a: Level, b: Level) -> i64 {
+        match (a, b) {
+            (High(x), High(y)) => return x.compare(y)
+            (Low, Low) => return 0
+            (Low, _) => return -1
+            _ => return 1
+        }
+    }
+}
+
+// The largest of `xs`, with `>` on any `T`.
+fn largest(comptime T: type, comptime N: i64, xs: [T; N]) -> T {
+    let best = xs[0]
+    for x in xs {
+        if x > best {
+            best = x
+        }
+    }
+    return best
+}
+
+fn entry() -> i64 {
+    let a = Version { major: 1, minor: 9 }
+    let b = Version { major: 2, minor: 0 }
+    out((a < b) as i64)                       // 1
+    out((a >= b) as i64)                      // 0
+    out((a <= a) as i64)                      // 1
+    let v = largest(Version, 3, [a, b, Version { major: 1, minor: 20 }])
+    out(v.major * 100 + v.minor)              // 200
+    out((Level.Low < Level.High(-1)) as i64)  // 1
+    let l = largest(Level, 3, [Level.High(3), Level.Low, Level.High(7)])
+    match l {
+        High(x) => out(x)                     // 7
+        Low => out(-1)
+    }
+    let none: Option(Version) = Option.None
+    out((none < Option.Some(a)) as i64)       // 1
+    out(((1, 2) > (1, 1)) as i64)             // 1
+    return largest(i64, 3, [4, 9, 2])         // 9, as before
+}

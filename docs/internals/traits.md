@@ -1,7 +1,8 @@
 # Design: traits
 
-Status: steps 1 to 4 (inferred type arguments; traits, impls and bounds; generic
-impls; the standard traits) are done; the rest is proposed.
+Status: steps 1 to 5 (inferred type arguments; traits, impls and bounds; generic
+impls; the standard traits; comparison operators) are done; deriving is
+proposed.
 
 ## Why
 
@@ -332,12 +333,19 @@ choices:
 `standard_traits` in `crates/jihoo-sema/src/tests.rs`, `tests/diff/hashing.jh`
 and `tests/diff-lists/maps.jh` (also under valgrind) check them.
 
-### 5. Comparison operators through `Ord`
+### 5. Comparison operators through `Ord` (done)
 
 `<`, `<=`, `>` and `>=` on a struct or enum with an `impl Ord` become calls of
 `compare`, so `max(a, b)` works for `Version` with its body unchanged. This is sema
 only: operator typing in `crates/jihoo-ir/src/types.rs` is unchanged, because
 the verifier sees calls. Arithmetic operators are not overloaded.
+
+Done. A comparison whose operands have the same type and no order of their
+own becomes a call of the prelude's `compare` and an `i64` comparison with 0;
+such a type without an `Ord` gets an error that says to give it one. It
+works for anything with an impl, generic ones included: tuples, lists and
+options order when their parts do. `==` is not part of it, and stays
+structural (`tests/diff/orderings.jh`, `orderings_through_ord`).
 
 ### 6. Deriving
 

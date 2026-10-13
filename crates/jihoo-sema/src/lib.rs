@@ -1284,6 +1284,16 @@ impl<'a> FnCx<'a> {
         if matches!(op, ir::BinOp::Eq | ir::BinOp::Ne) && lt == rt && (equality::is_structural(&lt) || matches!(lt, Type::Cell(_))) {
             return self.structural_eq(pos, lhs, rhs, op == ir::BinOp::Ne);
         }
+        // `a < b` on a type with an `Ord` and no order of its own: `compare(a, b) < 0`.
+        let ordering = matches!(op, ir::BinOp::Lt | ir::BinOp::Le | ir::BinOp::Gt | ir::BinOp::Ge);
+        if ordering && lt == rt && types::binary(op, &lt, &rt).is_none() {
+            if let Some(r) = self.ordered(pos, op, lhs, rhs)? {
+                return Ok(r);
+            }
+            if matches!(lt, Type::Struct(_) | Type::Enum(_) | Type::List(_)) {
+                return Err(Error::new(pos, format!("cannot apply `{sym}` to {lt} and {rt}; give the type an `Ord`")));
+            }
+        }
         let ty = types::binary(op, &lt, &rt)
             .ok_or_else(|| Error::new(pos, format!("cannot apply `{sym}` to {lt} and {rt}")))?;
         Ok(self.emit_to(ty, |dst| Inst::Binary { dst, op, lhs, rhs }))

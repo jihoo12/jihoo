@@ -710,6 +710,25 @@ fn standard_traits() {
     check(&fs("struct P { x: i64 }\nfn f() -> u64 { return hash_of((1, true)) ^ hash_of(Option.Some(2)) }")).unwrap();
 }
 
+#[test]
+fn orderings_through_ord() {
+    let src = "struct V { major: i64, minor: i64 }\n\
+               impl Ord for V {\n  fn compare(a: V, b: V) -> i64 {\n    if a.major != b.major { return a.major.compare(b.major) }\n    return a.minor.compare(b.minor)\n  }\n}\n\
+               fn max(comptime T: type, a: T, b: T) -> T {\n  if a > b { return a }\n  return b\n}\n\
+               fn main() {\n  let a = V { major: 1, minor: 2 }\n  let b = V { major: 1, minor: 5 }\n  print(a < b)\n  print(a >= b)\n  print(max(a, b).minor)\n\
+                 print((1, \"b\") <= (1, \"b\"))\n  let xs: [i64] = [1, 2]\n  print(xs > [1])\n  let o: Option(i64) = Option.None\n  print(o < Option.Some(-5))\n}";
+    assert_eq!(run(src), "true\nfalse\n5\ntrue\ntrue\ntrue\n");
+    // Through `compare`: JIR has a call and an integer comparison, nothing new.
+    let m = check(src).unwrap();
+    assert!(m.to_string().contains("call @impl."), "{m}");
+    let e = err("struct P { x: i64 }\nfn main() { print(P { x: 1 } < P { x: 2 }) }");
+    assert!(e.contains("cannot apply `<` to P and P; give the type an `Ord`"), "{e}");
+    // `==` stays structural, whatever `compare` says.
+    let e = run("struct P { x: i64, y: i64 }\nimpl Ord for P {\n  fn compare(a: P, b: P) -> i64 { return a.x.compare(b.x) }\n}\n\
+                 fn main() {\n  let a = P { x: 1, y: 1 }\n  let b = P { x: 1, y: 2 }\n  print(a == b)\n  print(a <= b && a >= b)\n}");
+    assert_eq!(e, "false\ntrue\n");
+}
+
 // ---- function values ----
 
 #[test]
@@ -1889,7 +1908,8 @@ fn list_operations() {
     assert!(err("fn f() -> [i64] { return [] }\nfn main() { push(f(), 1) }").contains("cannot `push` on a temporary value"));
     assert!(err("fn main() { let xs: [i64] = [1]\n let r = ref xs\n print(pop(*r)) }").contains("cannot `pop` on a value behind a `ref`"));
     assert!(err(&fs("fn f(xs: [i64]) {}")).contains("lists need an allocator and are not available in freestanding mode"));
-    assert!(err("fn main() { let xs: [i64] = [1]\n print(xs < xs) }").contains("cannot apply `<`"));
+    // Lists are ordered when their elements are (`Ord`), and not otherwise.
+    assert!(err("fn main() { let xs: [bool] = [true]\n print(xs < xs) }").contains("cannot apply `<` to [bool] and [bool]; give the type an `Ord`"));
     assert!(err("fn main() { let xs: [fn()] = []\n print(xs == xs) }").contains("function values"));
 }
 

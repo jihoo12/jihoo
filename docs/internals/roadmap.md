@@ -91,6 +91,7 @@
     The standard traits: `Ord` (floats in total order), `Hash` with
     `hash_of`, and `Show`, which `print` uses; `lib/maps.jh`, hash maps
     `Map(K, V)` for keys with `Hash` and `==`.
+    `<`, `<=`, `>` and `>=` on any type with an `Ord`, through `compare`.
 
 ## Next
 
@@ -104,8 +105,8 @@
   `#![comptime]` modules, so `meta` costs programs nothing and works in
   freestanding ones; random pipelines in the fuzzer, each checked against
   the same stages written out as a loop.
-- **Traits** ([design](traits.md)), before v1: comparison operators through
-  `Ord`, and deriving `Show` and `Hash` with macros.
+- **Traits** ([design](traits.md)), before v1: deriving `Show`, `Hash` and
+  `Ord` with macros.
 - **Memory:** a report of where native code copies lists (`jihoo build
   --cost`), which needs source positions in JIR; moving a field out of a
   value at its last use instead of copying it.

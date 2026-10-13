@@ -147,6 +147,11 @@ Floats are ordered by IEEE 754's total order, `-inf < ... < -0.0 < 0.0 < ... <
 inf < NaN`, so that sorting them always ends; `<` on floats keeps its IEEE
 meaning, in which NaN is unordered and `-0.0 == 0.0`.
 
+A type with an `Ord` and no order of its own can be compared with `<`, `<=`,
+`>` and `>=`: `a < b` is `a.compare(b) < 0`. So generic code written with
+operators, such as `max` in [Generics](generics.md), works for it unchanged.
+`==` stays [structural](equality.md) whatever `compare` says.
+
 [`lists.sort`](../reference/standard-library.md#lists) sorts by it, so
 `lists.sort(xs)` works for any element type with an `Ord`.
 

@@ -50,11 +50,13 @@ See [Types](types.md#integers) for overflow and division by zero.
 | operator | operands | result |
 |----------|----------|--------|
 | `==` `!=` | any type made of comparable parts | `bool` ([Equality](equality.md)) |
-| `<` `<=` `>` `>=` | integers, floats, pointers of the same type; `str` | `bool` |
+| `<` `<=` `>` `>=` | integers, floats, pointers of the same type; `str`; two values of a type with an `Ord` | `bool` |
 
 Integers compare signed or unsigned according to their type, and pointers by
-address; strings compare byte by byte, a prefix first. Structs, enums, arrays and
-lists have equality but no ordering.
+address; strings compare byte by byte, a prefix first. Other types are ordered
+by their [`Ord`](traits.md#ord): `a < b` is `a.compare(b) < 0`, so structs,
+enums, tuples, lists and options order once they or their parts have one.
+Arrays have no ordering.
 
 ## Bitwise
 
