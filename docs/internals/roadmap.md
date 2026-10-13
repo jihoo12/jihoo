@@ -87,6 +87,9 @@
   `#![comptime]` modules, so `meta` costs programs nothing and works in
   freestanding ones; random pipelines in the fuzzer, each checked against
   the same stages written out as a loop.
+- **Traits** ([design](traits.md)), before v1: inferred type arguments, then
+  `trait`, `impl` and bounds (`comptime T: Ord`), resolved statically with no
+  change to JIR; `Ord`, `Hash` and `Show` in the prelude, and a `Map(K, V)`.
 - **Memory:** a report of where native code copies lists (`jihoo build
   --cost`), which needs source positions in JIR; moving a field out of a
   value at its last use instead of copying it.

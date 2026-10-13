@@ -70,4 +70,5 @@ same on GitHub.
 - [LLVM backend](internals/llvm-backend.md)
 - [Testing](internals/testing.md)
 - [Design: code as data](internals/code-as-data.md)
+- [Design: traits](internals/traits.md)
 - [Roadmap](internals/roadmap.md)
