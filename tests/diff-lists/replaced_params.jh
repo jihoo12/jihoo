@@ -1,0 +1,68 @@
+// Parameters replaced after they are read. Where the old value and the new
+// one never meet, the new one gets a register of its own and the old one is
+// not copied; where they can meet, it is.
+
+fn renamed(xs: [i64]) -> i64 {
+    let first = xs[0]
+    xs = [first, first + 1]
+    push(xs, 5)
+    return xs[1] * 10 + len(xs)
+}
+
+// Replaced twice, each value read before the next.
+fn twice(xs: [i64]) -> i64 {
+    let a = len(xs)
+    xs = [a, a]
+    let b = len(xs) + xs[0]
+    xs = [b]
+    push(xs, b)
+    return xs[0] * 100 + len(xs)
+}
+
+fn maybe(xs: [i64], c: bool) -> i64 {
+    if c {
+        xs = [len(xs)]
+    }
+    return len(xs)
+}
+
+fn looped(xs: [i64]) -> i64 {
+    for i in 0..3 {
+        xs = xs + [i]
+    }
+    return len(xs)
+}
+
+fn fresh(xs: [i64]) -> [i64] {
+    let n = len(xs)
+    xs = [n, n]
+    return xs
+}
+
+// Replaced on both paths: the two new values share a register, the old one
+// keeps its own.
+fn either(xs: [i64], c: bool) -> [i64] {
+    let n = len(xs)
+    if c {
+        xs = [n]
+    } else {
+        xs = [n, n, n]
+    }
+    push(xs, 9)
+    return xs
+}
+
+fn entry() -> i64 {
+    let a: [i64] = [3, 4]
+    out(renamed(a))                     // 43
+    out(twice(a))                       // 402
+    out(maybe(a, true) * 10 + maybe(a, false))   // 12
+    out(looped(a))                      // 5
+    let f = fresh(a)
+    push(f, 1)
+    out(len(f))                         // 3
+    out(len(either(a, true)) * 10 + len(either(a, false)))   // 24
+    out(len(a) * 10 + a[1])             // 24
+    out(renamed([7]))                   // 83
+    return 0
+}

@@ -1487,6 +1487,25 @@ fn native(body: &str) -> String {
     format!("#![native]\n{body}\nfn main() {{}}")
 }
 
+/// A parameter replaced after it is read is not copied on entry, unless its
+/// old and new values can meet (after a branch, or around a loop).
+#[test]
+fn replaced_parameters_are_not_copied() {
+    let m = check(&native(
+        "fn renamed(xs: [i64]) -> i64 { let n = len(xs)\n xs = [n]\n push(xs, 1)\n return len(xs) }\n\
+         fn fresh(xs: [i64]) -> [i64] { let n = len(xs)\n xs = [n]\n return xs }\n\
+         fn maybe(xs: [i64], c: bool) -> i64 { if c { xs = [len(xs)] }\n return len(xs) }\n\
+         fn looped(xs: [i64]) -> i64 { for i in 0..3 { xs = xs + [i] }\n return len(xs) }",
+    ))
+    .unwrap();
+    let copies = |name: &str| {
+        let f = m.funcs.iter().find(|f| f.name == name).unwrap();
+        f.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, ir::Inst::Clone { src, .. } if src.0 == 0))
+    };
+    assert!(!copies("renamed") && !copies("fresh"));
+    assert!(copies("maybe") && copies("looped"));
+}
+
 #[test]
 fn native_programs_call_c() {
     let m = check(&native("extern fn printf(fmt: *u8, ...) -> i32\nextern fn abs(n: i32) -> i32\n\

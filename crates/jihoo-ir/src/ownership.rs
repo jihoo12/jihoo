@@ -30,7 +30,10 @@
 //! Parameters are borrowed: the caller keeps its argument and frees it. A
 //! function that changes, consumes or reassigns a parameter it also reads
 //! first clones it on entry, as the VM copies a list the first time a
-//! function changes it. A thread started with `spawn` owns its arguments.
+//! function changes it. A value assigned to a parameter that never meets the
+//! caller's (as in `let n = len(xs); xs = [n]`) is first moved to a register
+//! of its own, so replacing a parameter alone copies nothing
+//! (`split_params`). A thread started with `spawn` owns its arguments.
 //!
 //! Such a function `f` also gets a *consuming* version, `f.own`, that takes
 //! those parameters over instead of cloning them. A call whose arguments for
@@ -55,6 +58,9 @@ use crate::{Block, BlockId, Function, Inst, Module, PathStep, Reg, Terminator, T
 /// Inserts `clone` and `drop` into every function of a native module.
 pub fn insert(m: &mut Module) {
     let mut owning = Owning::new(m);
+    for f in &mut m.funcs {
+        split_params(f, &mut owning);
+    }
     // The parameters each function clones on entry, by position.
     let mut cloning: HashMap<String, Vec<usize>> = HashMap::new();
     for f in &m.funcs {
@@ -82,6 +88,162 @@ pub fn insert(m: &mut Module) {
         let mut cx = Cx { owning: &mut owning, cloning: &cloning, wanted: &mut wanted };
         function(&mut f, &mut cx, &cloning[&name]);
         m.funcs.push(f);
+    }
+}
+
+/// Gives a parameter's later values registers of their own where they never
+/// meet its first one. `xs = [n]` after reading `xs` then writes a new
+/// register: the parameter stays borrowed, the new value is the function's
+/// own, and neither is copied. Without this, the register would hold the
+/// caller's value and then one of the function's own, and the function would
+/// have to copy the caller's on entry so that it could free whatever the
+/// register holds.
+///
+/// The definitions of the parameter (on entry, and each instruction that
+/// writes it) that reach a common use must share a register, and so must an
+/// instruction's definition and those of the value it reads, when it reads and
+/// writes the register (`push`, `xs = xs + ys`); each group of them that does
+/// not include the one on entry gets a new register.
+fn split_params(f: &mut Function, owning: &mut Owning) {
+    for i in 0..f.params.len() {
+        let p = Reg(i as u32);
+        if owning.owns(f.reg_type(p)) {
+            split(f, p);
+        }
+    }
+}
+
+fn split(f: &mut Function, p: Reg) {
+    // Definition 0 is the one on entry; the others are instructions, by place.
+    let mut defs: Vec<(usize, usize)> = vec![(usize::MAX, usize::MAX)];
+    let mut def_at: HashMap<(usize, usize), usize> = HashMap::new();
+    for (b, block) in f.blocks.iter().enumerate() {
+        for (k, inst) in block.insts.iter().enumerate() {
+            if defined(inst).contains(&p) {
+                def_at.insert((b, k), defs.len());
+                defs.push((b, k));
+            }
+        }
+    }
+    if defs.len() == 1 {
+        return;
+    }
+    let reads = |inst: &Inst| {
+        let mut copy = inst.clone();
+        let written = usize::from(defined(inst).contains(&p));
+        uses(inst).contains(&p) || changes(inst, p) || copy.regs_mut().into_iter().filter(|r| **r == p).count() > written
+    };
+
+    // Which definitions reach the start of each block.
+    let n = f.blocks.len();
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (b, block) in f.blocks.iter().enumerate() {
+        for s in block.term.successors() {
+            preds[s.0 as usize].push(b);
+        }
+    }
+    let out_of = |b: usize, reach: &BTreeSet<usize>| -> BTreeSet<usize> {
+        let last = f.blocks[b].insts.iter().enumerate().rev().find_map(|(k, _)| def_at.get(&(b, k)));
+        match last {
+            Some(&d) => BTreeSet::from([d]),
+            None => reach.clone(),
+        }
+    };
+    let mut reach_in: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+    reach_in[0].insert(0);
+    loop {
+        let mut changed = false;
+        for b in 0..n {
+            let mut inn: BTreeSet<usize> = if b == 0 { BTreeSet::from([0]) } else { BTreeSet::new() };
+            for &q in &preds[b] {
+                inn.extend(out_of(q, &reach_in[q]));
+            }
+            if inn != reach_in[b] {
+                reach_in[b] = inn;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Join the definitions that must share a register.
+    let mut parent: Vec<usize> = (0..defs.len()).collect();
+    fn find(parent: &mut [usize], x: usize) -> usize {
+        let mut x = x;
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    let join = |parent: &mut Vec<usize>, set: &BTreeSet<usize>, also: Option<usize>| {
+        let mut all = set.iter().copied().chain(also);
+        if let Some(first) = all.next() {
+            let r = find(parent, first);
+            for d in all {
+                let other = find(parent, d);
+                parent[other] = r;
+            }
+        }
+    };
+    for (b, inn) in reach_in.iter().enumerate() {
+        let mut reach = inn.clone();
+        for (k, inst) in f.blocks[b].insts.iter().enumerate() {
+            let def = def_at.get(&(b, k)).copied();
+            if reads(inst) {
+                join(&mut parent, &reach, def);
+            }
+            if let Some(d) = def {
+                reach = BTreeSet::from([d]);
+            }
+        }
+        if term_uses(&f.blocks[b].term).contains(&p) {
+            join(&mut parent, &reach, None);
+        }
+    }
+
+    // A register for each group, the parameter's own for the group on entry.
+    let entry = find(&mut parent, 0);
+    let mut reg_of: HashMap<usize, Reg> = HashMap::from([(entry, p)]);
+    for d in 1..defs.len() {
+        let g = find(&mut parent, d);
+        if let std::collections::hash_map::Entry::Vacant(e) = reg_of.entry(g) {
+            e.insert(Reg(f.regs.len() as u32));
+            f.regs.push(f.regs[p.0 as usize].clone());
+        }
+    }
+    if reg_of.len() == 1 {
+        return;
+    }
+    for (b, inn) in reach_in.iter().enumerate() {
+        let mut reach = inn.clone();
+        for k in 0..f.blocks[b].insts.len() {
+            let def = def_at.get(&(b, k)).copied();
+            // Reading and writing in one instruction joined both, so any of
+            // them names the register.
+            let group = def.or_else(|| reach.iter().next().copied());
+            if let Some(g) = group {
+                let r = reg_of[&find(&mut parent, g)];
+                for x in f.blocks[b].insts[k].regs_mut() {
+                    if *x == p {
+                        *x = r;
+                    }
+                }
+            }
+            if let Some(d) = def {
+                reach = BTreeSet::from([d]);
+            }
+        }
+        if let Some(&g) = reach.iter().next() {
+            let r = reg_of[&find(&mut parent, g)];
+            for x in f.blocks[b].term.regs_mut() {
+                if *x == p {
+                    *x = r;
+                }
+            }
+        }
     }
 }
 
