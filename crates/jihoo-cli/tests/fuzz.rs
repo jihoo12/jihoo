@@ -195,7 +195,16 @@ impl Gen {
 
     fn function(&mut self) {
         let k = self.funcs.len();
-        let params: Vec<Ty> = (0..self.rng.below(4)).map(|_| self.any_ty(2)).collect();
+        // Some parameters have the type of the one before, so that a call can
+        // pass one value for both.
+        let mut params: Vec<Ty> = Vec::new();
+        for _ in 0..self.rng.below(4) {
+            let t = match params.last() {
+                Some(last) if self.rng.chance(30) => last.clone(),
+                _ => self.any_ty(2),
+            };
+            params.push(t);
+        }
         let ret = self.any_ty(2);
         let list: Vec<String> = params.iter().enumerate().map(|(i, t)| format!("p{i}: {}", self.ty_name(t))).collect();
         let ret_name = self.ty_name(&ret);
@@ -830,7 +839,28 @@ impl Gen {
             19 | 20 if !self.funcs.is_empty() => {
                 let k = self.rng.below(self.funcs.len());
                 let (params, ret) = self.funcs[k].clone();
-                let args: Vec<String> = params.iter().map(|p| self.expr(p, 2)).collect();
+                // Sometimes aggregates go in through variables used for
+                // nothing else, so the call is their last use and hands them
+                // over (`f.own` natively), at times one for two parameters.
+                let temps = self.rng.chance(40);
+                let mut made: Vec<(Ty, String)> = Vec::new();
+                let mut args = Vec::new();
+                for p in &params {
+                    if !(temps && p.is_aggregate()) {
+                        args.push(self.expr(p, 2));
+                        continue;
+                    }
+                    let again = made.iter().find(|(t, _)| t == p).map(|(_, n)| n.clone());
+                    match again {
+                        Some(n) if self.rng.chance(50) => args.push(n),
+                        _ => {
+                            let (n, e) = (self.fresh("t"), self.expr(p, 2));
+                            self.line(&format!("let {n}: {} = {e}", self.ty_name(p)));
+                            made.push((p.clone(), n.clone()));
+                            args.push(n);
+                        }
+                    }
+                }
                 self.declare(ret, format!("f{k}({})", args.join(", ")));
             }
             18 if self.loops > 0 => {

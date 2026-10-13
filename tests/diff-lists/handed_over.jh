@@ -1,0 +1,52 @@
+// Lists handed over to functions that change their own copy: a call whose
+// argument is at its last use passes it to a version of the function that
+// takes it over instead of copying it.
+
+// Changes both its parameters.
+fn both(a: [i64], b: [i64]) -> i64 {
+    for i in 0..20 {
+        push(a, i)
+        push(b, 0 - i)
+    }
+    let t = 0
+    for x in a {
+        t += x
+    }
+    for x in b {
+        t += x * 3
+    }
+    return t * 1000 + len(a) * 10 + len(b)
+}
+
+// Reads its parameter, then replaces it.
+fn replaced(xs: [i64]) -> i64 {
+    let n = len(xs)
+    xs = [n, n, n]
+    for i in 0..10 {
+        push(xs, i)
+    }
+    return len(xs) * 100 + xs[0]
+}
+
+// Reads its parameter, then replaces it without changing it in place.
+fn renamed(xs: [i64]) -> i64 {
+    let first = xs[0]
+    xs = [first, first + 1]
+    return xs[1] * 10 + len(xs)
+}
+
+fn entry() -> i64 {
+    // The same list for both, at its last use: each still gets a copy.
+    let xs: [i64] = [5]
+    out(both(xs, xs))                   // -359769
+    let ys: [i64] = [1, 2, 3, 4]
+    out(replaced(ys))                   // 1304
+    out(len(ys))                        // 4
+    let zs: [i64] = [7]
+    out(replaced(zs))                   // 1301
+    let ws: [i64] = [3, 4, 5]
+    out(renamed(ws))                    // 42
+    out(len(ws))                        // 3
+    out(renamed([8]))                   // 92
+    return 0
+}
