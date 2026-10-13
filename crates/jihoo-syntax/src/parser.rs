@@ -500,6 +500,10 @@ impl Parser {
             let inner = self.type_expr()?;
             return Ok(TypeExpr { pos, kind: TypeExprKind::Cell(Box::new(inner)) });
         }
+        if *self.peek() == Tok::LParen {
+            let parts = self.tuple_parts("a tuple type", |p| p.type_expr())?;
+            return Ok(TypeExpr { pos, kind: TypeExprKind::Tuple(parts) });
+        }
         if self.eat(&Tok::LBracket) {
             let elem = self.type_expr()?;
             if self.eat(&Tok::RBracket) {
@@ -553,6 +557,33 @@ impl Parser {
             }
         }
         Ok(TypeExpr { pos, kind: TypeExprKind::Path(Box::new(root), shape) })
+    }
+
+    /// `(a)` or `(a, b, ...)`, with a trailing comma allowed after two or more.
+    fn parenthesized<T>(&mut self, mut item: impl FnMut(&mut Self) -> PResult<T>) -> PResult<Vec<T>> {
+        let open = self.expect(&Tok::LParen, "`(`")?.pos;
+        let mut items = vec![item(self)?];
+        while self.eat(&Tok::Comma) {
+            if *self.peek() == Tok::RParen {
+                if items.len() == 1 {
+                    return Err(Error::new(open, "a tuple has at least two parts; `(x,)` is not one"));
+                }
+                break;
+            }
+            items.push(item(self)?);
+        }
+        self.expect(&Tok::RParen, "`,` or `)`")?;
+        Ok(items)
+    }
+
+    /// The parts of a tuple type or pattern: `(a, b, ...)`, at least two.
+    fn tuple_parts<T>(&mut self, what: &str, item: impl FnMut(&mut Self) -> PResult<T>) -> PResult<Vec<T>> {
+        let pos = self.pos();
+        let parts = self.parenthesized(item)?;
+        if parts.len() < 2 {
+            return Err(Error::new(pos, format!("{what} has at least two parts")));
+        }
+        Ok(parts)
     }
 
     /// `(a, b, ...)`
@@ -627,6 +658,13 @@ impl Parser {
         match self.peek() {
             Tok::Let => {
                 let pos = self.bump().pos;
+                if *self.peek() == Tok::LParen {
+                    let pattern = self.pattern()?;
+                    let ty = if self.eat(&Tok::Colon) { Some(self.type_expr()?) } else { None };
+                    self.expect(&Tok::Assign, "`=`")?;
+                    let value = self.expr()?;
+                    return Ok(Stmt::LetPattern { pos, pattern, ty, value });
+                }
                 let (_, name) = self.ident("variable name")?;
                 self.mark();
                 let ty = if self.eat(&Tok::Colon) { Some(self.type_expr()?) } else { None };
@@ -820,6 +858,7 @@ impl Parser {
             }
             _ if negative => return Err(self.unexpected("an integer")),
             Tok::True | Tok::False => PatternKind::Bool(self.bump().tok == Tok::True),
+            Tok::LParen => PatternKind::Tuple(self.tuple_parts("a tuple pattern", |p| p.pattern())?),
             Tok::Ident(name) if name == "_" => {
                 self.bump();
                 PatternKind::Wild
@@ -976,6 +1015,15 @@ impl Parser {
             self.deeper()?;
             if self.same_line(&Tok::Dot) {
                 let pos = self.bump().pos;
+                // `t.0`: a part of a tuple.
+                if let Tok::Int(n) = *self.peek() {
+                    let t = self.bump();
+                    if t.end - t.start != n.to_string().len() {
+                        return Err(Error::new(t.pos, format!("a tuple part is written as a plain number, such as `.{n}`")));
+                    }
+                    e = Expr { pos, kind: ExprKind::Field(Box::new(e), n.to_string()) };
+                    continue;
+                }
                 let (_, field) = self.ident("a field name")?;
                 self.mark();
                 e = Expr { pos, kind: ExprKind::Field(Box::new(e), field) };
@@ -1132,10 +1180,11 @@ impl Parser {
             }
             Tok::Dollar => return self.hole(HoleKind::Expr),
             Tok::LParen => {
-                self.bump();
-                let e = self.with_struct_lit(true, |p| p.expr())?;
-                self.expect(&Tok::RParen, "`)`")?;
-                return Ok(e);
+                let mut parts = self.with_struct_lit(true, |p| p.parenthesized(|p| p.expr()))?;
+                if parts.len() == 1 {
+                    return Ok(parts.remove(0));
+                }
+                ExprKind::Tuple(parts)
             }
             _ => return Err(self.unexpected("an expression")),
         };
@@ -1490,6 +1539,22 @@ mod tests {
     }
 
     #[test]
+    fn tuples() {
+        let s = body("let t: (i64, (u8, bool)) = (1, (2, true),)\nlet (a, _) = t\nlet x = (t.1.0)\nmatch t {\n(0, (_, b)) => {}\n_ => {}\n}");
+        let Stmt::Let { ty: Some(ty), value, .. } = &s[0] else { panic!() };
+        assert!(matches!(&ty.kind, TypeExprKind::Tuple(parts) if parts.len() == 2 && matches!(parts[1].kind, TypeExprKind::Tuple(_))));
+        assert!(matches!(&value.kind, ExprKind::Tuple(parts) if parts.len() == 2));
+        assert!(matches!(&s[1], Stmt::LetPattern { pattern: Pattern { kind: PatternKind::Tuple(p), .. }, .. } if p.len() == 2));
+        // `(e)` is `e`; `t.1.0` is two field reads.
+        let Stmt::Let { value, .. } = &s[2] else { panic!() };
+        let ExprKind::Field(inner, zero) = &value.kind else { panic!("{value:?}") };
+        assert!(zero == "0" && matches!(&inner.kind, ExprKind::Field(_, one) if one == "1"));
+        let Stmt::Match { arms, .. } = &s[3] else { panic!() };
+        assert!(matches!(&arms[0].pattern.kind, PatternKind::Tuple(p) if matches!(p[1].kind, PatternKind::Tuple(_))));
+        assert!(parse("fn main() { let t = (1,) }").unwrap_err().msg.contains("at least two parts"));
+    }
+
+    #[test]
     fn parses_function_with_control_flow() {
         let p = parse(
             "fn fib(n: i64) -> i64 {\n  if n < 2 { return n }\n  return fib(n - 1) + fib(n - 2)\n}",
@@ -1531,6 +1596,10 @@ mod tests {
         assert_eq!(toks("xs[0].y"), [Tok::Ident("xs".into()), Tok::LBracket, Tok::Int(0), Tok::RBracket, Tok::Dot, Tok::Ident("y".into()), Tok::Eof]);
         assert!(crate::lexer::lex("1e999", 0).unwrap_err().msg.contains("too large"));
         assert!(crate::lexer::lex("1.5x", 0).unwrap_err().msg.contains("not a valid number"));
+        // Right after a `.`, digits are a tuple part: `t.0.1` is not `t` and `0.1`.
+        let dot = |n| [Tok::Dot, Tok::Int(n)];
+        assert_eq!(toks("t.0.1"), [&[Tok::Ident("t".into())][..], &dot(0), &dot(1), &[Tok::Eof]].concat());
+        assert_eq!(toks("a..1.5"), [Tok::Ident("a".into()), Tok::DotDot, Tok::Float(1.5), Tok::Eof]);
         assert!(parse("fn f(x: f64) { match x { 1.5 => {} } }").unwrap_err().msg.contains("floats cannot be patterns"));
     }
 

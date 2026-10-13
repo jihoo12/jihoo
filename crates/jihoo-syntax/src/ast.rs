@@ -130,6 +130,7 @@ impl TypeExpr {
             TypeExprKind::Fn(params, ret) => {
                 params.iter().any(TypeExpr::mentions_code) || ret.as_ref().is_some_and(|t| t.mentions_code())
             }
+            TypeExprKind::Tuple(parts) => parts.iter().any(TypeExpr::mentions_code),
             TypeExprKind::Generic(..) => false,
         }
     }
@@ -176,6 +177,8 @@ pub enum TypeExprKind {
     /// `path(Root).a[_].b`: a path from a `Root` value to a part of it. Values
     /// of the type hold one index for each `[_]`.
     Path(Box<TypeExpr>, Vec<PathShape>),
+    /// `(A, B)`: a tuple of at least two parts.
+    Tuple(Vec<TypeExpr>),
 }
 
 /// One step of a path type.
@@ -199,6 +202,14 @@ pub enum Stmt {
     Let {
         pos: Pos,
         name: String,
+        ty: Option<TypeExpr>,
+        value: Expr,
+    },
+    /// `let (a, b) = value`: a pattern that matches every value, whose names
+    /// are bound for the rest of the block.
+    LetPattern {
+        pos: Pos,
+        pattern: Pattern,
         ty: Option<TypeExpr>,
         value: Expr,
     },
@@ -325,6 +336,8 @@ pub enum PatternKind {
     Struct(String, Vec<(Pos, String, Pattern)>, bool),
     /// `p | q`: either pattern. Both bind the same names.
     Or(Vec<Pattern>),
+    /// `(p, q)`: a tuple and patterns for its parts.
+    Tuple(Vec<Pattern>),
 }
 
 #[derive(Debug, Clone)]
@@ -381,6 +394,8 @@ pub enum ExprKind {
     Cast(Box<Expr>, TypeExpr),
     /// `[a, b, c]`
     ArrayLit(Vec<Expr>),
+    /// `(a, b)`: a tuple of at least two parts.
+    Tuple(Vec<Expr>),
     /// `[value; N]`, where `N` is evaluated at compile time.
     ArrayRepeat(Box<Expr>, Box<Expr>),
     /// `asm("template", out(...) T, in(...) x, clobber(...))`
@@ -524,7 +539,9 @@ pub fn set_pos(e: &mut Expr, pos: Pos) {
             set_pos(x, pos);
             lo.iter_mut().chain(hi).for_each(|b| set_pos(b, pos));
         }
-        ExprKind::Call(_, args) | ExprKind::ArrayLit(args) => args.iter_mut().for_each(|a| set_pos(a, pos)),
+        ExprKind::Call(_, args) | ExprKind::ArrayLit(args) | ExprKind::Tuple(args) => {
+            args.iter_mut().for_each(|a| set_pos(a, pos))
+        }
         ExprKind::CallExpr(f, args) => {
             set_pos(f, pos);
             args.iter_mut().for_each(|a| set_pos(a, pos));
@@ -600,6 +617,7 @@ fn set_type_pos(t: &mut TypeExpr, pos: Pos) {
         }
         TypeExprKind::Generic(_, args) => args.iter_mut().for_each(|a| set_pos(a, pos)),
         TypeExprKind::Path(root, _) => set_type_pos(root, pos),
+        TypeExprKind::Tuple(parts) => parts.iter_mut().for_each(|t| set_type_pos(t, pos)),
         TypeExprKind::Fn(params, ret) => {
             params.iter_mut().for_each(|t| set_type_pos(t, pos));
             if let Some(r) = ret {
@@ -619,6 +637,14 @@ pub fn set_stmt_pos(s: &mut Stmt, pos: Pos) {
     match s {
         Stmt::Let { pos: p, ty, value, .. } => {
             *p = pos;
+            if let Some(t) = ty {
+                set_type_pos(t, pos);
+            }
+            set_pos(value, pos);
+        }
+        Stmt::LetPattern { pos: p, pattern, ty, value } => {
+            *p = pos;
+            set_pattern_pos(pattern, pos);
             if let Some(t) = ty {
                 set_type_pos(t, pos);
             }
@@ -698,7 +724,9 @@ fn set_pattern_pos(p: &mut Pattern, pos: Pos) {
     p.pos = pos;
     match &mut p.kind {
         PatternKind::Wild | PatternKind::Int(_) | PatternKind::Bool(_) | PatternKind::Name(_) => {}
-        PatternKind::Variant(_, args) | PatternKind::Or(args) => args.iter_mut().for_each(|a| set_pattern_pos(a, pos)),
+        PatternKind::Variant(_, args) | PatternKind::Or(args) | PatternKind::Tuple(args) => {
+            args.iter_mut().for_each(|a| set_pattern_pos(a, pos))
+        }
         PatternKind::Struct(_, fields, _) => fields.iter_mut().for_each(|(p, _, f)| {
             *p = pos;
             set_pattern_pos(f, pos);
@@ -794,7 +822,7 @@ pub fn names_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut String, NameRole)) {
             f(n, NameRole::Uses);
             args.iter_mut().for_each(|a| names_in_expr(a, f));
         }
-        ExprKind::ArrayLit(args) => args.iter_mut().for_each(|a| names_in_expr(a, f)),
+        ExprKind::ArrayLit(args) | ExprKind::Tuple(args) => args.iter_mut().for_each(|a| names_in_expr(a, f)),
         ExprKind::CallExpr(callee, args) => {
             names_in_expr(callee, f);
             args.iter_mut().for_each(|a| names_in_expr(a, f));
@@ -881,6 +909,7 @@ fn names_in_type(t: &mut TypeExpr, f: &mut dyn FnMut(&mut String, NameRole)) {
                 names_in_type(r, f);
             }
         }
+        TypeExprKind::Tuple(parts) => parts.iter_mut().for_each(|p| names_in_type(p, f)),
         TypeExprKind::Path(root, shape) => {
             names_in_type(root, f);
             for step in shape {
@@ -896,7 +925,9 @@ fn names_in_pattern(p: &mut Pattern, f: &mut dyn FnMut(&mut String, NameRole)) {
     match &mut p.kind {
         PatternKind::Wild | PatternKind::Int(_) | PatternKind::Bool(_) => {}
         PatternKind::Name(n) => f(n, NameRole::Binds),
-        PatternKind::Variant(_, args) | PatternKind::Or(args) => args.iter_mut().for_each(|a| names_in_pattern(a, f)),
+        PatternKind::Variant(_, args) | PatternKind::Or(args) | PatternKind::Tuple(args) => {
+            args.iter_mut().for_each(|a| names_in_pattern(a, f))
+        }
         PatternKind::Struct(n, fields, _) => {
             f(n, NameRole::Uses);
             for (_, name, fp) in fields {
@@ -915,6 +946,13 @@ pub fn names_in_stmt(s: &mut Stmt, f: &mut dyn FnMut(&mut String, NameRole)) {
     match s {
         Stmt::Let { name, ty, value, .. } => {
             f(name, NameRole::Binds);
+            if let Some(t) = ty {
+                names_in_type(t, f);
+            }
+            names_in_expr(value, f);
+        }
+        Stmt::LetPattern { pattern, ty, value, .. } => {
+            names_in_pattern(pattern, f);
             if let Some(t) = ty {
                 names_in_type(t, f);
             }

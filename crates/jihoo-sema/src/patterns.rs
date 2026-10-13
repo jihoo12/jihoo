@@ -183,6 +183,33 @@ impl FnCx<'_> {
         Ok(())
     }
 
+    /// `let (a, b) = value`: the pattern must match every value of its type,
+    /// and its names are bound for the rest of the block.
+    pub(crate) fn let_pattern(&mut self, pos: Pos, p: &Pattern, ty: Option<&TypeExpr>, value: &Expr) -> Result<(), Error> {
+        let want = ty.map(|t| self.resolve(t)).transpose()?;
+        let v = self.expr(value, want.as_ref())?;
+        if let Some(want) = &want {
+            self.expect(value.pos, v, want, "the value")?;
+        }
+        let t = self.ty(v).clone();
+        let pat = self.check_pattern(p, &t, &mut Vec::new())?;
+        let missing = self.missing(&[vec![pat.clone()]], &t);
+        if let Some(m) = missing.first() {
+            let msg = format!("this pattern does not match every value of type {t} (not `{}`); use `match`", self.show(m, &t));
+            return Err(Error::new(pos, msg));
+        }
+        let fail = self.new_block();
+        let mut binds = Vec::new();
+        self.test(&pat, &t, v, fail, &mut binds);
+        let ok = self.new_block();
+        self.terminate(Terminator::Jump(ok));
+        self.switch_to(fail);
+        self.terminate(Terminator::Unreachable);
+        self.switch_to(ok);
+        self.scopes.last_mut().unwrap().extend(binds);
+        Ok(())
+    }
+
     /// Goes on in a new block if `cond` holds, else to `fail`.
     fn branch(&mut self, cond: Reg, fail: BlockId) {
         let ok = self.new_block();
@@ -306,6 +333,16 @@ impl FnCx<'_> {
                     return err(format!("missing fields in this pattern: {} (add `..` to ignore them)", missing.join(", ")));
                 }
                 Pat::Ctor(Ctor::Struct, parts.into_iter().map(|p| p.unwrap_or(ANY)).collect())
+            }
+            PatternKind::Tuple(parts) => {
+                let Some(tys) = self.env.tuple_parts(t) else {
+                    return err(format!("a tuple pattern does not match values of type {t}"));
+                };
+                if tys.len() != parts.len() {
+                    return err(format!("this pattern has {} parts, but the value is {t}, which has {}", parts.len(), tys.len()));
+                }
+                let parts = parts.iter().zip(tys.iter()).map(|(p, (_, pt))| self.check_pattern(p, pt, names));
+                Pat::Ctor(Ctor::Struct, parts.collect::<Result<_, _>>()?)
             }
             PatternKind::Int(n) => {
                 let Type::Int(it) = t else { return err(format!("an integer pattern does not match values of type {t}")) };
@@ -467,6 +504,11 @@ impl FnCx<'_> {
             }
             // A struct has one constructor: with no field narrowed, it is any value.
             Pat::Ctor(Ctor::Struct, args) if args.iter().all(|a| matches!(a, Pat::Any(_))) => "_".into(),
+            Pat::Ctor(Ctor::Struct, args) if self.env.tuple_parts(t).is_some() => {
+                let tys = self.parts(t, Ctor::Struct);
+                let shown: Vec<String> = args.iter().zip(&tys).map(|(a, t)| self.show(a, t)).collect();
+                format!("({})", shown.join(", "))
+            }
             Pat::Ctor(Ctor::Struct, args) => {
                 let Type::Struct(s) = t else { unreachable!() };
                 let fields = self.env.struct_fields(Pos::default(), s).unwrap_or_default();

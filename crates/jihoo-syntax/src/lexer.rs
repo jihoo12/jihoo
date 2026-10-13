@@ -360,7 +360,12 @@ impl<'a> Lexer<'a> {
                 }
                 let digits_start = self.i;
                 let mut is_float = false;
-                if radix == 10 {
+                // Right after a single `.`, digits are a tuple field: `t.0.1`
+                // is `t.0` then `.1`, not `t` then the float `0.1`.
+                let field = start > 0 && self.src[start - 1] == b'.' && (start < 2 || self.src[start - 2] != b'.');
+                if radix == 10 && field {
+                    self.eat_digits();
+                } else if radix == 10 {
                     // `1.5`, `2e10`, `1.5e-3`: a float. `1.` and `1.x` stay an
                     // integer followed by `.`.
                     self.eat_digits();

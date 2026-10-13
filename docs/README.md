@@ -21,6 +21,7 @@ same on GitHub.
 ### Data
 
 - [Structs](language/structs.md)
+- [Tuples](language/tuples.md)
 - [Arrays](language/arrays.md)
 - [Lists](language/lists.md)
 - [Paths](language/paths.md)

@@ -135,6 +135,8 @@ fn expr_to_type(e: &Expr) -> Result<TypeExpr, Error> {
         ExprKind::ArrayRepeat(elem, n) => TypeExprKind::Array(Box::new(expr_to_type(elem)?), n.clone()),
         // `[u8]`, a list, parses as an array literal with one element.
         ExprKind::ArrayLit(items) if items.len() == 1 => TypeExprKind::List(Box::new(expr_to_type(&items[0])?)),
+        // `(u8, str)` parses as a tuple of names.
+        ExprKind::Tuple(parts) => TypeExprKind::Tuple(parts.iter().map(expr_to_type).collect::<Result<_, _>>()?),
         // `Pair(u8)` parses as a call.
         ExprKind::Call(name, args) => TypeExprKind::Generic(name.clone(), args.clone()),
         ExprKind::Type(t) => return Ok(t.clone()),

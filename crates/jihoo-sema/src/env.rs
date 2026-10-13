@@ -155,6 +155,9 @@ pub(crate) struct Env<'p> {
     instance_keys: RefCell<HashMap<String, String>>,
     /// Path types (`path(Root).a[_]`) by name, in creation order (`paths.rs`).
     pub(crate) paths: RefCell<Vec<(String, Rc<crate::paths::PathDef>)>>,
+    /// Tuple types (`(i64, str)`) by name, with their parts, in creation order
+    /// (`tuples.rs`).
+    pub(crate) tuples: RefCell<Vec<(String, Fields)>>,
     pending: RefCell<VecDeque<String>>,
     /// The C symbols of the extern functions code uses (see `ir_name`).
     used_externs: RefCell<HashSet<String>>,
@@ -200,6 +203,7 @@ impl<'p> Env<'p> {
             struct_instances: RefCell::new(Vec::new()),
             instance_keys: RefCell::new(HashMap::new()),
             paths: RefCell::new(Vec::new()),
+            tuples: RefCell::new(Vec::new()),
             pending: RefCell::new(VecDeque::new()),
             used_externs: RefCell::new(HashSet::new()),
         };
@@ -405,6 +409,13 @@ impl<'p> Env<'p> {
                 let root = self.resolve_in(root, b, in_macro)?;
                 self.path_type(t.pos, root, shape.clone(), b.module)
             }
+            TypeExprKind::Tuple(parts) => {
+                let parts = parts.iter().map(|p| self.resolve_in(p, b, in_macro)).collect::<Result<Vec<_>, _>>()?;
+                if let Some(p) = parts.iter().position(|p| *p == Type::Unit) {
+                    return Err(Error::new(t.pos, format!("part {p} of a tuple type cannot be unit")));
+                }
+                Ok(self.tuple_type(parts))
+            }
             TypeExprKind::Generic(name, args) => {
                 let key = self.key_or_err(t.pos, b, name)?;
                 self.check_visible(t.pos, self.viewer(b.module, name), &key)?;
@@ -556,6 +567,9 @@ impl<'p> Env<'p> {
         if let Some(def) = self.path_named(name) {
             return Ok(def.fields());
         }
+        if let Some(parts) = self.tuple_named(name) {
+            return Ok(parts);
+        }
         let (decl, bindings) = self.struct_decl(pos, name)?;
         if !decl.params.is_empty() && bindings.is_empty() {
             return Err(Error::new(pos, format!("struct `{name}` is generic; write `{name}(...)`")));
@@ -642,6 +656,10 @@ impl<'p> Env<'p> {
         if self.path_named(root_name).is_some() {
             return Ok(()); // indices only
         }
+        // A tuple is checked as a part of the struct or enum it would be in.
+        if self.tuple_named(root_name).is_some() {
+            return Ok(());
+        }
         let decl = self.struct_decl(Pos::new(1, 1), root_name)?.0;
         let name = t.to_string();
         if stack.contains(&name) {
@@ -670,6 +688,14 @@ impl<'p> Env<'p> {
         };
         if self.path_named(s).is_some() {
             return Err(Error::new(pos, format!("type {t} is a path; `.{name}` on it makes a longer path")));
+        }
+        // The parts of a tuple are public.
+        if let Some(parts) = self.tuple_named(s) {
+            let found = name.parse::<usize>().ok().filter(|&i| i < parts.len() && *name == i.to_string());
+            return found.map(|i| (i as u32, parts[i].1.clone())).ok_or_else(|| {
+                let has = (0..parts.len()).map(|i| format!("`.{i}`")).collect::<Vec<_>>().join(", ");
+                Error::new(pos, format!("tuple type {t} has no part `.{name}`; it has {has}"))
+            });
         }
         let (index, ty) = self
             .struct_fields(pos, s)?

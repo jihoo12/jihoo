@@ -23,6 +23,7 @@ fn area(w: i64, h: i64) -> i64 {   // signatures are written out
 | `[T; N]` | `N` values of type `T` | all | [Arrays](arrays.md) |
 | `[T]` | any number of values of type `T` | hosted | [Lists](lists.md) |
 | `Name`, `Name(args)` | a struct or enum | all | [Structs](structs.md), [Enums](enums.md) |
+| `(A, B)` | a tuple: an `A` and a `B` | all | [Tuples](tuples.md) |
 | `fn(A, B) -> R` | a function value | all | [Function values](function-values.md) |
 | `*T` | a raw pointer | native, freestanding | [Pointers](pointers.md) |
 | `ref T` | an immutable reference to a GC value | hosted | [References](references.md) |

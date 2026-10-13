@@ -111,7 +111,7 @@ nix build
 
 v0. In every profile: static types with local inference; `bool`, `i8`…`u64`
 and `f32`/`f64`, with exact float builtins (`sqrt`, `floor`, `round`, ...);
-structs, bounds-checked arrays and enums with `match`, `Option` and `Result`;
+structs, tuples, bounds-checked arrays and enums with `match`, `Option` and `Result`;
 `while` and `for` loops (over ranges, arrays, lists and strings); blocks as
 expressions; function values; generic functions and structs; modules with
 private items and fields; compile-time evaluation (`const`, `comptime`) and

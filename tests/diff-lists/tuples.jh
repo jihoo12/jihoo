@@ -1,0 +1,52 @@
+// Tuples that hold lists and strings: moved, copied and freed like any value.
+
+fn split(xs: [i64], at: i64) -> ([i64], [i64]) {
+    let lo: [i64] = []
+    let hi: [i64] = []
+    for x in xs {
+        if x < at {
+            push(lo, x)
+        } else {
+            push(hi, x)
+        }
+    }
+    return (lo, hi)
+}
+
+fn named(n: i64) -> (str, [i64]) {
+    let parts: [i64] = []
+    for i in 0..n {
+        push(parts, i)
+    }
+    return ("parts", parts)
+}
+
+fn entry() -> i64 {
+    let (lo, hi) = split([5, 1, 9, 3, 7], 5)
+    out(len(lo))                            // 2
+    out(len(hi))                            // 3
+    let both = split([1, 2, 3, 4], 3)
+    let copy = both
+    push(copy.0, 99)
+    out(len(both.0))                        // 2
+    out(len(copy.0))                        // 3
+    out(copy.0[2])                          // 99
+
+    let pairs: [(str, [i64])] = [named(2), named(3)]
+    push(pairs[0].1, 10)
+    let t = pairs[1]
+    pairs[1].1 = []
+    out(len(t.1))                           // 3
+    out(len(pairs[0].1) + len(pairs[1].1))  // 3
+    out(len(t.0))                           // 5
+
+    match (lo, [1, 2]) {
+        (xs, ys) if len(xs) > len(ys) => out(1)
+        (_, ys) => out(len(ys))             // 2
+    }
+
+    // A part returned out of a tuple of the function's own.
+    let n = named(4).1
+    out(n[3])                               // 3
+    return 0
+}

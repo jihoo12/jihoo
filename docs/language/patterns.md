@@ -1,8 +1,8 @@
 # Pattern matching
 
 `match` compares a value against patterns, in order, and runs the first arm
-whose pattern matches. It works on enums, structs, integers and bools, and the
-compiler checks that every possible value is handled.
+whose pattern matches. It works on enums, structs, tuples, integers and bools,
+and the compiler checks that every possible value is handled.
 
 ```jihoo
 enum Shape { Circle(i64), Rect(i64, i64), Empty }
@@ -45,6 +45,7 @@ binds.
 | `x` | anything, bound to a new local `x` |
 | `Empty`, `Rect(p, q)` | that variant of the matched enum, and its payload |
 | `Point { x, y: 0, .. }` | a struct; `x` alone is `x: x`, `..` ignores the other fields |
+| `(x, 0)` | a [tuple](tuples.md), and its parts |
 | `0`, `-1`, `true` | that value |
 | `Circle(_) \| Empty`, `Some(1 \| 2)` | either pattern |
 

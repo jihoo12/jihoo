@@ -711,6 +711,44 @@ fn match_expressions() {
     assert!(err("enum E {}\nfn f(e: E) -> i64 { return match e {} }\nfn main() {}").contains("needs at least one arm"));
 }
 
+// ---- tuples ----
+
+#[test]
+fn tuples() {
+    // Tuple types with the same parts are one type, wherever they are written.
+    let m = check(
+        "fn f() -> (i64, bool) { return (1, true) }\n\
+         fn main() { let t: (i64, bool) = f()\n let (a, b) = t\n print(a + t.0)\n print(b) }",
+    )
+    .unwrap();
+    assert_eq!(m.structs.iter().filter(|s| s.name == "(i64, bool)").count(), 1);
+    // A part takes its type from the expected tuple type.
+    check("fn main() { let t: (u8, (i64, f32)) = (1, (2, 3.0))\n print(t.1.1) }").unwrap();
+    // Free of freestanding's limits when the parts are.
+    check(&fs("fn f(p: (u8, *u8)) -> u8 { return p.0 }")).unwrap();
+}
+
+#[test]
+fn tuple_errors() {
+    let e = err("fn main() { let t = (1, 2)\n print(t.2) }");
+    assert!(e.contains("tuple type (i64, i64) has no part `.2`; it has `.0`, `.1`"), "{e}");
+    assert!(err("fn main() { let t = (1, 2)\n print(t.01) }").contains("plain number, such as `.1`"));
+    assert!(err("fn main() { let t = (1,) }").contains("at least two parts"));
+    assert!(err("fn f(t: (i64)) {}\nfn main() {}").contains("a tuple type has at least two parts"));
+    assert!(err("fn main() { let t = (1, print(2)) }").contains("a part of a tuple must have a value"));
+    assert!(err("fn f(t: (i64, unit)) {}\nfn main() {}").contains("part 1 of a tuple type cannot be unit"));
+    assert!(err("fn main() { let t: (u8, i64) = (1, 2)\n let u: (i64, i64) = t }").contains("must be (i64, i64), found (u8, i64)"));
+    assert!(err("fn main() { let x = (1, 2)\n print(x.y) }").contains("has no part `.y`"));
+    // `let` patterns must match every value.
+    let e = err("fn main() { let (1, b) = (1, 2) }");
+    assert!(e.contains("does not match every value of type (i64, i64) (not `(0, _)`); use `match`"), "{e}");
+    assert!(err("fn main() { let (a, a) = (1, 2) }").contains("`a` is bound twice"));
+    assert!(err("fn main() { let (a, b) = 5 }").contains("a tuple pattern does not match values of type i64"));
+    assert!(err("fn main() { let (a, b, c) = (1, 2) }").contains("this pattern has 3 parts, but the value is (i64, i64), which has 2"));
+    let e = err("fn main() { match (true, 1) { (true, _) => print(1) } }");
+    assert!(e.contains("does not cover `(false, _)`"), "{e}");
+}
+
 // ---- cells ----
 
 #[test]

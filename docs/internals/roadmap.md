@@ -71,6 +71,9 @@
     started with; natively that is a view of the list, which the ownership
     pass now also makes of any copy whose original is still used, unless one
     of them changes. The libraries use `for` where it fits.
+27. Tuples in every profile: `(A, B)` types, `(a, b)`, `t.0`, tuple patterns
+    and `let (a, b) = ...`. A tuple type is a struct named by its spelling,
+    so JIR and both backends are unchanged.
 
 ## Next
 

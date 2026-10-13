@@ -30,6 +30,7 @@ type = "unit" | "bool" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "
      | path ("(" exprs ")")?                              ; struct or enum, maybe generic
      | "[" type ";" expr "]"                              ; array
      | "[" type "]"                                       ; list (hosted)
+     | "(" type ("," type)+ ")"                           ; tuple
      | "fn" "(" types ")" ("->" type)?                    ; function, `->` on the same line
      | "*" type | "ref" type | "cell" type | "chan" type
 ```
@@ -41,6 +42,7 @@ A statement ends at a newline, `;` or `}`.
 ```text
 block = "{" stmt* "}"
 stmt  = "let" NAME (":" type)? "=" expr
+      | "let" "(" pattern ("," pattern)+ ")" (":" type)? "=" expr   ; a pattern for every value
       | place "=" expr
       | place ("+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=") expr
       | "if" expr block ("else" (block | if-stmt))?
@@ -57,7 +59,7 @@ stmt  = "let" NAME (":" type)? "=" expr
 select-arm = ("let" NAME "=")? "recv" "(" expr ")" "=>" (block | stmt)
            | "send" "(" expr "," expr ")" "=>" (block | stmt)
            | "_" "=>" (block | stmt)
-place = NAME | place "." NAME | place "[" expr "]" | "*" expr
+place = NAME | place "." NAME | place "." INT | place "[" expr "]" | "*" expr
 ```
 
 ## Expressions
@@ -71,6 +73,7 @@ expr    = expr binop expr
         | ("-" | "!" | "*" | "&" | "ref" | "comptime") expr
         | expr "(" exprs ")"                              ; call
         | expr "[" expr "]" | expr "." NAME               ; index, field
+        | expr "." INT                                    ; a part of a tuple
         | expr "[" expr? ":" expr? "]"                    ; slice of a str or list
         | primary
 primary = INT | FLOAT | STRING | "true" | "false"
@@ -79,6 +82,7 @@ primary = INT | FLOAT | STRING | "true" | "false"
         | path "." NAME ("(" exprs ")")?                  ; enum variant: `Shape.Rect(1, 2)`
         | "[" exprs "]" | "[" expr ";" expr "]"           ; array (or list) literals
         | "(" expr ")"
+        | "(" expr ("," expr)+ ","? ")"                   ; tuple
         | block                                           ; its last statement's value, if an expression
         | "fn" "(" (NAME (":" type)?),* ")" ("->" type)? block   ; anonymous function
         | "match" expr "{" (pattern ("if" expr)? "=>" expr) sep* "}"
@@ -101,6 +105,7 @@ pattern = single ("|" single)*
 single  = "_" | NAME | INT | "-" INT | "true" | "false"
         | NAME "(" pattern,* ")"                          ; a variant with a payload
         | NAME "{" (NAME (":" pattern)?) sep* ".."? "}"   ; a struct, `..` for the rest
+        | "(" pattern ("," pattern)+ ")"                  ; a tuple
 ```
 
 ## Keywords

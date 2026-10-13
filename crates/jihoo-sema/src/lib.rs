@@ -28,6 +28,7 @@ mod paths;
 mod patterns;
 mod place;
 mod tasks;
+mod tuples;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
@@ -221,6 +222,9 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
     funcs.extend(env.lambdas());
 
     for t in env.struct_instances() {
+        define(t, Pos::new(1, 1), &mut errors);
+    }
+    for t in env.tuple_types() {
         define(t, Pos::new(1, 1), &mut errors);
     }
     for t in env.path_types() {
@@ -913,6 +917,7 @@ impl<'a> FnCx<'a> {
                 let dst = self.emit_to(vty, |dst| Inst::Copy { dst, src: v });
                 self.scopes.last_mut().unwrap().insert(name.clone(), dst);
             }
+            Stmt::LetPattern { pos, pattern, ty, value } => self.let_pattern(*pos, pattern, ty.as_ref(), value)?,
             Stmt::Assign { target, value } => {
                 self.check_assign_target(target)?;
                 let place = self.place(target)?;
@@ -1105,6 +1110,7 @@ impl<'a> FnCx<'a> {
                 self.struct_literal(e.pos, &name, inits)?
             }
             ExprKind::ArrayLit(items) => self.array_literal(e.pos, items, expected)?,
+            ExprKind::Tuple(items) => self.tuple(items, expected)?,
             // `[v; n]` where a list is expected: `n` copies, `n` known when it runs.
             ExprKind::ArrayRepeat(value, n) if matches!(expected, Some(Type::List(_))) => {
                 let Some(Type::List(elem)) = expected else { unreachable!() };
