@@ -39,6 +39,37 @@ changes only the function's copy. To let a function change something, pass a
 The VM allows 10 000 nested calls; deeper recursion stops the program with
 `stack overflow`. Compiled code is limited by the size of the OS stack.
 
+## Tail calls
+
+A function that returns a call of itself, `return f(...)` with nothing done to
+the result, does not nest: the call becomes a jump back to the start of `f`
+with the new arguments, so it runs in constant stack however deep it goes.
+
+```jihoo
+fn count(n: i64, acc: i64) -> i64 {
+    if n == 0 {
+        return acc
+    }
+    return count(n - 1, acc + 1)       // a jump: count(10000000, 0) is fine
+}
+
+fn depth(n: i64) -> i64 {
+    if n == 0 {
+        return 0
+    }
+    return 1 + depth(n - 1)            // not a tail call: the result is used
+}
+```
+
+This is a rule of the language, the same on the VM, natively and
+freestanding, at every `-O` level, not an optimization that may or may not
+happen. It holds anywhere in the function: in either branch of an `if`, in a
+`match` arm, inside a loop. Lists and strings passed along are moved into the
+parameters, and natively whatever else the round made is freed before the
+jump, so a tail call that would have had to free something after returning is
+one all the same. A call of another function in tail position, as in mutual
+recursion, is an ordinary call.
+
 ## Entry points
 
 A program starts at `main` (hosted, native) or `_start` (freestanding), which

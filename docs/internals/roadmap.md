@@ -95,6 +95,10 @@
     `meta.derive!(Show, Hash, Ord, T)` for structs and enums, with
     `type_shape` and `to_items` for macros; `lists.min` and `lists.max`.
     The fuzzer declares random traits, impls and derives and calls them.
+30. Tail calls of a function to itself are jumps, in every profile and at
+    every `-O` level: sema assigns the arguments to the parameters and jumps
+    back, so JIR only sees a loop and natively the ownership pass frees each
+    round as for any loop.
 
 ## Next
 
@@ -116,6 +120,10 @@
 
 - **Floats:** `fma`, which IEEE also defines exactly, but freestanding code on
   x86_64 would need an exact software version.
+- **Tail calls** between functions (mutual recursion, state machines): a JIR
+  `tailcall` that the VM runs in the caller's frame and LLVM as `musttail`,
+  whose rules on signatures may call for an explicit form that is an error
+  where it cannot hold.
 - **Native code:** structs by value through function values handed to C
   (callbacks take scalars only); `print` in freestanding programs.
 - **Concurrency:** weaker memory orders (acquire/release) for code that needs

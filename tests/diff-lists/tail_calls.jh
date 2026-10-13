@@ -1,0 +1,78 @@
+// A function's calls of itself in tail position are jumps, so they run in
+// constant stack in every profile; natively the lists they pass are moved
+// into the parameters and the rest freed before each jump.
+
+// The sum of `xs` from `i` on, with the list passed along.
+fn sum_from(xs: [i64], i: i64, acc: i64) -> i64 {
+    if i == len(xs) {
+        return acc
+    }
+    return sum_from(xs, i + 1, acc + xs[i])
+}
+
+// `xs` with `n`, `n - 1`, ..., 1 pushed: the list is changed and passed on.
+fn countdown(xs: [i64], n: i64) -> [i64] {
+    if n == 0 {
+        return xs
+    }
+    push(xs, n)
+    return countdown(xs, n - 1)
+}
+
+// A string built up, and a local list that each round makes and drops.
+fn spell(s: str, n: i64) -> str {
+    let scratch: [str] = [s, "x"]
+    if n == 0 {
+        return scratch[0]
+    }
+    return spell(s + to_str(n % 10), n - 1)
+}
+
+// The parameters swapped in the call, and a tail call from inside a loop.
+fn gcd(a: i64, b: i64) -> i64 {
+    for x in [b] {
+        if x == 0 {
+            return a
+        }
+        return gcd(b, a % b)
+    }
+    return -1
+}
+
+// In a `match` arm, on lists of lists.
+fn flatten(rest: [[i64]], out: [i64]) -> [i64] {
+    match len(rest) {
+        0 => return out
+        _ => {
+            for x in rest[0] {
+                push(out, x)
+            }
+            return flatten(rest[1:], out)
+        }
+    }
+}
+
+// A generic instance calls itself.
+fn last(comptime T: type, xs: [T], i: i64) -> T {
+    if i == len(xs) - 1 {
+        return xs[i]
+    }
+    return last(T, xs, i + 1)
+}
+
+fn entry() -> i64 {
+    let xs: [i64] = []
+    for i in 0..100000 {
+        push(xs, i % 7)
+    }
+    out(sum_from(xs, 0, 0))                   // 299995
+    let c = countdown([], 200000)
+    out(len(c) + c[0] - c[len(c) - 1])        // 399999
+    out(len(spell("", 50000)))                // 50000
+    out(gcd(1071, 462))                       // 21
+    let nested: [[i64]] = [[1, 2], [], [3], [4, 5, 6]]
+    out(len(flatten(nested, [])))             // 6
+    let words: [str] = ["a", "b", "last"]
+    out(len(last(words, 0)))                  // 4
+    return last(xs, 0)
+}

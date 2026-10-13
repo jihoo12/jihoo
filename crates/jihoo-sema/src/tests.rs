@@ -770,6 +770,22 @@ fn deep_code_fits_the_compiler_stack() {
     assert_eq!(run(&src), format!("{}\n", depth + 1));
 }
 
+#[test]
+fn tail_calls_to_itself_are_jumps() {
+    let src = "fn count(n: i64, acc: i64) -> i64 {\n  if n == 0 { return acc }\n  return count(n - 1, acc + 1)\n}\n\
+               fn swap(a: i64, b: i64, n: i64) -> i64 {\n  if n == 0 { return a * 10 + b }\n  return swap(b, a, n - 1)\n}\n\
+               fn depth(n: i64) -> i64 {\n  if n == 0 { return 0 }\n  return 1 + depth(n - 1)\n}\n\
+               fn main() {\n  print(count(1000000, 0))\n  print(swap(1, 2, 3))\n  print(depth(10))\n}";
+    // A million rounds: more than the VM's call stack holds.
+    assert_eq!(run(src), "1000000\n21\n10\n");
+    let m = check(src).unwrap();
+    let calls = |f: &str| m.func(f).unwrap().blocks.iter().flat_map(|b| &b.insts).filter(|i| matches!(i, Inst::Call { .. })).count();
+    assert_eq!(calls("count"), 0, "{m}");
+    assert_eq!(calls("swap"), 0, "{m}");
+    // `1 + depth(n - 1)` uses the result: still a call.
+    assert_eq!(calls("depth"), 1, "{m}");
+}
+
 // ---- function values ----
 
 #[test]

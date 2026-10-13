@@ -28,6 +28,7 @@ mod macros;
 mod paths;
 mod patterns;
 mod place;
+mod tail_calls;
 mod tasks;
 mod traits;
 mod tuples;
@@ -434,6 +435,7 @@ struct Saved {
     scopes: Vec<HashMap<String, Reg>>,
     const_regs: HashMap<String, Reg>,
     hoisted: usize,
+    head: Option<BlockId>,
     captured: HashSet<Reg>,
     closure_regs: HashMap<String, Vec<Reg>>,
     loops: Vec<Loop>,
@@ -461,6 +463,11 @@ struct FnCx<'a> {
     /// Number of hoisted instructions at the front of the entry block.
     hoisted: usize,
     blocks: Vec<BlockBuf>,
+    /// The JIR name of the function being lowered, whose calls of itself in
+    /// tail position become jumps (`tail_calls.rs`); `None` for helpers.
+    name: Option<String>,
+    /// Where those jumps go, once there is one.
+    head: Option<BlockId>,
     cur: BlockId,
     regs: Vec<Type>,
     scopes: Vec<HashMap<String, Reg>>,
@@ -538,6 +545,8 @@ impl<'a> FnCx<'a> {
             const_regs: HashMap::new(),
             hoisted: 0,
             blocks: vec![BlockBuf { insts: vec![], term: None }],
+            name: None,
+            head: None,
             cur: BlockId(0),
             regs: Vec::new(),
             scopes: vec![HashMap::new()],
@@ -553,6 +562,7 @@ impl<'a> FnCx<'a> {
 
     /// Lowers `f` as the JIR function `name` (an instance name for generics).
     fn lower_fn(mut self, f: &FnDecl, name: &str) -> Result<ir::Function, Error> {
+        self.name = Some(name.to_string());
         let sig = self.sig.clone();
         self.in_macro =
             f.is_compile_time() || self.env.sig_holds_code(&sig) || self.env.module_is_comptime(self.bindings.module);
@@ -921,6 +931,7 @@ impl<'a> FnCx<'a> {
             scopes: self.scopes.clone(),
             const_regs: self.const_regs.clone(),
             hoisted: self.hoisted,
+            head: self.head,
             captured: self.captured.clone(),
             closure_regs: self.closure_regs.clone(),
             loops: self.loops.clone(),
@@ -934,6 +945,7 @@ impl<'a> FnCx<'a> {
         self.scopes = s.scopes;
         self.const_regs = s.const_regs;
         self.hoisted = s.hoisted;
+        self.head = s.head;
         self.captured = s.captured;
         self.closure_regs = s.closure_regs;
         self.loops = s.loops;
@@ -1013,6 +1025,12 @@ impl<'a> FnCx<'a> {
                     Some(e) => {
                         let r = self.expr(e, Some(&ret))?;
                         self.expect(e.pos, r, &ret, "the return value")?;
+                        // `return f(...)` in `f` itself: a jump, not a call.
+                        if self.tail_call(r) {
+                            let dead = self.new_block();
+                            self.switch_to(dead);
+                            return Ok(());
+                        }
                         r
                     }
                     None if ret == Type::Unit => self.unit(),

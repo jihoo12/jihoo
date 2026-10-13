@@ -1,0 +1,50 @@
+// A function's calls of itself in tail position are jumps: deep recursion
+// runs in constant stack on the VM, natively and freestanding, at every -O.
+
+fn count(n: i64, acc: i64) -> i64 {
+    if n == 0 {
+        return acc
+    }
+    return count(n - 1, acc + 1)
+}
+
+// Collatz steps, with the tail call in either branch.
+fn steps(n: u64, k: i64) -> i64 {
+    if n == 1 {
+        return k
+    }
+    if n % 2 == 0 {
+        return steps(n / 2, k + 1)
+    }
+    return steps(3 * n + 1, k + 1)
+}
+
+struct Acc {
+    sum: i64
+    last: i64
+}
+
+// A struct carried along, and the parameters swapped every round.
+fn walk(a: i64, b: i64, acc: Acc, n: i64) -> Acc {
+    if n == 0 {
+        return acc
+    }
+    return walk(b, a + b, Acc { sum: acc.sum + a, last: b }, n - 1)
+}
+
+// Not a tail call: the result is used after the call returns.
+fn depth(n: i64) -> i64 {
+    if n == 0 {
+        return 0
+    }
+    return 1 + depth(n - 1)
+}
+
+fn entry() -> i64 {
+    out(count(3000000, 0))                    // 3000000
+    out(steps(27, 0))                         // 111
+    let a = walk(0, 1, Acc { sum: 0, last: 0 }, 40)
+    out(a.sum)                                // 165580140
+    out(a.last)                               // 102334155
+    return depth(1000)                        // 1000
+}
