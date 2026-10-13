@@ -81,7 +81,10 @@ pub fn run(body: &str, profile: Profile, work: &Path, name: &str) -> Result<Outc
     run_under(body, profile, work, name, None)
 }
 
-/// Like `run`; a compiled program runs under `runner` (such as valgrind) if given.
+/// Like `run`; a compiled program runs under `runner` (such as valgrind) if
+/// given, built with `-O0`: optimized code may drop or merge the allocations
+/// and frees the compiler inserts, and with them the leaks and double frees a
+/// memory checker is there to find.
 pub fn run_under(body: &str, profile: Profile, work: &Path, name: &str, runner: Option<&[String]>) -> Result<Outcome, String> {
     let src = work.join(format!("{name}.{}.jh", profile.name()));
     std::fs::write(&src, wrap(body, profile)).unwrap();
@@ -89,7 +92,7 @@ pub fn run_under(body: &str, profile: Profile, work: &Path, name: &str, runner: 
         within(Command::new(JIHOO).arg("run").arg(&src))?
     } else {
         let bin = work.join(format!("{name}.{}", profile.name()));
-        let build = within(Command::new(JIHOO).arg("build").arg(&src).arg("-o").arg(&bin))?;
+        let build = within(Command::new(JIHOO).arg("build").arg(&src).arg("-o").arg(&bin).args(runner.map(|_| "-O0")))?;
         if !build.status.success() {
             return Err(format!("`jihoo build` failed: {}", String::from_utf8_lossy(&build.stderr)));
         }

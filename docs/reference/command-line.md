@@ -81,6 +81,7 @@ jihoo run fib.jir                    # and run it
 |--------|---------|
 | `-o <path>` | the output file (`build`, `emit-ir`) |
 | `-I <dir>` | also look for imported modules in `<dir>`; may be repeated |
+| `-O0` … `-O3` | how much the LLVM backend optimizes native and freestanding programs, `-O2` by default (`build`, `run`). `-O0` keeps every allocation and free the compiler inserts, which is what checking memory with valgrind needs: optimized code may drop or merge them |
 | `--target <t>` | the machine to compile for, `x86_64` or `aarch64` (Linux); the default is this machine. It picks the [per-target modules](../language/modules.md#per-target-modules) and is recorded in the JIR (`build`, `emit-ir`; `run` only runs on this machine) |
 
 ## Environment

@@ -41,7 +41,7 @@ JIHOO_LLC=... JIHOO_FUZZ_SEEDS=2000 cargo test --release --test fuzz
 JIHOO_FUZZ_SEED=1234 JIHOO_FUZZ_SHOW=1 cargo test --test fuzz -- --nocapture   # reproduce one seed
 JIHOO_GC_STRESS=1 cargo test                       # collect at every allocation (after VM alloc/root changes)
 JIHOO_VM_CHECK=1 cargo test                        # check in-place updates aren't shared
-JIHOO_VALGRIND=$(which valgrind) ...               # leaks/invalid accesses fail native list tests/fuzz seeds
+JIHOO_VALGRIND=$(which valgrind) ...               # leaks/invalid accesses fail native list tests/fuzz seeds (built -O0)
 cargo clippy --all-targets --locked -- -D warnings # CI runs this
 nix flake check                                    # everything CI runs
 ```

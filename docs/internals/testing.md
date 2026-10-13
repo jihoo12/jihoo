@@ -68,6 +68,14 @@ Programs with lists also run `lists.fuse!` pipelines of random `map` and
 expand the same macro, so comparing them could not catch a wrong expansion;
 the loop can, and a program whose two results differ fails its seed.
 
+With `JIHOO_VALGRIND` set to valgrind's path, the native programs with lists
+(in `tests/diff-lists` and the fuzzer's list mode) run under it, and a leak or
+an invalid access fails them. They are built with `-O0` for it: LLVM may
+remove an allocation that is never read, or one freed twice, which is
+undefined, and with it the very mistake of the ownership pass that valgrind
+is there to show. At `-O2`, a missing `drop` and a value handed over to two
+parameters at once both went unnoticed.
+
 A program that does not finish within `JIHOO_TEST_TIMEOUT` seconds (120 by
 default), built or run, fails too, so a miscompiled loop that never ends
 shows as a failure instead of a test run that never ends.

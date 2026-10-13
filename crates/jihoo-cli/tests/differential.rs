@@ -223,6 +223,30 @@ fn builds_for_the_other_target() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("runs programs on this machine"));
 }
 
+/// `-O0` ... `-O3` reach the backend, and give the same program.
+#[test]
+fn optimization_levels() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let src = repo_root().join("tests/diff-lists/basics.jh");
+    let body = std::fs::read_to_string(&src).unwrap();
+    let work = common::work_dir("opt-levels");
+    let path = work.join("basics.jh");
+    std::fs::write(&path, common::wrap(&body, Profile::Native)).unwrap();
+    let mut outputs = Vec::new();
+    for level in ["-O0", "-O1", "-O2", "-O3"] {
+        let out = Command::new(JIHOO).arg("run").arg(level).arg(&path).output().unwrap();
+        assert!(out.stderr.is_empty(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
+        outputs.push(out.stdout);
+    }
+    assert!(outputs.iter().all(|o| *o == outputs[0] && !o.is_empty()));
+    let out = Command::new(JIHOO).args(["emit-ir", "-O0"]).arg(&path).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("only `jihoo build` and `jihoo run` use it"));
+    std::fs::remove_dir_all(&work).unwrap();
+}
+
 /// Errors in an imported module name that module's file.
 #[test]
 fn errors_in_imported_modules_name_their_file() {

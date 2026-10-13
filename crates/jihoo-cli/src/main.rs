@@ -24,6 +24,7 @@ options:
   -I <dir>    also look for imported modules in <dir> (may be repeated)
   --target <t>  compile for x86_64 or aarch64 Linux (emit-ir, build;
               default: this machine)
+  -O0 ... -O3 how much the LLVM backend optimizes (run, build; default -O2)
 
 link inputs (native programs only, passed on to the C compiler; `run` and
 `build`):
@@ -75,6 +76,8 @@ struct Opts {
     link: Vec<String>,
     /// Arguments after `--`, for the program `jihoo run` runs.
     args: Vec<String>,
+    /// `-O0` ... `-O3`, for the LLVM backend.
+    opt: Option<String>,
 }
 
 /// Files `jihoo build` passes on to the C compiler.
@@ -88,6 +91,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
     let mut target = Target::host();
     let mut target_given = false;
     let mut program_args = Vec::new();
+    let mut opt = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -103,6 +107,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
                     .ok_or_else(|| format!("unknown target `{name}`; the targets are x86_64 and aarch64"))?;
                 target_given = true;
             }
+            "-O0" | "-O1" | "-O2" | "-O3" => opt = Some(a.clone()),
             "-l" | "-L" => link.push(format!("{a}{}", it.next().ok_or_else(|| format!("`{a}` needs an argument"))?)),
             s if (s.starts_with("-l") || s.starts_with("-L")) && s.len() > 2 => link.push(s.to_string()),
             s if s.starts_with('-') => return Err(format!("unknown option `{s}`\n\n{USAGE}")),
@@ -114,7 +119,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
         }
     }
     let input = input.ok_or_else(|| format!("missing input file\n\n{USAGE}"))?;
-    Ok(Opts { input, output, include, target, target_given, link, args: program_args })
+    Ok(Opts { input, output, include, target, target_given, link, args: program_args, opt })
 }
 
 /// `parse_opts` for commands that do not link or run.
@@ -125,6 +130,9 @@ fn parse_opts_no_link(args: &[String]) -> Result<Opts, String> {
     }
     if !opts.args.is_empty() {
         return Err("arguments after `--` are for `jihoo run`".into());
+    }
+    if let Some(o) = &opts.opt {
+        return Err(format!("`{o}` is for the LLVM backend; only `jihoo build` and `jihoo run` use it"));
     }
     Ok(opts)
 }
@@ -306,7 +314,7 @@ fn link(m: &Module, opts: &Opts, out: &Path) -> Result<(), String> {
     write(&jir, &m.to_string())?;
 
     let llc = std::env::var("JIHOO_LLC").unwrap_or_else(|_| "jihoo-llc".into());
-    let result = run_tool(Command::new(&llc).arg(&jir).arg("-o").arg(&obj)).and_then(|_| {
+    let result = run_tool(Command::new(&llc).arg(&jir).arg("-o").arg(&obj).args(&opts.opt)).and_then(|_| {
         if m.profile == Profile::Native {
             let cc = std::env::var("JIHOO_CC").unwrap_or_else(|_| "cc".into());
             // libm is part of the C standard library, and float `%` calls its `fmod`.
