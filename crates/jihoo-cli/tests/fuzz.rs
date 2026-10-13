@@ -7,7 +7,13 @@
 //! in part, compared, and passed to and returned from functions; `if`, `match`
 //! (on integers, and on tuples with nested patterns), `let` patterns, `while`
 //! and `for` loops with `break` and `continue`, compound assignment, and
-//! functions that return a part of a value of their own. The
+//! functions that return a part of a value of their own; and, in most
+//! programs, a trait `Weigh` with a default, impls of it for random structs
+//! and scalar types and a generic impl for pairs, derived `Ord` and `Hash`
+//! (`meta.derive!`) and `heavier`, a function bounded by `Weigh`, called as
+//! methods (`x.weigh()`), through the trait (`Weigh.twice(x)`) and the type
+//! (`S0.unit()`), with inferred type arguments, and through `<`, `compare`
+//! and `hash_of`. The
 //! program prints values with `out` as it goes and the state of its variables
 //! at the end (see `tests/common/mod.rs`). Programs never trap: divisors are
 //! made odd and indexes are taken modulo the length, so the VM and LLVM must
@@ -132,6 +138,17 @@ struct Gen {
     names: usize,
     /// Loops around the statement being made.
     loops: usize,
+    /// Whether the program has the trait `Weigh` and its impls (see `traits`).
+    traits: bool,
+    /// The types with an `impl Weigh` of their own; 2-tuples of such types
+    /// have one too when `tuple_impl`.
+    weigh: Vec<Ty>,
+    tuple_impl: bool,
+    /// Which structs have a derived `Ord` and a derived `Hash`.
+    ord: Vec<bool>,
+    hash: Vec<bool>,
+    /// Making the body of an impl, which must not call the trait again.
+    in_impl: bool,
     src: String,
     indent: usize,
 }
@@ -150,6 +167,12 @@ impl Gen {
             vars: Vec::new(),
             names: 0,
             loops: 0,
+            traits: false,
+            weigh: Vec::new(),
+            tuple_impl: false,
+            ord: Vec::new(),
+            hash: Vec::new(),
+            in_impl: false,
             src: String::new(),
             indent: 0,
         }
@@ -158,6 +181,10 @@ impl Gen {
     fn program(mut self) -> String {
         if self.lists {
             self.line("import lists");
+        }
+        self.traits = self.rng.chance(60);
+        if self.traits {
+            self.line("import meta");
         }
         for _ in 0..self.rng.below(4) {
             let fields = (0..1 + self.rng.below(3)).map(|_| self.any_ty(2)).collect();
@@ -170,6 +197,9 @@ impl Gen {
                 self.line(&format!("    f{i}: {t}"));
             }
             self.line("}");
+        }
+        if self.traits {
+            self.trait_items();
         }
         for _ in 0..self.rng.below(5) {
             self.function();
@@ -439,6 +469,11 @@ impl Gen {
             return self.leaf(t, depth);
         }
         let d = depth - 1;
+        if self.traits && !self.in_impl && self.rng.chance(10) {
+            if let Some(e) = self.trait_expr(t, d) {
+                return e;
+            }
+        }
         match self.rng.below(8) {
             // A call to an earlier function that returns a `t`. Not at depth
             // 1, where `leaf` builds aggregates: a call's arguments may hold a
@@ -1197,6 +1232,220 @@ impl Gen {
         let target = self.place(v, &path, constant);
         let e = self.expr(&t, 1);
         self.line(&format!("{target} = {e}"));
+    }
+
+
+    // ---- traits ----
+
+    /// The trait `Weigh` with a default, impls of it for some structs and
+    /// scalar types (and, generically, for 2-tuples of types with one),
+    /// derived `Ord` and `Hash` for the structs whose fields have them, and
+    /// `heavier`, a function bounded by `Weigh`.
+    fn trait_items(&mut self) {
+        for l in [
+            "trait Weigh {",
+            "    fn weigh(x: Self) -> i64",
+            "    fn unit() -> i64",
+            "    fn twice(x: Self) -> i64 {",
+            "        return x.weigh() * 2 + Self.unit()",
+            "    }",
+            "}",
+        ] {
+            self.line(l);
+        }
+        let mut types: Vec<Ty> = (0..self.structs.len()).filter(|_| self.rng.chance(60)).map(Ty::Struct).collect();
+        for _ in 0..1 + self.rng.below(3) {
+            let t = self.scalar_ty();
+            if !types.contains(&t) {
+                types.push(t);
+            }
+        }
+        for t in types {
+            self.weigh_impl(&t);
+            self.weigh.push(t);
+        }
+        if self.rng.chance(50) {
+            self.tuple_impl = true;
+            for l in [
+                "impl(A: Weigh, B: Weigh) Weigh for (A, B) {",
+                "    fn weigh(x: (A, B)) -> i64 {",
+                "        return x.0.weigh() * 31 + x.1.twice()",
+                "    }",
+                "    fn unit() -> i64 {",
+                "        return 7",
+                "    }",
+                "}",
+            ] {
+                self.line(l);
+            }
+        }
+        for k in 0..self.structs.len() {
+            let ord = self.structs[k].iter().all(|f| self.has_ord(f));
+            let hash = self.structs[k].iter().all(|f| self.has_hash(f));
+            self.ord.push(ord);
+            self.hash.push(hash);
+            let derived: Vec<&str> = [(ord, "Ord"), (hash, "Hash")].iter().filter(|(on, _)| *on).map(|(_, t)| *t).collect();
+            if !derived.is_empty() {
+                self.line(&format!("meta.derive!({}, S{k})", derived.join(", ")));
+            }
+        }
+        for l in [
+            "fn heavier(comptime T: Weigh, a: T, b: T) -> i64 {",
+            "    if a.weigh() < b.weigh() {",
+            "        return b.twice()",
+            "    }",
+            "    return a.twice() + T.unit()",
+            "}",
+        ] {
+            self.line(l);
+        }
+    }
+
+    /// `impl Weigh for t`, whose `weigh` is a random `i64` made from `x`.
+    fn weigh_impl(&mut self, t: &Ty) {
+        let name = self.ty_name(t);
+        self.line(&format!("impl Weigh for {name} {{"));
+        self.indent += 1;
+        self.line(&format!("fn weigh(x: {name}) -> i64 {{"));
+        self.indent += 1;
+        self.vars = vec![Var { name: "x".into(), ty: t.clone(), mutable: false }];
+        self.in_impl = true;
+        let e = self.expr(&Ty::I64, 3);
+        self.in_impl = false;
+        self.vars.clear();
+        self.line(&format!("return {e}"));
+        self.indent -= 1;
+        self.line("}");
+        let unit = self.rng.below(100);
+        self.line(&format!("fn unit() -> i64 {{ return {unit} }}"));
+        // Sometimes the default is replaced.
+        if self.rng.chance(30) {
+            self.line("fn twice(x: Self) -> i64 { return x.weigh() - 1 }");
+        }
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn has_weigh(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Tuple(parts) if self.tuple_impl && parts.len() == 2 && !self.weigh.contains(t) => {
+                parts.iter().all(|p| self.has_weigh(p))
+            }
+            _ => self.weigh.contains(t),
+        }
+    }
+
+    /// Whether `t` has an `Ord`: the prelude's, or a derived one.
+    fn has_ord(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Int { .. } | Ty::F64 | Ty::Str => true,
+            Ty::Tuple(parts) => parts.iter().all(|p| self.has_ord(p)),
+            Ty::Struct(k) => self.ord.get(*k) == Some(&true),
+            Ty::List(e) => self.has_ord(e),
+            _ => false,
+        }
+    }
+
+    /// Whether `t` has a `Hash`: the prelude's, or a derived one.
+    fn has_hash(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Int { .. } | Ty::Bool | Ty::Str => true,
+            Ty::Tuple(parts) => parts.iter().all(|p| self.has_hash(p)),
+            Ty::Struct(k) => self.hash.get(*k) == Some(&true),
+            Ty::List(e) => self.has_hash(e),
+            _ => false,
+        }
+    }
+
+    /// A type that `has` holds for: a variable's, a struct, or a tuple of two.
+    fn trait_ty(&mut self, has: fn(&Gen, &Ty) -> bool) -> Option<Ty> {
+        let mut pool: Vec<Ty> = self.vars.iter().map(|v| v.ty.clone()).collect();
+        pool.extend((0..self.structs.len()).map(Ty::Struct));
+        pool.extend(self.weigh.clone());
+        let (a, b) = (self.scalar_ty(), self.scalar_ty());
+        pool.push(a.clone());
+        pool.push(Ty::Tuple(vec![a, b]));
+        pool.retain(|t| has(self, t));
+        if pool.is_empty() {
+            return None;
+        }
+        Some(self.rng.pick(&pool).clone())
+    }
+
+    /// Two values of type `t`. A list literal needs a list type from where it
+    /// is used, which a receiver does not give: those come from variables.
+    fn operands(&mut self, t: &Ty, d: u32) -> Option<(String, String)> {
+        if self.has_list(t) {
+            return Some((self.projection(t)?, self.projection(t)?));
+        }
+        Some((self.expr(t, d), self.expr(t, d)))
+    }
+
+    /// An integer or bool made through a trait: `Weigh`'s functions, `heavier`,
+    /// or `Ord` and `Hash` (operators on ordered types included).
+    fn trait_expr(&mut self, t: &Ty, d: u32) -> Option<String> {
+        match t {
+            Ty::Int { .. } => {
+                let tn = self.ty_name(t);
+                let e = match self.rng.below(6) {
+                    0 | 1 => {
+                        let w = self.trait_ty(Gen::has_weigh)?;
+                        let (a, _) = self.operands(&w, d)?;
+                        format!("({a}).weigh()")
+                    }
+                    2 => {
+                        let w = self.trait_ty(Gen::has_weigh)?;
+                        let (a, _) = self.operands(&w, d)?;
+                        format!("Weigh.twice({a})")
+                    }
+                    3 => {
+                        // `S0.unit()`, `i16.unit()`: a type that has a name, which no
+                        // variable in scope hides (loop counters may be called `i8`).
+                        let named: Vec<Ty> = self
+                            .weigh
+                            .iter()
+                            .filter(|t| !matches!(t, Ty::Tuple(_)) && !self.vars.iter().any(|v| v.name == self.ty_name(t)))
+                            .cloned()
+                            .collect();
+                        if named.is_empty() {
+                            return None;
+                        }
+                        let w = self.rng.pick(&named).clone();
+                        format!("{}.unit()", self.ty_name(&w))
+                    }
+                    4 => {
+                        let w = self.trait_ty(Gen::has_weigh)?;
+                        let (a, b) = self.operands(&w, d)?;
+                        format!("heavier({a}, {b})")
+                    }
+                    _ => {
+                        let o = self.trait_ty(Gen::has_ord)?;
+                        let (a, b) = self.operands(&o, d)?;
+                        format!("({a}).compare({b})")
+                    }
+                };
+                Some(format!("(({e}) as {tn})"))
+            }
+            Ty::Bool => match self.rng.below(3) {
+                0 => {
+                    let o = self.trait_ty(Gen::has_ord)?;
+                    let (a, b) = self.operands(&o, d)?;
+                    let op = *self.rng.pick(&["<", "<=", ">", ">="]);
+                    Some(format!("({a} {op} {b})"))
+                }
+                1 => {
+                    let o = self.trait_ty(Gen::has_ord)?;
+                    let (a, b) = self.operands(&o, d)?;
+                    Some(format!("({a}).less({b})"))
+                }
+                _ => {
+                    let h = self.trait_ty(Gen::has_hash)?;
+                    let (a, b) = self.operands(&h, d)?;
+                    Some(format!("(hash_of({a}) == hash_of({b}))"))
+                }
+            },
+            _ => None,
+        }
     }
 
     fn declare(&mut self, t: Ty, e: String) {

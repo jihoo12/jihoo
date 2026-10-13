@@ -44,6 +44,11 @@ structs and tuples nested in each other, copied, updated deep inside, compared
 and passed to and returned from functions (sometimes as a part of a value of
 the function's own), `if`, `match` on integers and on tuples with nested
 patterns and guards, `let` patterns, and loops with `break` and `continue`.
+Most also declare a trait with a default, impls of it for random structs and
+scalars and a generic impl for pairs, derived `Ord` and `Hash`
+(`meta.derive!`), and a function bounded by the trait, and call them as
+methods, through the trait and the type, with inferred type arguments, and
+through `<` and `hash_of`.
 Programs print values as they go and every element of every
 variable at the end. They cannot trap (divisors are made odd, indexes are taken
 modulo the length), so every difference is a bug in the VM or the backend.

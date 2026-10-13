@@ -1,7 +1,7 @@
 # Design: traits
 
-Status: the six steps are done; what is left is in [Done when](#done-when) and
-[Later](#later).
+Status: the six steps are done, and so is [Done when](#done-when); what is left is
+in [Later](#later).
 
 ## Why
 
@@ -404,7 +404,7 @@ variant as a value.
   hosted and native programs, and `Ord` and `Hash` in freestanding ones (done);
 - `tests/diff/` has programs with traits and impls that print the same in all
   three profiles, and `tests/diff-lists/` the same for `Map` and `Show` (done);
-- the fuzzer writes random impls and calls through bounds (not yet);
+- the fuzzer writes random impls and calls through bounds (done);
 - the JIR version is unchanged (done: still 15).
 
 ## Costs and risks
