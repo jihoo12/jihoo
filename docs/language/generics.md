@@ -32,7 +32,8 @@ fn main() {
 - A `comptime` parameter makes a function generic. `comptime T: type` takes a
   type; any other `comptime x: U` takes a value of type `U` computed at compile
   time on the VM.
-- Type arguments are written in expression position and read back as types:
+- Type arguments are written in expression position and read back as types
+  (or [left out](#inferred-type-arguments)):
   `u8`, `*u8`, `[u8; 4]` and `fn(i64) -> i64` all parse as expressions.
 - Inside an instance, `T` stands for its type and `N` for a constant, also in
   array lengths and `size_of`. Comptime parameters cannot be assigned.
@@ -52,6 +53,38 @@ fn main() {
 A `comptime` parameter of a function type passes a function at compile time:
 see [Function values](function-values.md#direct-calls) and
 [comptime closures](closures.md#comptime-closures).
+
+## Inferred type arguments
+
+A call may leave out the type arguments, giving one argument per runtime
+parameter; the types are then inferred from the other arguments:
+
+```jihoo
+let x: u8 = 7
+max(x, 200)                                  // T = u8: the literal takes it from `x`
+max("app", "apple")                          // T = str
+lists.map(xs, fn(v) -> str { return to_str(v) })   // T from `xs`, U from the function
+lists.sort(words, fn(a, b) { return a < b })       // the function's types from T
+```
+
+- Each argument with a type of its own is matched against its parameter's type:
+  `[T]` against `[u8]` gives `T = u8`, `Pair(T)` against `Pair(i64)` gives
+  `T = i64`, and likewise through tuples, pointers, function types and the
+  other type constructors.
+- Arguments that take their type from where they are used, literals and
+  anonymous functions with types left out, wait for the arguments that decide
+  their parameter's type, whatever their order, and are then checked against
+  it. A literal nothing decides takes its default type, as in `let`:
+  `max(3, -5)` is an `i64` instance.
+- An anonymous function's types left out must be known from other arguments:
+  in `lists.map(xs, fn(v) { ... })` nothing says what `U` is, so the error asks
+  for `-> U` on the function, or for the type arguments.
+- Only `comptime T: type` parameters are inferred. A function with a value
+  parameter (`comptime N: i64`) is always called with all its arguments.
+- An argument whose type contradicts an earlier one is an error that names
+  both: `` `T` of `max` is str here, but u8 from an earlier argument ``.
+
+Inferred or written out, the same types give the same instance.
 
 ## Generic structs
 

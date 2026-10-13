@@ -74,6 +74,11 @@
 27. Tuples in every profile: `(A, B)` types, `(a, b)`, `t.0`, tuple patterns
     and `let (a, b) = ...`. A tuple type is a struct named by its spelling,
     so JIR and both backends are unchanged.
+28. Inferred type arguments: a call to a generic function may leave out its
+    `comptime T: type` arguments, which are matched from the other arguments
+    (`lists.sort(xs, fn(a, b) { return a < b })`); literals and anonymous
+    functions take what those decide. The first step of
+    [traits](traits.md).
 
 ## Next
 
@@ -87,7 +92,7 @@
   `#![comptime]` modules, so `meta` costs programs nothing and works in
   freestanding ones; random pipelines in the fuzzer, each checked against
   the same stages written out as a loop.
-- **Traits** ([design](traits.md)), before v1: inferred type arguments, then
+- **Traits** ([design](traits.md)), before v1: after inferred type arguments,
   `trait`, `impl` and bounds (`comptime T: Ord`), resolved statically with no
   change to JIR; `Ord`, `Hash` and `Show` in the prelude, and a `Map(K, V)`.
 - **Memory:** a report of where native code copies lists (`jihoo build

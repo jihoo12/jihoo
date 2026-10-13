@@ -122,7 +122,7 @@ pub(crate) fn is_type_param(p: &Param) -> bool {
 
 /// Reads an argument written in expression syntax as a type: `u8`, `*u8` (a
 /// dereference), `ref u8` and `[u8; 4]` (an array repeat) all parse as expressions.
-fn expr_to_type(e: &Expr) -> Result<TypeExpr, Error> {
+pub(crate) fn expr_to_type(e: &Expr) -> Result<TypeExpr, Error> {
     let kind = match &e.kind {
         ExprKind::Var(n) => TypeExprKind::Named(n.clone()),
         // `thread.Thread`, a type of another module, parses as a field.
@@ -149,11 +149,17 @@ impl FnCx<'_> {
     /// Calls generic function `key` (its module-qualified name).
     pub(crate) fn call_generic(&mut self, pos: Pos, key: &str, decl: &FnDecl, args: &[Expr]) -> Result<Reg, Error> {
         let name = &decl.name;
+        let runtime = decl.params.iter().filter(|p| !p.comptime).count();
+        if args.len() == runtime && runtime != decl.params.len() {
+            return self.call_inferred(pos, key, decl, args);
+        }
         if decl.params.len() != args.len() {
-            return Err(Error::new(
-                pos,
-                format!("`{name}` takes {} arguments, {} given", decl.params.len(), args.len()),
-            ));
+            let msg = if decl.params.iter().all(|p| !p.comptime || is_type_param(p)) {
+                format!("`{name}` takes {} arguments ({runtime} without its types), {} given", decl.params.len(), args.len())
+            } else {
+                format!("`{name}` takes {} arguments, {} given", decl.params.len(), args.len())
+            };
+            return Err(Error::new(pos, msg));
         }
 
         // Comptime arguments first: they determine the instance. A closure is

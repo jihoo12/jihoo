@@ -28,7 +28,7 @@ fn main() {
     print(to_str(len(words)) + " words")
 
     // Sorted, equal words are next to each other: count the runs.
-    let sorted = lists.sort(str, words, fn(a: str, b: str) -> bool { return a < b })
+    let sorted = lists.sort(words, fn(a, b) { return a < b })
     let counts: [Count] = []
     let i = 0
     while i < len(sorted) {
@@ -41,7 +41,7 @@ fn main() {
     }
 
     // Most common first; the sort is stable, so ties stay in alphabetical order.
-    let top = lists.sort(Count, counts, fn(a: Count, b: Count) -> bool { return a.n > b.n })
+    let top = lists.sort(counts, fn(a, b) { return a.n > b.n })
     let k = 0
     while k < len(top) && k < 5 {
         print(strings.repeat(" ", 6 - len(to_str(top[k].n))) + to_str(top[k].n) + "  " + top[k].word)

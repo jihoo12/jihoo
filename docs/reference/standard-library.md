@@ -117,17 +117,18 @@ proportion to their input and output.
 ## lists
 
 Generic functions on [lists](../language/lists.md) for hosted and native programs. Each
-takes the element type first, as generic functions do, and returns a new list:
-the one passed in is never changed.
+returns a new list: the one passed in is never changed. The element types are
+inferred from the arguments ([Generics](../language/generics.md#inferred-type-arguments)),
+or can be written first, as in the table.
 
 ```jihoo
 import lists
 
 fn main() {
     let xs: [i64] = [3, 1, 2]
-    let sorted = lists.sort(i64, xs, fn(a: i64, b: i64) -> bool { return a < b })
-    let doubled = lists.map(i64, i64, sorted, fn(x: i64) -> i64 { return x * 2 })
-    print(lists.index_of(i64, doubled, 4))      // 1
+    let sorted = lists.sort(xs, fn(a, b) { return a < b })
+    let doubled = lists.map(sorted, fn(x) -> i64 { return x * 2 })
+    print(lists.index_of(doubled, 4))      // 1
 }
 ```
 

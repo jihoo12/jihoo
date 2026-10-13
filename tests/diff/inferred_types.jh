@@ -1,0 +1,59 @@
+// Type arguments left out of a call are inferred from the other arguments; the
+// instance is the same one the written-out call makes.
+
+struct Pair(T: type) {
+    a: T
+    b: T
+}
+
+fn max(comptime T: type, x: T, y: T) -> T {
+    if x > y {
+        return x
+    }
+    return y
+}
+
+fn swap(comptime T: type, p: Pair(T)) -> Pair(T) {
+    return Pair(T) { a: p.b, b: p.a }
+}
+
+fn flip(comptime A: type, comptime B: type, t: (A, B)) -> (B, A) {
+    return (t.1, t.0)
+}
+
+fn get(comptime T: type, o: Option(T), d: T) -> T {
+    match o {
+        Some(x) => return x
+        None => return d
+    }
+}
+
+fn apply(comptime T: type, comptime U: type, x: T, f: fn(T) -> U) -> U {
+    return f(x)
+}
+
+fn sum(comptime T: type, comptime N: i64, xs: [T; N]) -> T {
+    let s: T = 0
+    for x in xs {
+        s += x
+    }
+    return s
+}
+
+fn entry() -> i64 {
+    let small: u8 = 250
+    out(max(small, 3) as i64)               // 250, T = u8
+    out(max(3, small) as i64)               // the literal waits for `small`
+    out(max(-5, 7))                         // 7, T = i64
+    let p = swap(Pair(i16) { a: 1, b: -2 })
+    out(p.a as i64 * 10 + p.b as i64)       // -19
+    let t = flip((small, 40))
+    out(t.0 + t.1 as i64)                   // 290
+    let none: Option(u8) = Option.None
+    out(get(none, 9) as i64)                // 9
+    out(get(Option.Some(12), 0))            // 12
+    out(apply(small, fn(v) -> i64 { return v as i64 * 2 }))   // 500
+    out(apply(4, fn(v: i64) -> bool { return v > 3 }) as i64) // 1
+    out(sum(u8, 3, [1, 2, 3]) as i64)       // 6, written out
+    return max(i64, 1, 2) + max(2, 1)
+}

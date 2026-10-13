@@ -20,9 +20,9 @@ fn main() {
     let k = 7
 
     // With a list for `map` and another for `filter`.
-    let ys = lists.map(i64, i64, xs, fn(x: i64) -> i64 { return x * 3 + k })
-    let zs = lists.filter(i64, ys, fn(x: i64) -> bool { return x % 2 == 0 })
-    print(lists.fold(i64, i64, zs, 0, fn(a: i64, x: i64) -> i64 { return a + x }))
+    let ys = lists.map(xs, fn(x) -> i64 { return x * 3 + k })
+    let zs = lists.filter(ys, fn(x) { return x % 2 == 0 })
+    print(lists.fold(zs, 0, fn(a, x) { return a + x }))
 
     // Fused: one loop, no list in between. Prints the same.
     let s = lists.fuse!(xs,

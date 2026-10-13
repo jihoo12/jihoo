@@ -1,6 +1,6 @@
 # Design: traits
 
-Status: proposed; nothing is implemented yet.
+Status: step 1 (inferred type arguments) is done; the rest is proposed.
 
 ## Why
 
@@ -195,10 +195,10 @@ module where the macro is defined, as for every other name the template writes.
 Each step is useful alone, and the libraries are the measure: after each, some
 signature in `lib/` gets shorter or some workaround goes away.
 
-### 1. Inferring type arguments
+### 1. Inferring type arguments (done)
 
-Today every call to a generic function writes its types:
-`lists.map(i64, i64, xs, f)`. Traits make more functions generic, so this comes
+Every call to a generic function used to write its types:
+`lists.map(i64, i64, xs, f)`. Traits make more functions generic, so this came
 first.
 
 When a call to a function with `comptime T: type` parameters gives exactly as
@@ -207,13 +207,20 @@ each argument with a type of its own is unified with its parameter's type
 (`[T]` with `[i64]` gives `T = i64`; `fn(T) -> U` with the type of an annotated
 closure gives `U`); the remaining arguments, literals and closures without
 annotations, are then checked against the parameter types with those bindings
-as their expected types, as enum arguments are now
-([Generic enums](../language/enums.md#generic-enums)). A parameter nothing
-determines is an error that says so. Value parameters (`comptime N: i64`) are
-never inferred. Writing all arguments out keeps working.
+as their expected types, as enum arguments are
+([Generic enums](../language/enums.md#generic-enums)). Value parameters
+(`comptime N: i64`) are never inferred. Writing all arguments out keeps working.
 
-This needs no traits and shortens most of `lists` and `alloc` by itself. The
-unifier is what step 3 matches generic impls with.
+Done ([Inferred type arguments](../language/generics.md#inferred-type-arguments)),
+in `crates/jihoo-sema/src/infer.rs`, without changing JIR. Two choices the
+design left open: a literal that no other argument decides takes its default
+type, as in `let`, so `max(3, -5)` is an `i64` instance rather than an error;
+and an anonymous function may leave out exactly the types other arguments
+decide, so `lists.sort(xs, fn(a, b) { return a < b })` needs no annotations
+while `lists.map(xs, fn(v) { ... })` needs `-> U`. `lists`, `examples/words.jh`
+and `examples/pipe.jh` call the short form; `tests/diff/inferred_types.jh`
+checks it in all three profiles. The unifier (`FnCx::unify`) is what step 3
+will match generic impls with.
 
 ### 2. Traits, impls and bounds
 

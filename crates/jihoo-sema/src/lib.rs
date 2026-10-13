@@ -22,6 +22,7 @@ mod env;
 mod floats;
 mod generic;
 mod hygiene;
+mod infer;
 mod loops;
 mod macros;
 mod paths;

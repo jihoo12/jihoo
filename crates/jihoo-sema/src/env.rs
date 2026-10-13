@@ -548,6 +548,12 @@ impl<'p> Env<'p> {
         self.struct_instances.borrow().iter().find(|(n, _, _)| n == name).map(|(_, d, _)| d.clone())
     }
 
+    /// The key of the generic declaration that type `name` is an instance of,
+    /// and the bindings of its parameters.
+    pub(crate) fn instance_bindings(&self, name: &str) -> Option<(String, Rc<Bindings>)> {
+        self.struct_instances.borrow().iter().find(|(n, _, _)| n == name).map(|(_, d, b)| (d.clone(), b.clone()))
+    }
+
     /// The instance of generic struct or enum `decl_key` with type arguments `args`.
     pub fn instance_of(&self, decl_key: &str, args: Vec<Type>) -> Type {
         let decl = self.struct_decls[decl_key].1;

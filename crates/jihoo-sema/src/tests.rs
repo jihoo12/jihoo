@@ -558,6 +558,40 @@ fn generic_errors() {
     assert!(err("fn main(comptime T: type) {}").contains("comptime parameters"));
 }
 
+#[test]
+fn inferred_type_arguments() {
+    let src = format!(
+        "{MAX}{PAIR}fn first(comptime T: type, p: Pair(T)) -> T {{ return p.a }}\n\
+         fn swap(comptime A: type, comptime B: type, t: (A, B)) -> (B, A) {{ return (t.1, t.0) }}\n\
+         fn get(comptime T: type, o: Option(T), d: T) -> T {{\n  match o {{\n    Some(x) => return x\n    None => return d\n  }}\n}}\n\
+         fn map(comptime T: type, comptime U: type, xs: [T], f: fn(T) -> U) -> [U] {{\n  let out: [U] = []\n  for x in xs {{ push(out, f(x)) }}\n  return out\n}}\n\
+         fn fold(comptime T: type, comptime A: type, xs: [T], init: A, f: fn(A, T) -> A) -> A {{\n  let acc = init\n  for x in xs {{ acc = f(acc, x) }}\n  return acc\n}}\n\
+         fn main() {{\n  let x: u8 = 7\n  print(max(x, 200))\n  print(max(200, x))\n  print(max(3, -5))\n  print(max(1.5, 2.5))\n  print(max(\"app\", \"apple\"))\n\
+           print(first(Pair(i64) {{ a: 4, b: 5 }}))\n  print(swap((1, \"one\")).0)\n  let o: Option(u8) = Option.None\n  print(get(o, 255))\n\
+           let xs: [u8] = [1, 2]\n  let ys = map(xs, fn(v) -> i64 {{ return v as i64 * 300 }})\n  print(ys[1])\n\
+           print(fold(xs, 0, fn(a, v) {{ return a + v as i64 }}))\n  print(max(i64, 1, 2))\n}}"
+    );
+    assert_eq!(run(&src), "200\n200\n3\n2.5\napple\n4\none\n255\n600\n3\n2\n");
+    // Written out or inferred, the types make the same instance.
+    let m = check(&format!("{MAX}fn main() {{ print(max(1, 2) + max(i64, 3, 4)) }}")).unwrap();
+    assert_eq!(m.funcs.iter().filter(|f| f.name.starts_with("max.")).count(), 1);
+}
+
+#[test]
+fn inferred_type_argument_errors() {
+    let e = err(&format!("{MAX}fn main() {{ let x: u8 = 1\n print(max(x, \"a\")) }}"));
+    assert!(e.contains("`T` of `max` is str here, but u8 from an earlier argument"), "{e}");
+    let e = err(&format!("{MAX}fn main() {{ print(max(1)) }}"));
+    assert!(e.contains("`max` takes 3 arguments (2 without its types), 1 given"), "{e}");
+    let e = err("fn f(comptime T: type) -> i64 { return 0 }\nfn main() { print(f()) }");
+    assert!(e.contains("cannot infer `T` of `f` from its arguments"), "{e}");
+    let e = err("fn f(comptime N: i64, x: i64) -> i64 { return x }\nfn main() { print(f(1)) }");
+    assert!(e.contains("`N` is not a type, so it cannot be inferred"), "{e}");
+    let e = err("fn ap(comptime T: type, comptime U: type, x: T, f: fn(T) -> U) -> U { return f(x) }\n\
+                 fn main() { print(ap(1, fn(v) { return v })) }");
+    assert!(e.contains("cannot infer `U` of `ap`: annotate this function's types"), "{e}");
+}
+
 // ---- function values ----
 
 #[test]
