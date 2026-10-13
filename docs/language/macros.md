@@ -64,7 +64,10 @@ and are never part of the compiled program.
 parsed, so it must be valid code of its kind. `$x` and `$(e)` are *holes*,
 filled in when the macro runs:
 
-- An `expr` is inserted in parentheses, so precedence cannot change.
+- An `expr` is inserted in parentheses, so precedence cannot change, unless it
+  is one operand already (a name, a number, or code in parentheses). So a
+  macro that passes its argument on, even to itself, does not nest it deeper
+  at every step.
 - Integers, bools and strings are inserted as literals.
 - `stringify(e)` gives the source text of code, as a `str`.
 

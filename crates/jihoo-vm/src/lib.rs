@@ -972,8 +972,13 @@ impl<'m> Vm<'m> {
                 for ((hole, kind), piece) in holes.iter().zip(kinds).zip(&pieces[1..]) {
                     let ty = f.reg_type(*hole);
                     let text = match (kind, ty, self.get(*hole)) {
-                        // Parenthesized, so `$x * 2` keeps its meaning whatever `x` is.
-                        (HoleKind::Expr, Type::Expr, Value::Str(r)) => format!("({})", self.heap.str(r)),
+                        // Parenthesized, so `$x * 2` keeps its meaning whatever `x` is,
+                        // unless it is one operand already: then a macro that passes its
+                        // argument on does not nest it deeper at every step.
+                        (HoleKind::Expr, Type::Expr, Value::Str(r)) => {
+                            let text = self.heap.str(r);
+                            if is_operand(&text) { text.trim().to_string() } else { format!("({text})") }
+                        }
                         (HoleKind::Expr, Type::Str, Value::Str(r)) => string_literal(&self.heap.str(r)),
                         (HoleKind::Expr, Type::Int(jihoo_ir::IntTy::U64), Value::Int(n)) => (n as u64).to_string(),
                         // Parenthesized so that a negative number stays one operand.
@@ -1384,6 +1389,43 @@ impl<'m> Vm<'m> {
         };
         VmError { func, msg: msg.into() }
     }
+}
+
+/// Whether code `text` is one operand as it stands, so that putting it in a
+/// hole needs no parentheses: a name, a path or a number, with any hygiene
+/// marks (`x#3`, `#2:x`), or code that one pair of parentheses encloses whole.
+fn is_operand(text: &str) -> bool {
+    let t = text.trim();
+    if !t.is_empty() && t.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'#' | b':' | b'.')) {
+        return true;
+    }
+    let b = t.as_bytes();
+    if b.first() != Some(&b'(') {
+        return false;
+    }
+    // Where the first parenthesis closes, skipping strings.
+    let mut depth = 0;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i == b.len() - 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
 }
 
 fn is_identifier(s: &str) -> bool {

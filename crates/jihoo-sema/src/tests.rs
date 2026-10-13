@@ -3,7 +3,13 @@ use jihoo_ir::FloatTy;
 
 /// Checks `src`, as a hosted program unless it names a profile: most tests
 /// here are about the language itself, and run what they compile on the VM.
+/// It compiles on the stack the compiler always has (`on_compiler_stack`), not
+/// a test thread's.
 fn check(src: &str) -> Result<ir::Module, String> {
+    jihoo_syntax::on_compiler_stack(|| check_here(src))
+}
+
+fn check_here(src: &str) -> Result<ir::Module, String> {
     let mut prog = jihoo_syntax::parse(src).map_err(|e| e.to_string())?;
     if prog.attrs.is_empty() {
         prog.attrs.push((Default::default(), "hosted".to_string()));
@@ -753,6 +759,17 @@ fn types_made_while_compiling_stay_there() {
     assert!(names.contains(&"(i64, prelude.Option(u8))") && names.contains(&"prelude.Option(u8)"), "{names:?}");
 }
 
+#[test]
+fn deep_code_fits_the_compiler_stack() {
+    // Close to the parser's bound on nesting, which `COMPILER_STACK` is
+    // meant for, even in a debug build.
+    let depth = 900;
+    let src = format!("fn main() {{ print({}1{}) }}", "(".repeat(depth), ")".repeat(depth));
+    assert_eq!(run(&src), "1\n");
+    let src = format!("fn main() {{ print({}1) }}", "1 + ".repeat(depth));
+    assert_eq!(run(&src), format!("{}\n", depth + 1));
+}
+
 // ---- function values ----
 
 #[test]
@@ -1261,7 +1278,8 @@ fn types_that_hold_code() {
     // `to_code` turns such text back into code: here the macro's own `t`.
     let src = "macro m(x: expr) -> stmts {\n  let c = quote(t + $x)\n  let back = to_code(code_text(c))\n  return quote {\n    let t = 10\n    print($back)\n    print($(stringify(c)))\n  }\n}\n\
                fn main() {\n  let t = 1\n  m!(t)\n}";
-    assert_eq!(run(src), "11\nt + (t)\n");
+    // A name goes into a hole as it is; anything longer in parentheses.
+    assert_eq!(run(src), "11\nt + t\n");
     assert!(err("fn main() { print(code_text(1)) }").contains("`code_text` can only be used inside a macro"));
 }
 
@@ -1349,6 +1367,9 @@ fn macro_errors() {
     assert!(e.starts_with("10:"), "{e}");
     let e = err("macro forever(x: expr) -> expr { return quote(forever!($x)) }\nfn main() { print(forever!(1)) }");
     assert!(e.contains("too deep"), "{e}");
+    // A hole parenthesizes what is not one operand already, and only that.
+    let dbl = "macro dbl(x: expr) -> expr { return quote($x * 2) }\n";
+    assert_eq!(run(&format!("{dbl}fn main() {{ print(dbl!(1 + 2))\n print(dbl!((1 + 2)))\n print(dbl!(len(\")\") + 1)) }}")), "6\n6\n4\n");
     // Macro bodies are checked even if the macro is never used.
     assert!(err("macro bad() -> expr { return 1 }\nfn main() {}").contains("return value must be expr"));
 }
@@ -1413,6 +1434,10 @@ fn generic_struct_errors() {
 /// Checks a program made of in-memory files; `main.jh` is the root, hosted
 /// unless it names a profile (written on its first line, so line numbers stay).
 fn check_files(files: &[(&str, &str)]) -> Result<ir::Module, String> {
+    jihoo_syntax::on_compiler_stack(|| check_files_here(files))
+}
+
+fn check_files_here(files: &[(&str, &str)]) -> Result<ir::Module, String> {
     use std::path::{Path, PathBuf};
     let read = |p: &Path| {
         let (name, text) = files.iter().find(|(n, _)| Path::new(n) == p)?;

@@ -18,6 +18,11 @@ Each crate has its own tests (`cargo test`). Most language tests are in
 `crates/jihoo-sema/src/tests.rs`: small programs that must compile to the
 expected JIR, run to the expected result on the VM, or fail with the expected
 error message.
+They compile on the stack the command line gives the compiler
+(`jihoo_syntax::on_compiler_stack`, 256 MB reserved), not on a test thread's
+2 MB, since the parser, the checker and macro expansion recurse over the tree;
+`deep_code_fits_the_compiler_stack` checks that it is enough for code close to
+the deepest the parser accepts, in a debug build too.
 
 ## Differential tests
 
