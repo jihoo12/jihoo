@@ -39,10 +39,12 @@ with an `entry` function to `tests/diff/`.
 `crates/jihoo-cli/tests/fuzz.rs` makes random programs of the same kind and
 checks them the same way: the VM against the freestanding build, and every
 fourth against the native one too. A seed makes one program: integers of every
-width and signedness, bools and `f64`, casts and every operator, arrays and
-structs nested in each other, copied, updated deep inside, compared and passed
-to and returned from functions, `if`, `match` and loops with `break` and
-`continue`. Programs print values as they go and every element of every
+width and signedness, bools and `f64`, casts and every operator, arrays,
+structs and tuples nested in each other, copied, updated deep inside, compared
+and passed to and returned from functions (sometimes as a part of a value of
+the function's own), `if`, `match` on integers and on tuples with nested
+patterns and guards, `let` patterns, and loops with `break` and `continue`.
+Programs print values as they go and every element of every
 variable at the end. They cannot trap (divisors are made odd, indexes are taken
 modulo the length), so every difference is a bug in the VM or the backend.
 

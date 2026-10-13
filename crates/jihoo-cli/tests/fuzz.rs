@@ -3,9 +3,11 @@
 //!
 //! Each seed makes one program in the core language that every profile shares:
 //! integers of every width and signedness, bools and `f64`, casts, every
-//! operator, arrays and structs nested in each other, copied, updated in part,
-//! compared, and passed to and returned from functions; `if`, `match`, `while`
-//! and `for` loops with `break` and `continue`, compound assignment. The
+//! operator, arrays, structs and tuples nested in each other, copied, updated
+//! in part, compared, and passed to and returned from functions; `if`, `match`
+//! (on integers, and on tuples with nested patterns), `let` patterns, `while`
+//! and `for` loops with `break` and `continue`, compound assignment, and
+//! functions that return a part of a value of their own. The
 //! program prints values with `out` as it goes and the state of its variables
 //! at the end (see `tests/common/mod.rs`). Programs never trap: divisors are
 //! made odd and indexes are taken modulo the length, so the VM and LLVM must
@@ -79,13 +81,15 @@ enum Ty {
     Str,
     Ref(Box<Ty>),
     Cell(Box<Ty>),
+    /// Two or three parts.
+    Tuple(Vec<Ty>),
 }
 
 impl Ty {
     const I64: Ty = Ty::Int { bits: 64, signed: true };
 
     fn is_aggregate(&self) -> bool {
-        matches!(self, Ty::Array(..) | Ty::Struct(_) | Ty::List(_) | Ty::Ref(_) | Ty::Cell(_))
+        matches!(self, Ty::Array(..) | Ty::Struct(_) | Ty::List(_) | Ty::Ref(_) | Ty::Cell(_) | Ty::Tuple(_))
     }
 }
 
@@ -97,6 +101,8 @@ enum Step {
     Field(usize),
     /// An element of a list.
     Item,
+    /// A part of a tuple.
+    Part(usize),
 }
 
 struct Var {
@@ -188,12 +194,35 @@ impl Gen {
         self.vars = params.iter().enumerate().map(|(i, t)| Var { name: format!("p{i}"), ty: t.clone(), mutable: true }).collect();
         let n = 1 + self.rng.below(5);
         self.stmts(n, 2);
-        let e = self.expr(&ret, 3);
+        let e = if self.rng.chance(30) { self.returned_part(&ret) } else { self.expr(&ret, 3) };
         self.line(&format!("return {e}"));
         self.indent -= 1;
         self.line("}");
         self.vars.clear();
         self.funcs.push((params, ret));
+    }
+
+    /// A part of a value of the function's own, to be returned: the value is
+    /// freed at the `return`, after the part is copied out of it.
+    fn returned_part(&mut self, ret: &Ty) -> String {
+        let (t, part) = match self.rng.below(3) {
+            0 => {
+                let other = self.any_ty(1);
+                let k = self.rng.below(2);
+                let parts = if k == 0 { vec![ret.clone(), other] } else { vec![other, ret.clone()] };
+                (Ty::Tuple(parts), format!(".{k}"))
+            }
+            1 if self.lists => (Ty::List(Box::new(ret.clone())), "[0]".to_string()),
+            _ => {
+                let n = 1 + self.rng.below(3);
+                (Ty::Array(Box::new(ret.clone()), n), format!("[{}]", self.rng.below(n)))
+            }
+        };
+        let e = self.expr(&t, 3);
+        let name = self.fresh("w");
+        let ty = self.ty_name(&t);
+        self.line(&format!("let {name}: {ty} = {e}"));
+        format!("{name}{part}")
     }
 
     // ---- types ----
@@ -223,6 +252,7 @@ impl Gen {
                 }
             }
             0..=2 if depth > 0 => Ty::Array(Box::new(self.any_ty(depth - 1)), 1 + self.rng.below(4)),
+            6 if depth > 0 => Ty::Tuple((0..2 + self.rng.below(2)).map(|_| self.any_ty(depth - 1)).collect()),
             3 if !self.structs.is_empty() => Ty::Struct(self.rng.below(self.structs.len())),
             _ => self.scalar_ty(),
         }
@@ -239,6 +269,7 @@ impl Gen {
             Ty::Str => "str".into(),
             Ty::Ref(e) => format!("ref {}", self.ty_name(e)),
             Ty::Cell(e) => format!("cell {}", self.ty_name(e)),
+            Ty::Tuple(parts) => format!("({})", parts.iter().map(|p| self.ty_name(p)).collect::<Vec<_>>().join(", ")),
         }
     }
 
@@ -253,6 +284,7 @@ impl Gen {
             Ty::Array(e, n) => vec![(Step::Elem(*n), (**e).clone())],
             Ty::List(e) => vec![(Step::Item, (**e).clone())],
             Ty::Struct(k) => self.structs[*k].iter().cloned().enumerate().map(|(i, f)| (Step::Field(i), f)).collect(),
+            Ty::Tuple(parts) => parts.iter().cloned().enumerate().map(|(i, p)| (Step::Part(i), p)).collect(),
             _ => Vec::new(),
         };
         for (step, part) in parts {
@@ -271,6 +303,7 @@ impl Gen {
         for step in path {
             match step {
                 Step::Field(i) => write!(s, ".f{i}").unwrap(),
+                Step::Part(i) => write!(s, ".{i}").unwrap(),
                 // Lists are never empty.
                 Step::Item if constant || self.rng.chance(40) => s.push_str("[0]"),
                 Step::Item => {
@@ -361,6 +394,11 @@ impl Gen {
                 self.line("}");
             }
             Ty::Ref(el) | Ty::Cell(el) => self.dump(&format!("(*{e})"), el),
+            Ty::Tuple(parts) => {
+                for (i, p) in parts.clone().iter().enumerate() {
+                    self.dump(&format!("{e}.{i}"), p);
+                }
+            }
             Ty::List(el) => {
                 self.out(&format!("len({e})"), &Ty::I64);
                 let i = self.fresh("d");
@@ -383,8 +421,10 @@ impl Gen {
         }
         let d = depth - 1;
         match self.rng.below(8) {
-            // A call to an earlier function that returns a `t`.
-            0 => {
+            // A call to an earlier function that returns a `t`. Not at depth
+            // 1, where `leaf` builds aggregates: a call's arguments may hold a
+            // `t` again, and the generator would recurse without end.
+            0 if depth > 1 => {
                 let callees: Vec<usize> = (0..self.funcs.len()).filter(|&k| self.funcs[k].1 == *t).collect();
                 if callees.is_empty() {
                     return self.leaf(t, depth);
@@ -497,6 +537,10 @@ impl Gen {
                 let xs: Vec<String> = fields.iter().enumerate().map(|(i, f)| format!("f{i}: {}", self.expr(f, d))).collect();
                 format!("S{k} {{ {} }}", xs.join(", "))
             }
+            Ty::Tuple(parts) => {
+                let xs: Vec<String> = parts.clone().iter().map(|p| self.expr(p, d)).collect();
+                format!("({})", xs.join(", "))
+            }
             Ty::Str => match self.rng.below(6) {
                 0 => format!("({} + {})", self.expr(t, d), self.expr(t, d)),
                 1 => {
@@ -558,6 +602,7 @@ impl Gen {
             Ty::Cell(_) => true,
             Ty::Array(e, _) | Ty::List(e) | Ty::Ref(e) => self.has_cell(e),
             Ty::Struct(k) => self.structs[*k].iter().any(|f| self.has_cell(f)),
+            Ty::Tuple(parts) => parts.iter().any(|p| self.has_cell(p)),
             _ => false,
         }
     }
@@ -568,6 +613,7 @@ impl Gen {
             Ty::Ref(e) | Ty::Cell(e) => self.has_list(e),
             Ty::Array(e, _) => self.has_list(e),
             Ty::Struct(k) => self.structs[*k].iter().any(|f| self.has_list(f)),
+            Ty::Tuple(parts) => parts.iter().any(|p| self.has_list(p)),
             _ => false,
         }
     }
@@ -660,7 +706,9 @@ impl Gen {
         if self.lists && self.rng.chance(15) && self.cell_stmt() {
             return;
         }
-        match self.rng.below(24) {
+        match self.rng.below(27) {
+            24 => self.let_pattern(),
+            25 | 26 if depth > 0 => self.tuple_match(depth),
             // A copy of an aggregate, then updates deep inside it and the
             // original, one after the other: what goes wrong when the VM updates
             // a part in place that the copy shares.
@@ -880,6 +928,115 @@ impl Gen {
             self.line("}");
         }
         true
+    }
+
+    /// `let (a, (b, _)) = e`: the parts of a tuple as variables of their own,
+    /// some left out.
+    fn let_pattern(&mut self) {
+        let t = Ty::Tuple((0..2 + self.rng.below(2)).map(|_| self.any_ty(2)).collect());
+        let e = self.expr(&t, 3);
+        let mut binds = Vec::new();
+        let pattern = self.binding_pattern(&t, &mut binds);
+        let ty = self.ty_name(&t);
+        self.line(&format!("let {pattern}: {ty} = {e}"));
+        self.vars.extend(binds.into_iter().map(|(name, ty)| Var { name, ty, mutable: true }));
+    }
+
+    /// A pattern for any value of `t` that binds some of its parts to new
+    /// names, which go to `binds`.
+    fn binding_pattern(&mut self, t: &Ty, binds: &mut Vec<(String, Ty)>) -> String {
+        match t {
+            Ty::Tuple(parts) if self.rng.chance(70) => {
+                let ps: Vec<String> = parts.iter().map(|p| self.binding_pattern(p, binds)).collect();
+                format!("({})", ps.join(", "))
+            }
+            _ if self.rng.chance(20) => "_".into(),
+            _ => {
+                let name = self.fresh("b");
+                binds.push((name.clone(), t.clone()));
+                name
+            }
+        }
+    }
+
+    /// A `match` on a tuple of integers, bools and tuples of them, whose arms
+    /// test some parts against literals and bind others. An arm that matches
+    /// nothing new is an error, so the first part, an integer, is a different
+    /// literal (or `|` of them) in every arm: arms never overlap, and the last
+    /// one, `_`, is always reachable.
+    fn tuple_match(&mut self, depth: u32) {
+        let first = self.int_ty();
+        let Ty::Tuple(rest) = self.match_ty(2) else { unreachable!() };
+        let t = Ty::Tuple([vec![first.clone()], rest.clone()].concat());
+        let subject = self.expr(&t, 2);
+        self.line(&format!("match {subject} {{"));
+        let mut keys: Vec<i64> = (0..6).collect();
+        if matches!(first, Ty::Int { signed: true, .. }) && self.rng.chance(50) {
+            keys.iter_mut().for_each(|k| *k -= 3);
+        }
+        for _ in 0..1 + self.rng.below(3) {
+            let mut alts = Vec::new();
+            for _ in 0..1 + usize::from(self.rng.chance(25)) {
+                alts.push(keys.remove(self.rng.below(keys.len())).to_string());
+            }
+            let mut binds = Vec::new();
+            let parts: Vec<String> = rest.iter().map(|p| self.test_pattern(p, &mut binds)).collect();
+            let pattern = format!("({}, {})", alts.join(" | "), parts.join(", "));
+            let scope = self.vars.len();
+            self.vars.extend(binds.into_iter().map(|(name, ty)| Var { name, ty, mutable: false }));
+            let guard = if self.rng.chance(20) { format!(" if {}", self.expr(&Ty::Bool, 1)) } else { String::new() };
+            self.line(&format!("    {pattern}{guard} => {{"));
+            self.indent += 1;
+            self.block(depth - 1);
+            self.indent -= 1;
+            self.vars.truncate(scope);
+            self.line("    }");
+        }
+        self.line("    _ => {");
+        self.indent += 1;
+        self.block(depth - 1);
+        self.indent -= 1;
+        self.line("    }");
+        self.line("}");
+    }
+
+    /// A tuple type `match` can test: integers, bools and tuples of them.
+    fn match_ty(&mut self, depth: u32) -> Ty {
+        Ty::Tuple(
+            (0..2 + self.rng.below(2))
+                .map(|_| match self.rng.below(4) {
+                    0 if depth > 0 => self.match_ty(depth - 1),
+                    1 => Ty::Bool,
+                    _ => self.int_ty(),
+                })
+                .collect(),
+        )
+    }
+
+    /// A pattern for values of `t` (see `match_ty`): literals, `|` of them,
+    /// `_`, names bound for the arm, and nested tuples.
+    fn test_pattern(&mut self, t: &Ty, binds: &mut Vec<(String, Ty)>) -> String {
+        match t {
+            Ty::Tuple(parts) => {
+                let ps: Vec<String> = parts.iter().map(|p| self.test_pattern(p, binds)).collect();
+                format!("({})", ps.join(", "))
+            }
+            Ty::Bool if self.rng.chance(60) => (if self.rng.chance(50) { "true" } else { "false" }).into(),
+            Ty::Int { signed, .. } if self.rng.chance(60) => {
+                let k = self.rng.below(4) as i64 - if *signed { 1 } else { 0 };
+                if self.rng.chance(20) {
+                    format!("{k} | {}", k + 1)
+                } else {
+                    k.to_string()
+                }
+            }
+            _ if self.rng.chance(50) => "_".into(),
+            _ => {
+                let name = self.fresh("b");
+                binds.push((name.clone(), t.clone()));
+                name
+            }
+        }
     }
 
     fn scalar(&self, t: &Ty) -> bool {
