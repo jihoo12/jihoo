@@ -230,16 +230,35 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
     }
     funcs.extend(env.lambdas());
 
-    for t in env.used_prelude_types() {
+    // The types sema makes (generic instances, tuples, paths) are part of the
+    // program only when its code or its declared types reach them: compile-time
+    // code may make types the program cannot have, such as `(str, i64)` in a
+    // macro of a freestanding program.
+    let declared = mods.iter().enumerate().flat_map(|(m, module)| {
+        let env = &env;
+        module.program.structs.iter().filter(|s| s.params.is_empty()).map(move |s| {
+            let key = env.key(m, &s.name).unwrap();
+            if s.is_enum() { Type::Enum(key) } else { Type::Struct(key) }
+        })
+    });
+    let used_prelude = env.used_prelude_types();
+    let in_code = funcs.iter().flat_map(|f| f.regs.iter().chain([&f.ret]).cloned());
+    let in_externs = externs.iter().flat_map(|(_, e)| e.params.iter().chain([&e.ret]).cloned());
+    // Types that hold code only exist while compiling (see `define`).
+    let declared = declared.filter(|t| !env.holds_code(t));
+    let reached = reached_types(&env, declared.chain(used_prelude.iter().cloned()).chain(in_code).chain(in_externs).collect());
+    let reaches = |t: &Type| matches!(t, Type::Struct(n) | Type::Enum(n) if reached.contains(n));
+
+    for t in used_prelude {
         define(t, Pos::new(1, 1), &mut errors);
     }
-    for t in env.struct_instances() {
+    for t in env.struct_instances().into_iter().filter(reaches) {
         define(t, Pos::new(1, 1), &mut errors);
     }
-    for t in env.tuple_types() {
+    for t in env.tuple_types().into_iter().filter(reaches) {
         define(t, Pos::new(1, 1), &mut errors);
     }
-    for t in env.path_types() {
+    for t in env.path_types().into_iter().filter(reaches) {
         let def = env.path_def(&t).unwrap();
         match env.path_steps(def.pos, &def) {
             Ok(_) => define(t, def.pos, &mut errors),
@@ -284,6 +303,32 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
         errors.retain(|e| seen.insert((e.pos, e.msg.clone())));
         Err(errors)
     }
+}
+
+/// The names of the structs and enums that `seeds` mention, and of those
+/// that their parts mention in turn.
+fn reached_types(env: &Env, mut work: Vec<Type>) -> HashSet<String> {
+    let mut seen = HashSet::new();
+    while let Some(t) = work.pop() {
+        match t {
+            Type::Struct(n) if seen.insert(n.clone()) => {
+                let fields = env.tuple_named(&n).or_else(|| env.struct_fields(Pos::default(), &n).ok());
+                work.extend(fields.iter().flat_map(|fs| fs.iter().map(|(_, t)| t.clone())));
+            }
+            Type::Enum(n) if seen.insert(n.clone()) => {
+                if let Ok(variants) = env.enum_variants(Pos::default(), &n) {
+                    work.extend(variants.iter().flat_map(|(_, ts)| ts.iter().cloned()));
+                }
+            }
+            Type::Ptr(t) | Type::Array(t, _) | Type::List(t) | Type::Ref(t) | Type::Chan(t) | Type::Cell(t) => work.push(*t),
+            Type::Fn(ps, r) => {
+                work.extend(ps);
+                work.push(*r);
+            }
+            _ => {}
+        }
+    }
+    seen
 }
 
 /// Bound on rounds of item macro expansion (an expansion may call item macros).

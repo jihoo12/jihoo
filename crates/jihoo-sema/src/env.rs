@@ -505,7 +505,7 @@ impl<'p> Env<'p> {
                     let msg = format!("{kind} `{name}` takes {} arguments, {} given", decl.params.len(), args.len());
                     return Err(Error::new(t.pos, msg));
                 }
-                let bindings = self.bind(name, dm, decl.params.iter().zip(args), b, &mut |_, _| Ok(None))?;
+                let bindings = self.bind(name, dm, decl.params.iter().zip(args), b, in_macro, &mut |_, _| Ok(None))?;
                 self.check_bounds(t.pos, name, dm, &decl.params, &bindings)?;
                 Ok(named(decl, self.struct_instance(&key, bindings)))
             }

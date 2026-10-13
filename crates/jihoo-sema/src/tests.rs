@@ -740,6 +740,19 @@ fn type_shape_and_to_items_are_for_macros() {
     assert_eq!(run(src), "struct x y\n");
 }
 
+#[test]
+fn types_made_while_compiling_stay_there() {
+    // A macro may use types the program cannot have, or does not use.
+    let m = check(&fs("macro pick(e: expr) -> expr {\n  let t = (\"x\", 1)\n  let o: Option(str) = Option.Some(\"y\")\n  return quote($e + 1)\n}\nfn f() -> i64 { return pick!(2) }")).unwrap();
+    assert!(m.structs.is_empty() && m.enums.is_empty(), "{m}");
+    let m = check("macro pick(e: expr) -> expr {\n  let t = (1.5, true)\n  return quote($e + 1)\n}\nfn main() { print(pick!(2)) }").unwrap();
+    assert!(m.structs.is_empty(), "{m}");
+    // Types the program's code uses are still there, through their parts too.
+    let m = check("struct S { p: (i64, Option(u8)) }\nfn main() { let s = S { p: (1, Option.None) }\n print(s.p.0) }").unwrap();
+    let names: Vec<&str> = m.structs.iter().map(|s| s.name.as_str()).chain(m.enums.iter().map(|e| e.name.as_str())).collect();
+    assert!(names.contains(&"(i64, prelude.Option(u8))") && names.contains(&"prelude.Option(u8)"), "{names:?}");
+}
+
 // ---- function values ----
 
 #[test]
@@ -1369,7 +1382,8 @@ fn generic_struct_value_parameters() {
     let text = m.to_string();
     // `Buf(CAP * 2)` and `Buf(16)` are the same type.
     assert!(text.contains(r#"struct $"Buf(16)" { data: [16 x u8], len: i64 }"#), "{text}");
-    assert_eq!(m.structs.len(), 2, "{text}"); // Buf(16) and Buf(4)
+    // `Buf(4)` is only measured, so only `Buf(16)` is a type of the program.
+    assert_eq!(m.structs.len(), 1, "{text}");
 }
 
 #[test]

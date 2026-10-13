@@ -170,7 +170,8 @@ impl FnCx<'_> {
         let env = self.env;
         let outer = self.bindings.clone();
         let mut hidden = Vec::new();
-        let b = env.bind(name, env.fn_module(key), comptime, &outer, &mut |a, want| {
+        let in_macro = self.in_macro;
+        let b = env.bind(name, env.fn_module(key), comptime, &outer, in_macro, &mut |a, want| {
             self.closure_arg(a, want, &mut hidden)
         })?;
         let (instance, sig) = self.env.instance(pos, key, decl, b)?;
@@ -227,13 +228,15 @@ impl<'p> Env<'p> {
         owner_module: usize,
         params_args: impl Iterator<Item = (&'a Param, &'a Expr)>,
         outer: &Rc<Bindings>,
+        in_macro: bool,
         hook: &mut BindHook<'_>,
     ) -> Result<Bindings, Error> {
         // Parameter types are written in the owner's module; arguments in `outer`.
         let mut b = Bindings::in_module(owner_module);
         for (p, a) in params_args {
             if self.param_bounds(owner_module, p)?.is_some() {
-                let t = self.resolve(&expr_to_type(a)?, outer)?;
+                // In a macro, types the program cannot have are fine: `Option(str)`.
+                let t = self.resolve_in(&expr_to_type(a)?, outer, in_macro)?;
                 b.push(&p.name, Binding::Type(t));
             } else {
                 // The parameter's type may use earlier parameters: `comptime x: T`.

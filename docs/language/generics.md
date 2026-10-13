@@ -107,6 +107,10 @@ push(i64, &v, 42)
 - Each distinct set of arguments is its own struct type, named like `Pair(i64)`
   in messages and `$"Pair(i64)"` in JIR. Arguments are compared by value, so
   `Buf(CAP * 2)` and `Buf(16)` are the same type when `CAP` is 8.
+- An instance is in JIR only when the program's code or its other types use
+  it. One used only while compiling, in a macro or for `size_of`, is not, so a
+  macro of a freestanding program may use `Option(str)` or `(str, i64)`; the
+  same holds for [tuple](tuples.md) types.
 - Literals name the instance: `Pair(i64) { a: 1, b: 2 }`.
 - A generic struct can point to itself (`next: *Node(T)`), but not contain
   itself.
