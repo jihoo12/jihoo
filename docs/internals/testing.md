@@ -63,6 +63,15 @@ VM bug where a copy saw later updates of the original was found by about 1 in
 values above `i64::MAX` show it. Run a few thousand seeds after changing the
 VM or the backend.
 
+Programs with lists also run `lists.fuse!` pipelines of random `map` and
+`filter` closures, and the same stages as a loop written out. Both profiles
+expand the same macro, so comparing them could not catch a wrong expansion;
+the loop can, and a program whose two results differ fails its seed.
+
+A program that does not finish within `JIHOO_TEST_TIMEOUT` seconds (120 by
+default), built or run, fails too, so a miscompiled loop that never ends
+shows as a failure instead of a test run that never ends.
+
 ## C and JIR files
 
 `crates/jihoo-cli/tests/differential.rs` also checks what crosses into C:

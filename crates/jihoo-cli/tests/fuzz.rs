@@ -22,6 +22,9 @@
 //! pop from lists, slice, join and compare them, make text with `to_str`, and
 //! pass them to functions that change their copy; they also hold `ref`s and
 //! `cell`s, whose copies share (and, for cells, see each other's changes).
+//! They run `lists.fuse!` pipelines of `map` and `filter` closures ending in
+//! `sum`, `count` or `collect`, and the same pipelines as loops written out,
+//! whose results must be the same.
 //! Lists never become empty, so indexes (taken modulo the length) are in
 //! bounds. Those run on the VM and natively only, where the ownership pass
 //! decides where lists are copied and freed; with `JIHOO_VALGRIND` set to
@@ -41,6 +44,10 @@ use std::fmt::Write;
 use common::Profile;
 
 const DEFAULT_SEEDS: u64 = 64;
+
+/// What a program prints when a `lists.fuse!` pipeline and the same pipeline
+/// written out as a loop give different results; it fails the seed.
+const PIPELINE_DIFFERS: i64 = -6_148_914_691_236_517_206;
 
 /// SplitMix64: small, fast, and the same everywhere, so a seed always makes
 /// the same program.
@@ -149,6 +156,9 @@ impl Gen {
     }
 
     fn program(mut self) -> String {
+        if self.lists {
+            self.line("import lists");
+        }
         for _ in 0..self.rng.below(4) {
             let fields = (0..1 + self.rng.below(3)).map(|_| self.any_ty(2)).collect();
             self.structs.push(fields);
@@ -706,6 +716,10 @@ impl Gen {
         if self.lists && self.rng.chance(15) && self.cell_stmt() {
             return;
         }
+        if self.lists && self.rng.chance(6) {
+            self.pipeline();
+            return;
+        }
         match self.rng.below(27) {
             24 => self.let_pattern(),
             25 | 26 if depth > 0 => self.tuple_match(depth),
@@ -1039,6 +1053,81 @@ impl Gen {
         }
     }
 
+    /// A `lists.fuse!` pipeline over a new list variable, and the same stages
+    /// as a loop written out. The stages are closures, which may read other
+    /// variables; both results are kept, and the program prints
+    /// `PIPELINE_DIFFERS` if they are not the same.
+    fn pipeline(&mut self) {
+        let number = |g: &mut Gen| if g.rng.chance(80) { g.int_ty() } else { Ty::F64 };
+        let mut t = number(self);
+        let list = Ty::List(Box::new(t.clone()));
+        let src = self.expr(&list, 2);
+        let xs = self.fresh("xs");
+        self.line(&format!("let {xs}: {} = {src}", self.ty_name(&list)));
+        let (mut stages, mut steps) = (Vec::new(), Vec::new());
+        for _ in 0..1 + self.rng.below(3) {
+            let (g, p) = (self.fresh("g"), self.fresh("p"));
+            self.vars.push(Var { name: p.clone(), ty: t.clone(), mutable: false });
+            let param = self.ty_name(&t);
+            if self.rng.chance(60) {
+                let u = number(self);
+                let e = self.expr(&u, 2);
+                // Mostly a function of the value, not only of what it captured.
+                let un = self.ty_name(&u);
+                let e = if self.rng.chance(60) { format!("(({p} as {un}) + {e})") } else { e };
+                self.line(&format!("let {g} = fn({p}: {param}) -> {un} {{ return {e} }}"));
+                stages.push(format!("map({g})"));
+                steps.push(format!("let s = {g}(s)"));
+                t = u;
+            } else {
+                let e = self.expr(&Ty::Bool, 2);
+                let k = 2 + self.rng.below(3);
+                let e = if self.rng.chance(60) { format!("((({p} as i64) % {k} == 0) != {e})") } else { e };
+                self.line(&format!("let {g} = fn({p}: {param}) -> bool {{ return {e} }}"));
+                stages.push(format!("filter({g})"));
+                steps.push(format!("if !{g}(s) {{ continue }}"));
+            }
+            self.vars.pop();
+        }
+        let (end, result, init, step) = match self.rng.below(3) {
+            0 => ("count", Ty::I64, "0".to_string(), "acc += 1"),
+            1 => ("collect", Ty::List(Box::new(t.clone())), "[]".to_string(), "push(acc, s)"),
+            _ => ("sum", t.clone(), if t == Ty::F64 { "0.0".into() } else { format!("0 as {}", self.ty_name(&t)) }, "acc += s"),
+        };
+        let r = self.ty_name(&result);
+        let (fused, looped) = (self.fresh("v"), self.fresh("v"));
+        self.line(&format!("let {fused}: {r} = lists.fuse!({xs}, {}, {end}())", stages.join(", ")));
+        self.line(&format!("let {looped}: {r} = {{"));
+        self.indent += 1;
+        self.line(&format!("let acc: {r} = {init}"));
+        let x = self.fresh("x");
+        self.line(&format!("for {x} in {xs} {{"));
+        self.indent += 1;
+        self.line(&format!("let s = {x}"));
+        for step in steps {
+            self.line(&step);
+        }
+        self.line(step);
+        self.indent -= 1;
+        self.line("}");
+        self.line("acc");
+        self.indent -= 1;
+        self.line("}");
+        // Floats compare by their bits, so that a NaN is the same as itself.
+        let differ = match &result {
+            Ty::F64 => format!("to_bits({fused}) != to_bits({looped})"),
+            Ty::List(e) if **e == Ty::F64 => format!("len({fused}) != len({looped})"),
+            _ => format!("{fused} != {looped}"),
+        };
+        self.line(&format!("if {differ} {{ out({PIPELINE_DIFFERS}) }}"));
+        self.vars.push(Var { name: xs, ty: list, mutable: true });
+        // `collect` may leave nothing, and lists here are never empty.
+        if end != "collect" {
+            self.vars.push(Var { name: fused, ty: result.clone(), mutable: true });
+            self.vars.push(Var { name: looped, ty: result, mutable: true });
+        }
+    }
+
     fn scalar(&self, t: &Ty) -> bool {
         matches!(t, Ty::Int { .. } | Ty::Bool | Ty::F64)
     }
@@ -1102,6 +1191,9 @@ fn check_with(seed: u64, work: &std::path::Path, lists: bool) -> Result<(), Stri
         format!("seed {seed}: {what}\n  the program: {}", saved.display())
     };
     let vm = common::run(&body, Profile::Hosted, work, &name).map_err(|e| fail(format!("on the VM: {e}")))?;
+    if vm.stdout.lines().any(|l| l == PIPELINE_DIFFERS.to_string()) {
+        return Err(fail("a `lists.fuse!` pipeline and the same loop written out give different results".into()));
+    }
     if common::compiled_enabled() {
         // Freestanding for every seed; native, which links with the C compiler
         // and is slower to build, for some.

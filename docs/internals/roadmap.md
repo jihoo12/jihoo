@@ -85,7 +85,8 @@
   a value; `type_of` (JIR 15), so that it works for any element type;
   `lists.fuse!` in the library, with `sum`, `count` and `collect`; and
   `#![comptime]` modules, so `meta` costs programs nothing and works in
-  freestanding ones. Next: random pipelines in the fuzzer.
+  freestanding ones; random pipelines in the fuzzer, each checked against
+  the same stages written out as a loop.
 - **Memory:** a report of where native code copies lists (`jihoo build
   --cost`), which needs source positions in JIR; moving a field out of a
   value at its last use instead of copying it.
