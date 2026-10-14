@@ -79,6 +79,92 @@ impl<'p> Env<'p> {
         self.trait_decls[key].1.funcs.iter().find(|f| f.decl.name == name)
     }
 
+    /// The traits that trait `key` asks of every type that has it, directly
+    /// or through theirs (`trait A: B`, `trait B: C` gives `B` and `C`), in
+    /// the order found. Names that are not traits are left out; `check_traits`
+    /// reports them.
+    pub fn super_keys(&self, key: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut todo = vec![key.to_string()];
+        while let Some(k) = todo.pop() {
+            let (m, t) = self.trait_decls[&k];
+            for (_, n) in &t.supers {
+                if let Some(s) = self.trait_key(m, n) {
+                    if s != key && !out.contains(&s) {
+                        out.push(s.clone());
+                        todo.push(s);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// `T.Item`, `Self.Item` or `Counter.Item`: associated type `Item` of the
+    /// type that the part before the last dot names. `None` if `name` is not
+    /// of that form, as `alias.Type` and names without a dot are not.
+    pub fn assoc_path(&self, pos: Pos, b: &Rc<Bindings>, name: &str, in_macro: bool) -> Result<Option<Type>, Error> {
+        let Some((prefix, item)) = name.rsplit_once('.') else { return Ok(None) };
+        let ty = match b.get(prefix) {
+            Some(Binding::Type(t)) => t.clone(),
+            Some(_) => return Ok(None),
+            None if self.is_alias(b.module, prefix) => return Ok(None),
+            None => {
+                let named = TypeExpr { pos, kind: TypeExprKind::Named(prefix.to_string()) };
+                match self.resolve_in(&named, b, in_macro) {
+                    Ok(t) => t,
+                    Err(_) => return Ok(None),
+                }
+            }
+        };
+        self.assoc_type(pos, b.module, &ty, item).map(Some)
+    }
+
+    /// Associated type `name` of type `t`, from the one trait that code in
+    /// `module` can see with such a type and that `t` implements.
+    pub fn assoc_type(&self, pos: Pos, module: usize, t: &Type, name: &str) -> Result<Type, Error> {
+        let traits: Vec<String> = self
+            .visible_traits(module)
+            .into_iter()
+            .filter(|k| self.trait_decls[k].1.types.iter().any(|(_, n)| n == name))
+            .collect();
+        if traits.is_empty() {
+            return Err(Error::new(pos, format!("no trait has a type `{name}`")));
+        }
+        let found: Vec<(&String, (usize, Bindings))> =
+            traits.iter().filter_map(|k| self.find_impl(k, t).map(|f| (k, f))).collect();
+        let (key, (i, b)) = match found.as_slice() {
+            [one] => one.clone(),
+            [] => {
+                let names: Vec<String> = traits.iter().map(|k| format!("`{}`", self.trait_name(k))).collect();
+                let msg = format!("{t} does not implement {}, which has a type `{name}`", names.join(" or "));
+                return Err(Error::new(pos, msg));
+            }
+            [(a, _), (b, _), ..] => {
+                let (a, b) = (self.trait_name(a), self.trait_name(b));
+                return Err(Error::new(pos, format!("type `{name}` of {t} is in both `{a}` and `{b}`")));
+            }
+        };
+        let Some(a) = self.impls[i].1.types.iter().find(|a| a.name == name) else {
+            let msg = format!("the impl of `{}` for {t} lacks type `{name}`", self.trait_name(key));
+            return Err(Error::new(pos, msg));
+        };
+        self.resolve(&a.ty, &Rc::new(b))
+    }
+
+    /// Checks that type `t`, which has trait `key`, also has
+    /// the traits `key` asks for.
+    fn check_supers(&self, pos: Pos, key: &str, t: &Type) -> Result<(), Error> {
+        for s in self.super_keys(key) {
+            if self.find_impl(&s, t).is_none() {
+                let (a, b) = (self.trait_name(key), self.trait_name(&s));
+                return Err(Error::new(pos, format!("{t} implements `{a}` but not `{b}`, which `{a}` needs")));
+            }
+        }
+        Ok(())
+    }
+
+
     /// The traits a comptime parameter `p` of an item in `module` asks of its
     /// type: none for `comptime T: type`. `None` if `p` takes a value.
     pub fn param_bounds(&self, module: usize, p: &Param) -> Result<Option<Vec<String>>, Error> {
@@ -222,7 +308,8 @@ impl<'p> Env<'p> {
 
     /// The traits that code in `module` can use: its own, the public ones of
     /// the modules it imports, and the prelude's, unless the module has an item
-    /// of the same name; in a fixed order.
+    /// of the same name, and the traits these ask for (`trait A: B`, so that
+    /// a type with `A` has `B`'s functions too); in a fixed order.
     fn visible_traits(&self, module: usize) -> Vec<String> {
         let modules: HashSet<usize> = self.imports_of(module).collect();
         let prelude = self.prelude_module();
@@ -236,6 +323,13 @@ impl<'p> Env<'p> {
             })
             .map(|(k, _)| k.clone())
             .collect();
+        for k in keys.clone() {
+            for s in self.super_keys(&k) {
+                if !keys.contains(&s) {
+                    keys.push(s);
+                }
+            }
+        }
         keys.sort();
         keys
     }
@@ -296,7 +390,25 @@ impl<'p> Env<'p> {
         let mut keys: Vec<&String> = self.trait_decls.keys().collect();
         keys.sort();
         for key in keys {
-            let t = self.trait_decls[key].1;
+            let (m, t) = self.trait_decls[key];
+            for (pos, n) in &t.supers {
+                match self.trait_key(m, n) {
+                    None => errors.push(Error::new(*pos, format!("unknown trait `{n}`"))),
+                    Some(s) if s == *key || self.super_keys(&s).contains(key) => {
+                        errors.push(Error::new(*pos, format!("`{}` cannot ask for itself", t.name)));
+                    }
+                    Some(s) => {
+                        if let Err(e) = self.check_visible(*pos, self.viewer(m, n), &s) {
+                            errors.push(e);
+                        }
+                    }
+                }
+            }
+            for (i, (pos, n)) in t.types.iter().enumerate() {
+                if t.types[..i].iter().any(|(_, other)| other == n) {
+                    errors.push(Error::new(*pos, format!("`{}` has two types `{n}`", t.name)));
+                }
+            }
             for f in &t.funcs {
                 if let Some(p) = f.decl.params.iter().find(|p| p.comptime) {
                     errors.push(Error::new(p.pos, "trait functions cannot have `comptime` parameters"));
@@ -319,6 +431,27 @@ impl<'p> Env<'p> {
             let (key, ty) = self.impl_head(i).unwrap();
             let t = self.trait_decls[&key].1;
             let shown = ty.as_ref().map_or_else(|| type_text(&decl.ty), Type::to_string);
+            // The types first: the functions' signatures may name them.
+            let before = errors.len();
+            for (j, a) in decl.types.iter().enumerate() {
+                if !t.types.iter().any(|(_, n)| *n == a.name) {
+                    errors.push(Error::new(a.pos, format!("`{}` has no type `{}`", t.name, a.name)));
+                } else if decl.types[..j].iter().any(|b| b.name == a.name) {
+                    errors.push(Error::new(a.pos, format!("type `{}` is given twice", a.name)));
+                } else if ty.is_some() {
+                    if let Err(e) = self.resolve(&a.ty, self.root(m)) {
+                        errors.push(e);
+                    }
+                }
+            }
+            for (_, n) in &t.types {
+                if !decl.types.iter().any(|a| a.name == *n) {
+                    errors.push(Error::new(decl.pos, format!("this impl of `{}` for {shown} lacks type `{n}`", t.name)));
+                }
+            }
+            if errors.len() > before {
+                continue;
+            }
             for f in &decl.funcs {
                 if let Some(p) = f.params.iter().find(|p| p.comptime) {
                     errors.push(Error::new(p.pos, "functions of an impl cannot have `comptime` parameters"));
@@ -334,6 +467,11 @@ impl<'p> Env<'p> {
                 if !decl.funcs.iter().any(|f| f.name == tf.decl.name) {
                     let msg = format!("this impl of `{}` for {shown} lacks `{}`, which has no default", t.name, tf.decl.name);
                     errors.push(Error::new(decl.pos, msg));
+                }
+            }
+            if let Some(ty) = &ty {
+                if let Err(e) = self.check_supers(decl.pos, &key, ty) {
+                    errors.push(e);
                 }
             }
         }
@@ -528,7 +666,7 @@ impl FnCx<'_> {
     }
 
     /// The instance of function `name` of trait `key` for `Self` = `ty`.
-    fn trait_instance(&mut self, pos: Pos, key: &str, name: &str, ty: Type) -> Result<(String, Rc<crate::env::Sig>), Error> {
+    pub(crate) fn trait_instance(&mut self, pos: Pos, key: &str, name: &str, ty: Type) -> Result<(String, Rc<crate::env::Sig>), Error> {
         let trait_name = self.env.trait_name(key);
         let Some((i, impl_bindings)) = self.env.find_impl(key, &ty) else {
             return Err(Error::new(pos, format!("{ty} does not implement `{trait_name}`")));
@@ -538,8 +676,11 @@ impl FnCx<'_> {
         };
         // A generic impl's functions are checked against the trait per instance.
         let mut b = if own { impl_bindings } else { Bindings::in_module(module) };
-        if own && !self.env.impls[i].1.params.is_empty() {
-            self.env.check_impl_fn(key, decl, &ty, &b)?;
+        if !self.env.impls[i].1.params.is_empty() {
+            self.env.check_supers(pos, key, &ty)?;
+            if own {
+                self.env.check_impl_fn(key, decl, &ty, &b)?;
+            }
         }
         b.push("Self", Binding::Type(ty));
         self.env.instance(pos, &fn_key, decl, b)

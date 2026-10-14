@@ -102,7 +102,7 @@ nix build
 | `crates/jihoo-vm`      | Rust     | register VM and GC heap |
 | `crates/jihoo-cli`     | Rust     | the `jihoo` command |
 | `backend-llvm`         | C++      | `jihoo-llc`: JIR text → LLVM → object file |
-| `lib`                  | jihoo    | the standard library (`prelude`, `strings`, `lists`, `libc`, `alloc`, `io`, `coro`, `sync`, `thread`, `channel`) |
+| `lib`                  | jihoo    | the standard library (`prelude`, `strings`, `lists`, `maps`, `iters`, `meta`, `libc`, `alloc`, `io`, `coro`, `sync`, `thread`, `channel`) |
 | `docs`                 | Markdown | the documentation, one file per page of the website |
 | `site`                 | Astro    | the website ([site/README.md](site/README.md)) |
 | `tests/diff`           | jihoo    | programs that must behave the same on the VM and natively |
@@ -112,10 +112,11 @@ nix build
 v0. In every profile: static types with local inference; `bool`, `i8`…`u64`
 and `f32`/`f64`, with exact float builtins (`sqrt`, `floor`, `round`, ...);
 structs, tuples, bounds-checked arrays and enums with `match`, `Option` and `Result`;
-`while` and `for` loops (over ranges, arrays, lists and strings); blocks as
+`while` and `for` loops (over ranges, arrays, lists, strings and iterators); blocks as
 expressions; function values; generic functions and structs, with inferred
-type arguments; traits with impls and bounds (`comptime T: Ord`), and the
-standard traits `Ord`, `Hash` and `Show`, which `meta.derive!` writes;
+type arguments; traits with impls and bounds (`comptime T: Ord`),
+associated types and supertraits, and the standard traits `Ord`, `Hash` and
+`Show`, which `meta.derive!` writes, and `Iterator`, which `for` walks;
 modules with private items and fields; compile-time evaluation (`const`,
 `comptime`) and macros, both run on the VM, with functions on code, `meta` to
 look inside code and `type_of` to ask its type.
@@ -123,7 +124,7 @@ look inside code and `type_of` to ask its type.
 - **native and hosted:** `str` (bytes, slices, ordering), lists `[T]` with
   `push` and `pop`, `print` and `read_line`, `ref` for recursive data, `cell`
   for shared state, closures, tasks with channels and `select`; the `strings`,
-  `lists` and `maps` libraries. Natively these are freed by the compiler and
+  `lists`, `maps` and `iters` libraries. Natively these are freed by the compiler and
   tasks are threads, which share no cells; on the VM a GC frees them and tasks
   take turns on one thread.
 - **native and freestanding:** pointers, `syscall` and inline asm, for x86_64

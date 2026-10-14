@@ -1,0 +1,50 @@
+// The `iters` library: adapters over iterators, walked by `for`. Natively
+// each adapter's `next` takes its iterator apart and builds the rest anew, so
+// the list an iterator walks moves from round to round and is never copied.
+import iters
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+fn entry() -> i64 {
+    let xs: [i64] = []
+    for i in 0..2000 {
+        push(xs, i)
+    }
+    let odd = iters.filter(iters.of(xs), fn(x: i64) -> bool { return x % 2 == 1 })
+    let squares = iters.map(odd, fn(x: i64) -> i64 { return x * x })
+    out(iters.sum(squares))
+    out(iters.count(squares))
+    // Walking it left it as it was.
+    out(iters.sum(iters.take(squares, 3)))
+
+    let names: [str] = ["ann", "bo", "cy"]
+    for p in iters.zip(iters.of(names), iters.range(1, 100)) {
+        out(len(p.0) * 100 + p.1)
+    }
+    let joined = iters.fold(iters.of(names), "", fn(acc: str, s: str) -> str { return acc + s + "," })
+    out(len(joined))
+
+    // Items that own lists, made and moved along each round.
+    let rows = iters.map(iters.range(0, 4), fn(n: i64) -> [i64] {
+        let row: [i64] = []
+        for i in 0..n {
+            push(row, i)
+        }
+        return row
+    })
+    let long = iters.collect(iters.filter(rows, fn(r: [i64]) -> bool { return len(r) >= 2 }))
+    out(len(long) * 10 + len(long[1]))
+
+    // A closure that captures a list.
+    let weights: [i64] = [3, 5, 7]
+    let weighed = iters.map(iters.of(xs), fn(x: i64) -> i64 { return x * weights[x % 3] })
+    out(iters.sum(iters.take(weighed, 6)))
+
+    let pts: [Point] = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+    let ys = iters.collect(iters.map(iters.of(pts), fn(p: Point) -> i64 { return p.y }))
+    out(ys[0] + ys[1])
+    return 0
+}

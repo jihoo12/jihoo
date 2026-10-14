@@ -1,5 +1,6 @@
 // `meta.derive!` writes impls of `Hash` and `Ord` part by part, the same in
-// every profile (`meta` only runs while compiling).
+// every profile (`meta` only runs while compiling); for a generic type's
+// name, generic impls that ask the same of each parameter.
 import meta
 
 struct Version {
@@ -15,6 +16,19 @@ enum Shape {
 
 meta.derive!(Hash, Ord, Version)
 meta.derive!(Hash, Ord, Shape)
+
+struct Pair(A: type, B: type) {
+    a: A
+    b: B
+}
+
+enum Either(L: type, R: type) {
+    Left(L)
+    Right(R)
+}
+
+meta.derive!(Hash, Ord, Pair)
+meta.derive!(Hash, Ord, Either)
 
 fn same(comptime T: Hash, a: T, b: T) -> i64 {
     if hash_of(a) == hash_of(b) {
@@ -37,5 +51,18 @@ fn entry() -> i64 {
     out(same(Shape.Rect(1, 2), Shape.Rect(1, 2)))             // 1
     out(same(Shape.Circle(1), Shape.Rect(1, 0)))              // 0
     out(hash_of(Shape.Empty) as i64)                          // the same everywhere
+
+    // Generic impls, for any parameters with the traits.
+    let p = Pair(i64, u8) { a: 1, b: 2 }
+    out((p < Pair(i64, u8) { a: 1, b: 3 }) as i64)            // 1
+    out(p.compare(Pair(i64, u8) { a: 0, b: 9 }))              // 1
+    out(same(p, Pair(i64, u8) { a: 1, b: 2 }))                // 1
+    let v = Pair(Version, Shape) { a: b, b: Shape.Rect(1, 2) }
+    out(v.compare(Pair(Version, Shape) { a: b, b: Shape.Empty }))   // -1
+    let l: Either(u8, Pair(i64, u8)) = Either.Left(200)
+    let r: Either(u8, Pair(i64, u8)) = Either.Right(p)
+    out((l < r) as i64)                                       // 1
+    out(same(r, Either.Right(Pair(i64, u8) { a: 1, b: 2 })))  // 1
+    out(hash_of(r) as i64)                                    // the same everywhere
     return Shape.Empty.compare(Shape.Empty)                   // 0
 }

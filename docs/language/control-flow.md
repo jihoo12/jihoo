@@ -139,8 +139,10 @@ while n < limit {
 
 ## `for`
 
-`for` walks a range of integers, or the elements of a list, an array or a
-`str` (its bytes, as `u8`). With two names, the first is the index, an `i64`:
+`for` walks a range of integers, the elements of a list, an array or a
+`str` (its bytes, as `u8`), or the items of a value whose type has an
+[`Iterator`](traits.md#iterator). With two names, the first is the index, an
+`i64`:
 
 ```jihoo
 for i in 0..len(xs) { ... }        // 0, 1, ... len(xs) - 1
@@ -159,6 +161,9 @@ for b in "hi" { print(b) }         // 104, 105
   not change what the loop sees, since [lists are values](lists.md#lists-are-values).
   Neither the VM nor native code copies the list for this unless the body
   does change it.
+- `for x in it`, for a type with an `Iterator`, calls `next` on `it` and
+  then on what each round's `next` left, until it gives `None`. `it` is a
+  value, so the loop leaves the variable as it was.
 - The names are new variables in each round, visible only in the body. `x` is
   a copy of the element: assigning to it changes neither the list nor the next
   round. Assigning to the index does not change the next round either.

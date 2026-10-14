@@ -1,0 +1,209 @@
+// Iterators: values of types with the prelude's `Iterator`, which `for`
+// walks, and functions that make new ones out of them. Nothing runs until
+// something walks the result, and nothing is built in between, so a chain of
+// them is one loop:
+//
+//   import iters
+//   let squares = iters.map(iters.range(1, 4), fn(x: i64) -> i64 { return x * x })
+//   for x in iters.filter(squares, fn(x: i64) -> bool { return x % 2 == 1 }) {
+//       print(x)                                // 1, 9
+//   }
+//   print(iters.sum(iters.take(iters.of(xs), 2)))
+//
+// Each iterator is a value: walking one, or calling `next` on it, leaves it
+// as it was and gives what is left. `range`, `take`, `count` and `sum` work
+// in every profile; the others need closures or lists, which freestanding
+// programs do not have.
+//
+// An adapter's `next` takes its iterator apart first (`let inner = m.inner`)
+// and builds the rest anew, so natively the inner iterator moves from one
+// round to the next instead of being copied.
+
+// The integers from `lo` up to but not including `hi`.
+pub struct Range {
+    lo: i64
+    hi: i64
+}
+
+impl Iterator for Range {
+    type Item = i64
+
+    fn next(r: Range) -> Option((Range, i64)) {
+        if r.lo >= r.hi {
+            return Option.None
+        }
+        return Option.Some((Range { lo: r.lo + 1, hi: r.hi }, r.lo))
+    }
+}
+
+pub fn range(lo: i64, hi: i64) -> Range {
+    return Range { lo: lo, hi: hi }
+}
+
+// The elements of a list, in order.
+pub struct Of(T: type) {
+    xs: [T]
+    at: i64
+}
+
+impl(T: type) Iterator for Of(T) {
+    type Item = T
+
+    fn next(it: Of(T)) -> Option((Of(T), T)) {
+        if it.at == len(it.xs) {
+            return Option.None
+        }
+        let x = it.xs[it.at]
+        it.at = it.at + 1
+        return Option.Some((it, x))
+    }
+}
+
+pub fn of(comptime T: type, xs: [T]) -> Of(T) {
+    return Of(T) { xs: xs, at: 0 }
+}
+
+// `f` of each item of `inner`.
+pub struct Map(I: Iterator, U: type) {
+    inner: I
+    f: fn(I.Item) -> U
+}
+
+impl(I: Iterator, U: type) Iterator for Map(I, U) {
+    type Item = U
+
+    fn next(m: Map(I, U)) -> Option((Map(I, U), U)) {
+        let inner = m.inner
+        let f = m.f
+        match inner.next() {
+            Some((rest, x)) => {
+                let y = f(x)
+                return Option.Some((Map(I, U) { inner: rest, f: f }, y))
+            }
+            None => return Option.None
+        }
+    }
+}
+
+pub fn map(comptime I: Iterator, comptime U: type, it: I, f: fn(I.Item) -> U) -> Map(I, U) {
+    return Map(I, U) { inner: it, f: f }
+}
+
+// The items of `inner` for which `keep` is true.
+pub struct Filter(I: Iterator) {
+    inner: I
+    keep: fn(I.Item) -> bool
+}
+
+impl(I: Iterator) Iterator for Filter(I) {
+    type Item = I.Item
+
+    fn next(fl: Filter(I)) -> Option((Filter(I), I.Item)) {
+        let inner = fl.inner
+        let keep = fl.keep
+        while true {
+            match inner.next() {
+                Some((rest, x)) => {
+                    if keep(x) {
+                        return Option.Some((Filter(I) { inner: rest, keep: keep }, x))
+                    }
+                    inner = rest
+                }
+                None => return Option.None
+            }
+        }
+        return Option.None
+    }
+}
+
+pub fn filter(comptime I: Iterator, it: I, keep: fn(I.Item) -> bool) -> Filter(I) {
+    return Filter(I) { inner: it, keep: keep }
+}
+
+// The first `n` items of `inner`, or all of them if it has fewer.
+pub struct Take(I: Iterator) {
+    inner: I
+    n: i64
+}
+
+impl(I: Iterator) Iterator for Take(I) {
+    type Item = I.Item
+
+    fn next(t: Take(I)) -> Option((Take(I), I.Item)) {
+        let inner = t.inner
+        let n = t.n
+        if n <= 0 {
+            return Option.None
+        }
+        match inner.next() {
+            Some((rest, x)) => return Option.Some((Take(I) { inner: rest, n: n - 1 }, x))
+            None => return Option.None
+        }
+    }
+}
+
+pub fn take(comptime I: Iterator, it: I, n: i64) -> Take(I) {
+    return Take(I) { inner: it, n: n }
+}
+
+// The items of `a` and `b` in pairs, until either ends.
+pub struct Zip(A: Iterator, B: Iterator) {
+    a: A
+    b: B
+}
+
+impl(A: Iterator, B: Iterator) Iterator for Zip(A, B) {
+    type Item = (A.Item, B.Item)
+
+    fn next(z: Zip(A, B)) -> Option((Zip(A, B), (A.Item, B.Item))) {
+        let a = z.a
+        let b = z.b
+        match a.next() {
+            Some((ra, x)) => match b.next() {
+                Some((rb, y)) => return Option.Some((Zip(A, B) { a: ra, b: rb }, (x, y)))
+                None => return Option.None
+            }
+            None => return Option.None
+        }
+    }
+}
+
+pub fn zip(comptime A: Iterator, comptime B: Iterator, a: A, b: B) -> Zip(A, B) {
+    return Zip(A, B) { a: a, b: b }
+}
+
+// The items, in a list.
+pub fn collect(comptime I: Iterator, it: I) -> [I.Item] {
+    let out: [I.Item] = []
+    for x in it {
+        push(out, x)
+    }
+    return out
+}
+
+// `f(... f(f(init, x0), x1) ..., xn)` over the items.
+pub fn fold(comptime I: Iterator, comptime A: type, it: I, init: A, f: fn(A, I.Item) -> A) -> A {
+    let acc = init
+    for x in it {
+        acc = f(acc, x)
+    }
+    return acc
+}
+
+// How many items there are.
+pub fn count(comptime I: Iterator, it: I) -> i64 {
+    let n = 0
+    for _ in it {
+        n = n + 1
+    }
+    return n
+}
+
+// The sum of the items, which are numbers.
+pub fn sum(comptime I: Iterator, it: I) -> I.Item {
+    let s: I.Item = 0
+    for x in it {
+        s = s + x
+    }
+    return s
+}

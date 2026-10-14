@@ -99,6 +99,14 @@
     every `-O` level: sema assigns the arguments to the parameters and jumps
     back, so JIR only sees a loop and natively the ownership pass frees each
     round as for any loop.
+31. Associated types (`type Item`, `T.Item`), supertraits
+    (`trait Greet: Named`), and the prelude's `Iterator`, which `for` walks
+    ([traits](traits.md)). Natively, the parts of a value that is only
+    taken apart, such as `Some((rest, x))`, move out of it instead of being
+    copied, so an iterator over a list copies nothing; a function whose
+    parameter is only taken apart gets a consuming version, so iterator
+    adapters (`lib/iters.jh`: `map`, `filter`, `take`, `zip`) copy nothing
+    either. `meta.derive!` for a generic type's name writes generic impls.
 
 ## Next
 
@@ -112,11 +120,12 @@
   `#![comptime]` modules, so `meta` costs programs nothing and works in
   freestanding ones; random pipelines in the fuzzer, each checked against
   the same stages written out as a loop.
-- **Traits** ([design](traits.md)): deriving for generic types; later,
-  associated types (`Iterator`) and dynamic dispatch.
+- **Traits** ([design](traits.md)): dynamic dispatch, when a program needs
+  it.
 - **Memory:** a report of where native code copies lists (`jihoo build
   --cost`), which needs source positions in JIR; moving a field out of a
-  value at its last use instead of copying it.
+  value that is used again afterwards (only values that are taken apart
+  give their parts away now).
 
 - **Floats:** `fma`, which IEEE also defines exactly, but freestanding code on
   x86_64 would need an exact software version.

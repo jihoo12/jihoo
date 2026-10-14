@@ -1,7 +1,8 @@
 # Design: traits
 
-Status: the six steps are done, and so is [Done when](#done-when); what is left is
-in [Later](#later).
+Status: the six steps are done, and so is [Done when](#done-when); so are two
+of the later ones, [associated types and `Iterator`](#7-associated-types-and-iterator-done)
+and [supertraits](#8-supertraits-done). What is left is in [Later](#later).
 
 ## Why
 
@@ -376,21 +377,92 @@ found where the impl is used. So the compiler gives less than proposed:
   impls are built as text rather than with `quote`, so their names are
   resolved in the calling module: the traits are the ones it sees, as if the
   impl were written there.
-- Deriving for a generic struct (`impl(T: Show) Show for Pair(T)`) is left
-  out; an instance (`Pair(i64)`) works.
+- Deriving for a generic struct (`impl(T: Show) Show for Pair(T)`) was left
+  out at first; an instance (`Pair(i64)`) worked. It came later:
+  `type_shape` of a generic type's bare name reads its declaration and
+  gives its parameters too (`struct(A,B) a b`), `meta.params` reads them,
+  and `meta.derive!` writes the impl with every parameter bounded by the
+  trait, as Rust's `derive` does. The functions write their parameters as
+  `Self`, so the impl's body is the same either way.
 
 On the way, `print` became usable in compile-time code of freestanding
 programs, which runs on the VM, so `meta.derive!` can report its errors
 there; and a method called on a variant (`Shape.Empty.compare(x)`) takes the
 variant as a value.
 
+### 7. Associated types and `Iterator` (done)
+
+`type Item` in a trait, `type Item = T` in an impl, `Self.Item` and `T.Item`
+as types; the prelude's `Iterator`, and `for` over any type with one.
+
+```jihoo
+pub trait Iterator {
+    type Item
+    fn next(it: Self) -> Option((Self, Self.Item))
+}
+```
+
+Done ([Associated types](../language/traits.md#associated-types),
+[`Iterator`](../language/traits.md#iterator)), without changing JIR. Choices
+made on the way:
+
+- `T.Item` is resolved where a type is, in `Env::resolve`: the part before
+  the dot names a type (a parameter, `Self` or a type's name, but not a
+  module), and the item is looked up among the traits the module can see
+  that have such a type and an impl for it, as a method is. The impl's
+  `type Item = ...` is resolved with the impl's parameters bound, so a
+  generic impl gives `Item` per instance. Two traits that could give it are
+  an error; there is no `<T as Trait>.Item` yet.
+- Inference treats `I.Item` as unknown until `I` is known, so
+  `fn total(comptime I: Iterator, it: I) -> I.Item` infers `I` from `it`
+  alone.
+- An impl's types are checked before its functions, whose signatures may
+  name them, and a missing one is reported as such rather than as a
+  signature that does not resolve.
+- `for x in it` calls `next` on `it`, and on the rest each round gives, until
+  `None`; `for i, x in it` counts the rounds. The loop starts from a copy, so
+  the variable `it` is unchanged, as with lists.
+- An iterator that holds a list must not copy it each round. The value
+  `next` returns, `Some((rest, x))`, is only taken apart, so the ownership
+  pass now moves parts out of a value that is only taken apart: each of its
+  owning parts read once, in one block, after which the value is dead. Only
+  the parts left in it are freed. Before, the parts were views of the value
+  read from, and became deep copies once they outlived it, as `rest` does:
+  walking 200 000 items took 25 s natively, and now takes a few milliseconds.
+  The same holds for a `match` written by hand.
+- An adapter (`lib/iters.jh`) holds another iterator, which its `next` reads
+  out of its parameter. A parameter is borrowed, so that part was copied
+  every round. A function whose parameter is only taken apart, and that
+  would copy a part, now clones the parameter on entry instead, which makes
+  it a function with a consuming version (`f.own`); a caller whose argument
+  is at its last use, as a `for` loop's is, hands it over, and the parts move
+  out of it as out of any value taken apart. The adapters take their
+  iterator apart first (`let inner = m.inner`) and build the rest anew, which
+  gives the pass that shape.
+
+`associated_types_and_iterators` and `associated_type_errors` in
+`crates/jihoo-sema/src/tests.rs`, `tests/diff/iterators.jh` and
+`tests/diff-lists/iterators.jh` (under valgrind) check them, and the fuzzer
+walks an iterator, `Rep(T)`, holding values of random types.
+
+### 8. Supertraits (done)
+
+`trait Greet: Named + Ord` asks every type with `Greet` to have `Named` and
+`Ord`.
+
+Done ([Supertraits](../language/traits.md#supertraits)). The check is where
+impls are checked: an impl for a type is an error without impls of the
+supertraits for it; a generic impl is checked per type where it is used, as
+its signatures are. A module that can see a trait can also use its
+supertraits' functions, so a bound `T: Greet` is enough to call `x.name()`.
+Bounds are not widened otherwise, since impls are found by type and not by
+bound (see [Checking](#checking)). A trait that asks for itself, directly or
+through others, is an error.
+
+`supertraits` and `supertrait_errors` check them.
+
 ## Later
 
-- **Associated types**, such as an `Iterator` with an `Item`, and `for` over
-  any type with an `Iterator` impl. The value-only rule above shapes it:
-  `fn next(it: Self) -> Option((Self, Item))`. Worth doing once the standard
-  traits show whether associated types are needed elsewhere.
-- **Supertraits** (`trait Ord: Hash`), when a standard trait needs one.
 - **Trait functions with comptime parameters of their own.** Allowed by the
   checking model, but not needed by any trait above; left out until one is.
 - **Dynamic dispatch.** A value of "some type with `Show`" chosen at run time.

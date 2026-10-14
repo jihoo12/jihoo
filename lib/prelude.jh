@@ -489,3 +489,10 @@ impl(A: Show, B: Show, C: Show) Show for (A, B, C) {
         return "(" + t.0.show() + ", " + t.1.show() + ", " + t.2.show() + ")"
     }
 }
+
+// Values that give a sequence one at a time: `next` gives what is left and
+// the next value, or `None` at the end. `for x in it` walks one.
+pub trait Iterator {
+    type Item
+    fn next(it: Self) -> Option((Self, Self.Item))
+}

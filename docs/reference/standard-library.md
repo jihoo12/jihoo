@@ -6,10 +6,11 @@ One of them, the prelude, needs no import.
 
 | module | profiles | what |
 |--------|----------|------|
-| [prelude](#prelude) | all | `Option(T)`, `Result(T, E)` and the traits `Ord`, `Hash` and `Show`, without an import |
+| [prelude](#prelude) | all | `Option(T)`, `Result(T, E)` and the traits `Ord`, `Hash`, `Show` and `Iterator`, without an import |
 | [`strings`](#strings) | hosted, native | searching, splitting, joining, trimming and parsing text |
 | [`lists`](#lists) | hosted, native | sorting, mapping and searching lists, and fused pipelines (`fuse!`) |
 | [`maps`](#maps) | hosted, native | hash maps, `Map(K, V)`, for keys with `Hash` and `==` |
+| [`iters`](#iters) | all (`range`, `take`, `count`, `sum`), hosted, native | iterators: ranges, lists, and `map`, `filter`, `zip` over others |
 | [`meta`](#meta) | all, while compiling | the shape of code, for macros that read the code they are given |
 | [`libc`](#libc) | native | declarations of C library functions |
 | [`sys`](#sys) | native, freestanding | Linux syscall numbers of the target |
@@ -65,13 +66,14 @@ fn main() {
 }
 ```
 
-The prelude also declares three [traits](../language/traits.md#the-standard-traits):
+The prelude also declares four [traits](../language/traits.md#the-standard-traits):
 
 | trait | functions | implemented for |
 |-------|-----------|-----------------|
 | `Ord` | `compare(a, b) -> i64`, `less(a, b) -> bool` | numbers (floats in IEEE total order), `str`, and `Option`, lists and tuples of two or three parts whose parts have one |
 | `Hash` | `hash(x, h: Hasher) -> Hasher` | integers, `bool`, `str`, and lists, `Option` and tuples of hashable parts |
 | `Show` | `show(x) -> str` | numbers, `bool`, `str`, and lists, `Option`, `Result` and tuples of parts with one |
+| `Iterator` | `type Item`, `next(it) -> Option((Self, Self.Item))` | nothing: types of programs and libraries, which `for` walks |
 
 `hash_of(x) -> u64` is the hash of a value with `Hash`, the same in every
 profile. `print(x)` prints `x.show()` for a value that is not a number, a
@@ -231,6 +233,44 @@ The keys are kept in buckets by their hash, two to a bucket on average at
 most; a lookup hashes the key once and compares it with the few keys in its
 bucket.
 
+## iters
+
+Iterators, values of types with the prelude's
+[`Iterator`](../language/traits.md#iterator), which [`for`](../language/control-flow.md#for)
+walks, and adapters that make new ones out of them. Nothing runs until
+something walks the result, and no list is built between the stages:
+
+```jihoo
+import iters
+
+fn main() {
+    let xs: [i64] = [1, 2, 3, 4, 5]
+    let odd = iters.filter(iters.of(xs), fn(x: i64) -> bool { return x % 2 == 1 })
+    for x in iters.map(odd, fn(x: i64) -> i64 { return x * x }) {
+        print(x)                                    // 1, 9, 25
+    }
+    print(iters.sum(iters.take(iters.range(0, 1000000), 4)))     // 6
+}
+```
+
+| function | description |
+|----------|-------------|
+| `range(lo, hi) -> Range` | the integers from `lo` up to `hi - 1` |
+| `of(xs: [T]) -> Of(T)` | the elements of a list |
+| `map(it, f: fn(I.Item) -> U) -> Map(I, U)` | `f` of each item |
+| `filter(it, keep: fn(I.Item) -> bool) -> Filter(I)` | the items `keep` is true for |
+| `take(it, n) -> Take(I)` | the first `n` items |
+| `zip(a, b) -> Zip(A, B)` | pairs of items, until either ends |
+| `collect(it) -> [I.Item]` | the items, in a list |
+| `fold(it, init, f: fn(A, I.Item) -> A) -> A` | the items folded into `init` |
+| `count(it) -> i64`, `sum(it) -> I.Item` | how many items, and their sum |
+
+An iterator is a value: walking one leaves it as it was. Each adapter's
+`next` takes its iterator apart and builds the rest anew, so natively the
+inner iterator, and a list it walks, moves from one round to the next and is
+never copied. `range`, `take`, `count` and `sum` work in freestanding programs
+too; the others need closures or lists.
+
 ## meta
 
 The shape of code, one level deep, for [macros](../language/macros.md) and
@@ -274,11 +314,13 @@ import it, freestanding ones included. It is written in jihoo on top of
 
 `meta.shape(t)` gives the parts of a struct or enum type, where the macro is
 called: `Struct(fields)`, the field names, `Enum(variants)`, each a
-`Variant { name, values }` with how many values it holds, or `Other`.
+`Variant { name, values }` with how many values it holds, or `Other`. `t`
+may be a generic type's name alone (`Pair`), and `meta.params(t)` then gives
+its parameters (`["A", "B"]`), and none for any other type.
 
 `meta.derive!(Show, Hash, Ord, T)` is an item macro that writes impls of
 those [traits](../language/traits.md#deriving) for the struct or enum `T`,
-part by part:
+or, for a generic type's name, generic impls, part by part:
 
 ```jihoo
 import meta

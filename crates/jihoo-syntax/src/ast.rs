@@ -103,6 +103,11 @@ pub struct TraitDecl {
     pub pos: Pos,
     pub is_pub: bool,
     pub name: String,
+    /// `trait Ord: Eq + Show`: traits that every type with this one must
+    /// also have, as written.
+    pub supers: Vec<(Pos, String)>,
+    /// `type Item`: types that each impl names, written `Self.Item`.
+    pub types: Vec<(Pos, String)>,
     pub funcs: Vec<TraitFn>,
 }
 
@@ -123,7 +128,17 @@ pub struct ImplDecl {
     /// As written: `Ord`, or `cmp.Ord` for another module's.
     pub trait_name: String,
     pub ty: TypeExpr,
+    /// `type Item = i64`: the trait's associated types for this type.
+    pub types: Vec<AssocType>,
     pub funcs: Vec<FnDecl>,
+}
+
+/// `type Item = i64` in an impl.
+#[derive(Debug, Clone)]
+pub struct AssocType {
+    pub pos: Pos,
+    pub name: String,
+    pub ty: TypeExpr,
 }
 
 #[derive(Debug, Clone)]

@@ -1,0 +1,156 @@
+// Iterators over lists, and values taken apart: natively the parts read out
+// of a value at its last use move out of it, and only the parts left in it
+// are freed, so each round of a `for` over an iterator copies nothing.
+
+struct Walk(T: type) {
+    xs: [T]
+    i: i64
+}
+
+impl(T: type) Iterator for Walk(T) {
+    type Item = T
+
+    fn next(w: Walk(T)) -> Option((Walk(T), T)) {
+        if w.i == len(w.xs) {
+            return Option.None
+        }
+        let x = w.xs[w.i]
+        w.i = w.i + 1
+        return Option.Some((w, x))
+    }
+}
+
+fn walk(comptime T: type, xs: [T]) -> Walk(T) {
+    return Walk(T) { xs: xs, i: 0 }
+}
+
+// Words of a string, split at spaces: each item is a new string.
+struct Words {
+    s: str
+    at: i64
+}
+
+impl Iterator for Words {
+    type Item = str
+
+    fn next(w: Words) -> Option((Words, str)) {
+        let i = w.at
+        while i < len(w.s) && w.s[i] == 32 {
+            i = i + 1
+        }
+        if i == len(w.s) {
+            return Option.None
+        }
+        let j = i
+        while j < len(w.s) && w.s[j] != 32 {
+            j = j + 1
+        }
+        let word = w.s[i:j]
+        w.at = j
+        return Option.Some((w, word))
+    }
+}
+
+fn collect(comptime I: Iterator, it: I) -> [I.Item] {
+    let out: [I.Item] = []
+    for x in it {
+        push(out, x)
+    }
+    return out
+}
+
+// Two lists and a number; the parts taken out of one are freed with it.
+enum Split {
+    Both([i64], [i64], i64)
+    Neither
+}
+
+fn split(xs: [i64]) -> Split {
+    if len(xs) == 0 {
+        return Split.Neither
+    }
+    let h = len(xs) / 2
+    return Split.Both(xs[:h], xs[h:], len(xs))
+}
+
+struct Halves {
+    lo: [i64]
+    hi: [i64]
+    name: str
+}
+
+fn halves(xs: [i64]) -> Halves {
+    let h = len(xs) / 2
+    return Halves { lo: xs[:h], hi: xs[h:], name: "halves" }
+}
+
+fn sum(xs: [i64]) -> i64 {
+    let s = 0
+    for x in xs {
+        s = s + x
+    }
+    return s
+}
+
+fn entry() -> i64 {
+    let xs: [i64] = []
+    for i in 0..1000 {
+        push(xs, i)
+    }
+    let s = 0
+    for x in walk(xs) {
+        s = s + x
+    }
+    out(s)
+    // The list walked is still the caller's.
+    out(len(xs))
+
+    let words = collect(Words { s: "  the quick  brown fox ", at: 0 })
+    out(len(words))
+    for i, w in walk(words) {
+        out(i * 100 + len(w))
+    }
+    let lists: [[i64]] = [[1, 2], [3], []]
+    let nested = collect(walk(lists))
+    out(len(nested) * 10 + len(nested[0]))
+
+    // Taking some parts of a variant: the other list is freed.
+    match split(xs) {
+        Both(lo, _, n) => out(sum(lo) + n)
+        Neither => out(-1)
+    }
+    match split([]) {
+        Both(_, _, n) => out(n)
+        Neither => out(-2)
+    }
+    // All of them, and a struct's fields, some of them.
+    match split([1, 2, 3]) {
+        Both(lo, hi, n) => {
+            push(lo, 10)
+            out(sum(lo) * 100 + sum(hi) * 10 + n)
+        }
+        Neither => out(-3)
+    }
+    let h = halves([5, 6, 7, 8])
+    let hi = h.hi
+    push(hi, 1)
+    out(sum(hi))
+    let (a, b) = (halves([1, 2]), [3])
+    out(len(a.lo) + len(a.hi) + len(b))
+
+    // A value taken apart by hand, the same way, in a loop.
+    let strs: [str] = ["a", "bb", "ccc"]
+    let w = walk(strs)
+    let total = 0
+    while true {
+        match w.next() {
+            Some((rest, x)) => {
+                total = total + len(x)
+                w = rest
+            }
+            None => break
+        }
+    }
+    out(total)
+    return 0
+}

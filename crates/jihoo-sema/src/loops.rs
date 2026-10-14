@@ -73,7 +73,14 @@ impl FnCx<'_> {
             Type::List(elem) | Type::Array(elem, _) => (**elem).clone(),
             Type::Str => Type::Int(IntTy::U8),
             _ => {
-                let msg = format!("cannot loop over {t}; `for` walks a list, an array, a str or a range `lo..hi`");
+                if let Some(key) = self.env.prelude_module().and_then(|p| self.env.trait_key(p, "Iterator")) {
+                    if self.env.find_impl(&key, &t).is_some() {
+                        return self.iterator_loop(iter.pos, &key, index, name, v, body);
+                    }
+                }
+                let msg = format!(
+                    "cannot loop over {t}; `for` walks a list, an array, a str, a range `lo..hi` or a type with an `Iterator`"
+                );
                 return Err(Error::new(iter.pos, msg));
             }
         };
@@ -100,6 +107,47 @@ impl FnCx<'_> {
             names.push((index.to_string(), i));
         }
         self.loop_body(head, names, body)
+    }
+
+    /// `for x in it` and `for i, x in it`, over `it`, a value of a type with
+    /// an `Iterator` (trait `key`): each round calls `next` on what the last
+    /// round left, and the loop ends at `None`.
+    fn iterator_loop(&mut self, pos: Pos, key: &str, index: Option<&str>, name: &str, it: Reg, body: &Block) -> Result<(), Error> {
+        let t = self.ty(it).clone();
+        let (next, sig) = self.trait_instance(pos, key, "next", t.clone())?;
+        let Type::Enum(option) = &sig.ret else { unreachable!("`next` gives an option") };
+        let variants = self.env.enum_variants(pos, option)?;
+        let some = variants.iter().position(|(v, _)| v == "Some").expect("an option has `Some`") as u32;
+        let pair = variants[some as usize].1[0].clone();
+        let elem = self.env.tuple_parts(&pair).expect("`next` gives a pair")[1].1.clone();
+
+        let cur = self.emit_to(t.clone(), |dst| Inst::Copy { dst, src: it });
+        let zero = self.konst(Type::I64, 0);
+        let counter = self.emit_to(Type::I64, |dst| Inst::Copy { dst, src: zero });
+        let one = self.konst(Type::I64, 1);
+        let some_tag = self.konst(Type::Int(IntTy::U32), i64::from(some));
+        let test = self.new_block();
+        let round = self.new_block();
+        let end = self.new_block();
+        self.terminate(Terminator::Jump(test));
+
+        self.switch_to(test);
+        let r = self.emit_to(sig.ret.clone(), |dst| Inst::Call { dst, func: next, args: vec![cur] });
+        let tag = self.emit_to(Type::Int(IntTy::U32), |dst| Inst::Tag { dst, src: r });
+        let c = self.emit_to(Type::Bool, |dst| Inst::Binary { dst, op: BinOp::Eq, lhs: tag, rhs: some_tag });
+        self.terminate(Terminator::Branch { cond: c, then: round, els: end });
+
+        self.switch_to(round);
+        let p = self.emit_to(pair, |dst| Inst::Payload { dst, src: r, variant: some, index: 0 });
+        self.emit(Inst::Field { dst: cur, src: p, index: 0 });
+        let x = self.emit_to(elem, |dst| Inst::Field { dst, src: p, index: 1 });
+        let i = self.emit_to(Type::I64, |dst| Inst::Copy { dst, src: counter });
+        self.emit(Inst::Binary { dst: counter, op: BinOp::Add, lhs: counter, rhs: one });
+        let mut names = vec![(name.to_string(), x)];
+        if let Some(index) = index {
+            names.push((index.to_string(), i));
+        }
+        self.loop_body(LoopHead { value: i, test, end }, names, body)
     }
 
     /// Starts a loop while `counter < limit`. Each round copies the counter

@@ -390,13 +390,13 @@ pub struct Variant {
 }
 
 // The parts of the type that `t` names where the macro was called: `Point`,
-// `geo.Shape` or `Pair(i64)`.
+// `geo.Shape`, `Pair(i64)`, or `Pair` for every `Pair(T)`.
 pub fn shape(t: expr) -> Shape {
     let words = strings.split(type_shape(t), " ")
-    if words[0] == "struct" {
+    if strings.starts_with(words[0], "struct") {
         return Shape.Struct(words[1:])
     }
-    if words[0] == "enum" {
+    if strings.starts_with(words[0], "enum") {
         let variants: [Variant] = []
         for w in words[1:] {
             let slash = strings.index_of(w, "/")
@@ -408,6 +408,18 @@ pub fn shape(t: expr) -> Shape {
         return Shape.Enum(variants)
     }
     return Shape.Other
+}
+
+// The parameters of the generic type that `t` names without arguments, as in
+// `Pair` for `struct Pair(T: type)`; none for any other type.
+pub fn params(t: expr) -> [str] {
+    let head = strings.split(type_shape(t), " ")[0]
+    let open = strings.index_of(head, "(")
+    if open < 0 {
+        let none: [str] = []
+        return none
+    }
+    return strings.split(head[open + 1:len(head) - 1], ",")
 }
 
 // ---- deriving ----
@@ -424,7 +436,9 @@ pub fn shape(t: expr) -> Shape {
 //
 // Every part needs an impl of the trait itself. The impls are written in the
 // calling module, as if by hand, and name the traits as it sees them; `T` may
-// be an instance of a generic type, such as `Pair(i64)`.
+// be an instance of a generic type, such as `Pair(i64)`, or a generic type's
+// name, `Pair`, for a generic impl that asks the trait of each parameter:
+// `impl(T: Show) Show for Pair(T)`.
 pub macro derive(args: [expr]) -> items {
     if len(args) < 2 {
         derive_error("write the traits and then the type: `derive!(Show, Point)`")
@@ -436,15 +450,20 @@ pub macro derive(args: [expr]) -> items {
         Other => derive_error("`" + name + "` is not a struct or enum")
         _ => {}
     }
+    let ps = params(t)
+    if len(ps) > 0 {
+        name = name + "(" + strings.join(ps, ", ") + ")"
+    }
     let out = ""
     for a in args[:len(args) - 1] {
         let tr = stringify(a)
         if tr == "Show" {
-            out = out + derive_show(name, shape)
+            // A generic type shows as its name alone: `Pair { a: 1, b: 2 }`.
+            out = out + impl_head(ps, "Show", name) + derive_show(stringify(t), shape)
         } else if tr == "Hash" {
-            out = out + derive_hash(name, shape)
+            out = out + impl_head(ps, "Hash", name) + derive_hash(shape)
         } else if tr == "Ord" {
-            out = out + derive_ord(name, shape)
+            out = out + impl_head(ps, "Ord", name) + derive_ord(shape)
         } else {
             derive_error("cannot derive `" + tr + "`; it derives `Show`, `Hash` and `Ord`")
         }
@@ -456,6 +475,19 @@ pub macro derive(args: [expr]) -> items {
 fn derive_error(msg: str) {
     print("derive!: " + msg)
     trap()
+}
+
+// `impl Show for T {`, or `impl(A: Show, B: Show) Show for T {` with
+// parameters.
+fn impl_head(params: [str], tr: str, name: str) -> str {
+    if len(params) == 0 {
+        return "impl " + tr + " for " + name + " {\n"
+    }
+    let bounds: [str] = []
+    for p in params {
+        push(bounds, p + ": " + tr)
+    }
+    return "impl(" + strings.join(bounds, ", ") + ") " + tr + " for " + name + " {\n"
 }
 
 // `V(v0, v1)`, the pattern of variant `v` with `n` values named `prefix0`...;
@@ -502,10 +534,10 @@ fn derive_show(name: str, shape: Shape) -> str {
         }
         Other => trap()
     }
-    return "impl Show for " + name + " {\nfn show(x: " + name + ") -> str {\n" + body + "\n}\n}\n"
+    return "fn show(x: Self) -> str {\n" + body + "\n}\n}\n"
 }
 
-fn derive_hash(name: str, shape: Shape) -> str {
+fn derive_hash(shape: Shape) -> str {
     let body = ""
     match shape {
         Struct(fields) => {
@@ -527,10 +559,10 @@ fn derive_hash(name: str, shape: Shape) -> str {
         }
         Other => trap()
     }
-    return "impl Hash for " + name + " {\nfn hash(x: " + name + ", h: Hasher) -> Hasher {\n" + body + "\n}\n}\n"
+    return "fn hash(x: Self, h: Hasher) -> Hasher {\n" + body + "\n}\n}\n"
 }
 
-fn derive_ord(name: str, shape: Shape) -> str {
+fn derive_ord(shape: Shape) -> str {
     let body = "let c = 0\n"
     match shape {
         Struct(fields) => {
@@ -558,5 +590,5 @@ fn derive_ord(name: str, shape: Shape) -> str {
         }
         Other => trap()
     }
-    return "impl Ord for " + name + " {\nfn compare(x: " + name + ", y: " + name + ") -> i64 {\n" + body + "\n}\n}\n"
+    return "fn compare(x: Self, y: Self) -> i64 {\n" + body + "\n}\n}\n"
 }

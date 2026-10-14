@@ -695,6 +695,85 @@ fn generic_impl_errors() {
     assert!(e.contains("P does not implement `Ord`, which `T` of `Sorted` needs"), "{e}");
 }
 
+
+const COUNT: &str = "struct Count { n: i64 }\n\
+                     impl Iterator for Count {\n  type Item = i64\n  fn next(c: Count) -> Option((Count, i64)) {\n    if c.n == 0 { return Option.None }\n    return Option.Some((Count { n: c.n - 1 }, c.n))\n  }\n}\n";
+
+#[test]
+fn associated_types_and_iterators() {
+    let src = format!(
+        "{COUNT}{PAIR}impl(T: type) Iterator for Pair(T) {{\n  type Item = T\n  fn next(p: Self) -> Option((Self, Self.Item)) {{ return Option.None }}\n}}\n\
+         fn total(comptime I: Iterator, it: I) -> I.Item {{\n  let s: I.Item = 0\n  for x in it {{ s = s + x }}\n  return s\n}}\n\
+         fn main() {{\n  for x in (Count {{ n: 3 }}) {{ print(x) }}\n  for i, x in (Count {{ n: 2 }}) {{\n    print(i * 10 + x)\n  }}\n\
+           print(total(Count {{ n: 100 }}))\n  let n: Count.Item = 7\n  print(n)\n\
+           for x in (Pair(str) {{ a: \"a\", b: \"b\" }}) {{ print(x) }}\n\
+           let c = Count {{ n: 5 }}\n  for x in c {{\n    if x == 4 {{ continue }}\n    if x == 2 {{ break }}\n    print(x)\n  }}\n  print(c.n)\n}}"
+    );
+    assert_eq!(run(&src), "3\n2\n1\n2\n11\n5050\n7\n5\n3\n5\n");
+    // A trait's default body can use its associated types.
+    let src = "trait Box {\n  type In\n  fn get(b: Self) -> Self.In\n  fn twice(b: Self) -> (Self.In, Self.In) { return (b.get(), b.get()) }\n}\n\
+               struct B { x: u8 }\nimpl Box for B {\n  type In = u8\n  fn get(b: B) -> u8 { return b.x }\n}\n\
+               fn main() {\n  let t = B { x: 4 }.twice()\n  print(t.0 + t.1)\n}";
+    assert_eq!(run(src), "8\n");
+}
+
+#[test]
+fn associated_type_errors() {
+    let e = err("struct C { n: i64 }\nimpl Iterator for C {\n  fn next(c: C) -> Option((C, i64)) { return Option.None }\n}\nfn main() {}");
+    assert!(e.contains("this impl of `Iterator` for C lacks type `Item`"), "{e}");
+    let e = err(&format!("{COUNT}fn main() {{}}").replace("type Item = i64", "type Item = i64\n  type Other = i64"));
+    assert!(e.contains("`Iterator` has no type `Other`"), "{e}");
+    let e = err(&format!("{COUNT}fn main() {{}}").replace("type Item = i64", "type Item = i64\n  type Item = u8"));
+    assert!(e.contains("type `Item` is given twice"), "{e}");
+    let e = err(&format!("{COUNT}fn main() {{}}").replace("Option((Count, i64))", "Option((Count, u8))"));
+    assert!(e.contains("`next` of `Iterator` for Count must be fn(Count) -> prelude.Option((Count, i64)), not fn(Count) -> prelude.Option((Count, u8))"), "{e}");
+    let e = err("trait T {\n  type A\n  type A\n}\nfn main() {}");
+    assert!(e.contains("`T` has two types `A`"), "{e}");
+    let e = err("struct P { x: i64 }\nfn main() { let x: P.Item = 1 }");
+    assert!(e.contains("P does not implement `Iterator`, which has a type `Item`"), "{e}");
+    let e = err("fn main() { let x: i64.Nope = 1 }");
+    assert!(e.contains("no trait has a type `Nope`"), "{e}");
+    let e = err("struct P { x: i64 }\nfn main() {\n  for x in (P { x: 1 }) {}\n}");
+    assert!(e.contains("cannot loop over P; `for` walks a list, an array, a str, a range `lo..hi` or a type with an `Iterator`"), "{e}");
+    let e = err(&format!("{COUNT}fn f(comptime I: Iterator, it: I) -> I.Item {{ return 0 }}\nfn main() {{ print(f(3)) }}"));
+    assert!(e.contains("i64 does not implement `Iterator`, which `I` of `f` needs"), "{e}");
+}
+
+#[test]
+fn supertraits() {
+    let src = "trait Named {\n  fn name(x: Self) -> str\n}\n\
+               trait Greet: Named {\n  fn greet(x: Self) -> str { return \"hi \" + x.name() }\n}\n\
+               trait Loud: Greet + Ord {\n  fn shout(x: Self) -> str { return x.greet() + \"!\" }\n}\n\
+               struct P { n: str }\n\
+               impl Named for P {\n  fn name(p: P) -> str { return p.n }\n}\n\
+               impl Greet for P {}\n\
+               impl Ord for P {\n  fn compare(a: P, b: P) -> i64 { return a.n.compare(b.n) }\n}\n\
+               impl Loud for P {}\n\
+               fn both(comptime T: Loud, a: T, b: T) -> str {\n  if a < b { return a.shout() }\n  return b.name()\n}\n\
+               fn main() {\n  print(both(P { n: \"a\" }, P { n: \"b\" }))\n  print(both(P { n: \"d\" }, P { n: \"c\" }))\n}";
+    assert_eq!(run(src), "hi a!\nc\n");
+    // A generic impl is checked per type.
+    let src = format!(
+        "{PAIR}trait A {{\n  fn ay(x: Self) -> i64\n}}\ntrait B: A {{\n  fn bee(x: Self) -> i64 {{ return x.ay() + 1 }}\n}}\n\
+         impl(T: type) A for Pair(T) {{\n  fn ay(p: Pair(T)) -> i64 {{ return 1 }}\n}}\nimpl(T: type) B for Pair(T) {{}}\n\
+         fn main() {{ print(Pair(u8) {{ a: 1, b: 2 }}.bee()) }}"
+    );
+    assert_eq!(run(&src), "2\n");
+}
+
+#[test]
+fn supertrait_errors() {
+    let base = "trait A {\n  fn a(x: Self) -> i64\n}\ntrait B: A {\n  fn bee(x: Self) -> i64 { return 0 }\n}\nstruct P { x: i64 }\n";
+    let e = err(&format!("{base}impl B for P {{}}\nfn main() {{}}"));
+    assert!(e.contains("P implements `B` but not `A`, which `B` needs"), "{e}");
+    let e = err(&format!("{base}{PAIR}impl(T: type) B for Pair(T) {{}}\nfn main() {{ print(Pair(u8) {{ a: 1, b: 2 }}.bee()) }}"));
+    assert!(e.contains("Pair(u8) implements `B` but not `A`, which `B` needs"), "{e}");
+    let e = err("trait A: Nope {}\nfn main() {}");
+    assert!(e.contains("unknown trait `Nope`"), "{e}");
+    let e = err("trait A: B {}\ntrait B: A {}\nfn main() {}");
+    assert!(e.contains("`A` cannot ask for itself"), "{e}");
+}
+
 #[test]
 fn standard_traits() {
     let src = "struct P { x: i64, y: i64 }\n\

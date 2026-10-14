@@ -515,6 +515,9 @@ impl<'p> Env<'p> {
                     let named = n.parse::<usize>().ok().and_then(|n| self.code_types.borrow().get(n).cloned());
                     return named.ok_or_else(|| Error::new(t.pos, format!("unknown type `{name}`")));
                 }
+                if let Some(ty) = self.assoc_path(t.pos, b, name, in_macro)? {
+                    return Ok(ty);
+                }
                 match b.get(name) {
                     Some(Binding::Type(t)) => return Ok(t.clone()),
                     Some(Binding::Value(..) | Binding::Closure { .. }) => {

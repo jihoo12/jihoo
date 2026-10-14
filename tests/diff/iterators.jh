@@ -1,0 +1,163 @@
+// Iterators, associated types and supertraits: `for` over a type with an
+// `Iterator` calls its `next` until `None`, in every profile, and so do the
+// parts of `iters` that need no closures or lists.
+import iters
+
+// The numbers from `lo` up to `hi`, by `step`.
+struct Steps {
+    lo: i64
+    hi: i64
+    step: i64
+}
+
+impl Iterator for Steps {
+    type Item = i64
+
+    fn next(s: Steps) -> Option((Steps, i64)) {
+        if s.lo >= s.hi {
+            return Option.None
+        }
+        return Option.Some((Steps { lo: s.lo + s.step, hi: s.hi, step: s.step }, s.lo))
+    }
+}
+
+// Collatz from `n`, ending at 1; the items are `u8`, to tell them apart.
+struct Collatz {
+    n: i64
+    done: bool
+}
+
+impl Iterator for Collatz {
+    type Item = u8
+
+    fn next(c: Self) -> Option((Self, Self.Item)) {
+        if c.done {
+            return Option.None
+        }
+        let n = c.n
+        if n == 1 {
+            return Option.Some((Collatz { n: 1, done: true }, 1))
+        }
+        let after = n / 2
+        if n % 2 == 1 {
+            after = 3 * n + 1
+        }
+        return Option.Some((Collatz { n: after, done: false }, n as u8))
+    }
+}
+
+// The first `n` items of another iterator, for any iterator.
+struct Take(I: Iterator) {
+    inner: I
+    n: i64
+}
+
+impl(I: Iterator) Iterator for Take(I) {
+    type Item = I.Item
+
+    fn next(t: Take(I)) -> Option((Take(I), I.Item)) {
+        if t.n == 0 {
+            return Option.None
+        }
+        match t.inner.next() {
+            Some((rest, x)) => return Option.Some((Take(I) { inner: rest, n: t.n - 1 }, x))
+            None => return Option.None
+        }
+    }
+}
+
+fn total(comptime I: Iterator, it: I) -> i64 {
+    let s = 0
+    for x in it {
+        s = s + x as i64
+    }
+    return s
+}
+
+fn count(comptime I: Iterator, it: I) -> i64 {
+    let n = 0
+    for _ in it {
+        n = n + 1
+    }
+    return n
+}
+
+// The first item, through `Iterator.next` spelled out.
+fn first(comptime I: Iterator, it: I, none: I.Item) -> I.Item {
+    match Iterator.next(it) {
+        Some((_, x)) => return x
+        None => return none
+    }
+}
+
+// Supertraits: a `Sized` can use `Measure`'s functions on `Self`.
+trait Measure {
+    fn size(x: Self) -> i64
+}
+
+trait Sized: Measure {
+    fn bigger(a: Self, b: Self) -> bool {
+        return a.size() > b.size()
+    }
+}
+
+impl Measure for Steps {
+    fn size(s: Steps) -> i64 {
+        return count(s)
+    }
+}
+
+impl Sized for Steps {}
+
+fn biggest(comptime T: Sized, a: T, b: T) -> i64 {
+    if a.bigger(b) {
+        return a.size()
+    }
+    return b.size()
+}
+
+fn entry() -> i64 {
+    for x in (Steps { lo: 0, hi: 10, step: 3 }) {
+        out(x)
+    }
+    for i, x in (Collatz { n: 6, done: false }) {
+        out(i * 1000 + x as i64)
+    }
+    out(total(Steps { lo: 1, hi: 101, step: 1 }))
+    out(total(Collatz { n: 27, done: false }))
+    out(count(Collatz { n: 27, done: false }))
+    out(total(Take(Steps) { inner: Steps { lo: 5, hi: 1000000, step: 5 }, n: 4 }))
+    out(count(Take(Take(Collatz)) { inner: Take(Collatz) { inner: Collatz { n: 7, done: false }, n: 9 }, n: 100 }))
+    out(first(Steps { lo: 42, hi: 43, step: 1 }, -1))
+    out(first(Steps { lo: 42, hi: 0, step: 1 }, -1))
+    let c: Collatz.Item = 200
+    out(c as i64)
+
+    // `break` and `continue` in a loop over an iterator.
+    let s = 0
+    for x in (Steps { lo: 0, hi: 100, step: 1 }) {
+        if x % 2 == 0 {
+            continue
+        }
+        if x > 20 {
+            break
+        }
+        s = s + x
+    }
+    out(s)
+
+    let a = Steps { lo: 0, hi: 30, step: 3 }
+    let b = Steps { lo: 0, hi: 30, step: 7 }
+    out(biggest(a, b))
+    out(biggest(b, a))
+    // The loops left `a` as it was.
+    out(a.lo)
+
+    out(iters.sum(iters.range(0, 10)))
+    out(iters.count(iters.take(iters.range(0, 1000000000), 7)))
+    out(iters.sum(iters.take(Collatz { n: 27, done: false }, 5)) as i64)
+    for x in iters.take(iters.range(-3, 3), 2) {
+        out(x)
+    }
+    return 0
+}

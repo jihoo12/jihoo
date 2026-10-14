@@ -43,7 +43,11 @@ impl<'d> Found<'d> {
     /// The first type parameter that `t` mentions and that is not known yet.
     pub fn unknown_in(&self, t: &TypeExpr) -> Option<&'d str> {
         match &t.kind {
-            TypeExprKind::Named(n) => self.params.iter().copied().find(|p| p == n && !self.types.contains_key(p)),
+            TypeExprKind::Named(n) => {
+                // `I.Item`, a type of `I`'s, is known once `I` is.
+                let n = n.split_once('.').map_or(n.as_str(), |(p, _)| p);
+                self.params.iter().copied().find(|p| *p == n && !self.types.contains_key(p))
+            }
             TypeExprKind::Ptr(x)
             | TypeExprKind::List(x)
             | TypeExprKind::Array(x, _)

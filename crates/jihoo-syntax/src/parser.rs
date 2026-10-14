@@ -484,38 +484,73 @@ impl Parser {
     fn trait_decl(&mut self, is_pub: bool) -> PResult<TraitDecl> {
         let pos = self.expect(&Tok::Trait, "`trait`")?.pos;
         let (_, name) = self.ident("trait name")?;
+        let mut supers = Vec::new();
+        if self.eat(&Tok::Colon) {
+            loop {
+                supers.push(self.trait_name()?);
+                if !self.eat(&Tok::Plus) {
+                    break;
+                }
+            }
+        }
         self.expect(&Tok::LBrace, "`{`")?;
+        let mut types = Vec::new();
         let mut funcs = Vec::new();
         while !self.eat(&Tok::RBrace) {
+            if self.at_type_keyword() {
+                self.bump();
+                types.push(self.ident("an associated type's name")?);
+                continue;
+            }
             if *self.peek() != Tok::Fn {
-                return Err(self.unexpected("`fn` or `}` in a trait"));
+                return Err(self.unexpected("`fn`, `type` or `}` in a trait"));
             }
             let (decl, has_body) = self.fn_decl_with(false, true)?;
             funcs.push(TraitFn { decl, has_body });
         }
-        Ok(TraitDecl { pos, is_pub, name, funcs })
+        Ok(TraitDecl { pos, is_pub, name, supers, types, funcs })
+    }
+
+    /// `Ord` or `cmp.Ord`, naming a trait.
+    fn trait_name(&mut self) -> PResult<(Pos, String)> {
+        let (pos, mut name) = self.ident("trait name")?;
+        self.mark();
+        if self.eat(&Tok::Dot) {
+            name = format!("{name}.{}", self.ident("trait name")?.1);
+        }
+        Ok((pos, name))
+    }
+
+    /// Whether the next token is `type`, starting an associated type.
+    fn at_type_keyword(&self) -> bool {
+        matches!(self.peek(), Tok::Ident(n) if n == "type")
     }
 
     /// `impl Trait for Type { fn ... }`.
     fn impl_decl(&mut self) -> PResult<ImplDecl> {
         let pos = self.expect(&Tok::Impl, "`impl`")?.pos;
         let params = self.item_params()?;
-        let mut trait_name = self.ident("trait name")?.1;
-        self.mark();
-        if self.eat(&Tok::Dot) {
-            trait_name = format!("{trait_name}.{}", self.ident("trait name")?.1);
-        }
+        let trait_name = self.trait_name()?.1;
         self.expect(&Tok::For, "`for` and a type")?;
         let ty = self.type_expr()?;
         self.expect(&Tok::LBrace, "`{`")?;
+        let mut types = Vec::new();
         let mut funcs = Vec::new();
         while !self.eat(&Tok::RBrace) {
+            if self.at_type_keyword() {
+                self.bump();
+                let (pos, name) = self.ident("an associated type's name")?;
+                self.expect(&Tok::Assign, "`=` and a type")?;
+                let ty = self.type_expr()?;
+                types.push(AssocType { pos, name, ty });
+                continue;
+            }
             if *self.peek() != Tok::Fn {
-                return Err(self.unexpected("`fn` or `}` in an impl"));
+                return Err(self.unexpected("`fn`, `type` or `}` in an impl"));
             }
             funcs.push(self.fn_decl(false)?);
         }
-        Ok(ImplDecl { pos, params, trait_name, ty, funcs })
+        Ok(ImplDecl { pos, params, trait_name, ty, types, funcs })
     }
 
     fn type_expr(&mut self) -> PResult<TypeExpr> {

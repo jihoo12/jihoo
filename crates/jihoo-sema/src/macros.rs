@@ -265,6 +265,9 @@ impl FnCx<'_> {
             .map_err(|err| Error::new(pos, plain_names(&format!("`type_shape` got code that does not parse: {} in `{code}`", err.msg))))?;
         expansion.resolve(self.env, Code::Expr(&mut e), &|n| self.is_local_name(n));
         set_pos(&mut e, pos);
+        if let Some(shape) = self.generic_shape(pos, &e)? {
+            return Ok(shape);
+        }
         let t = crate::generic::expr_to_type(&e).and_then(|t| self.resolve(&t)).map_err(|err| {
             Error::new(err.pos, plain_names(&format!("{} (in `type_shape`, which needs a type)", err.msg)))
         })?;
@@ -282,6 +285,35 @@ impl FnCx<'_> {
             _ => "other".to_string(),
         };
         Ok(shape)
+    }
+
+    /// For `type_shape`, the parts of generic struct or enum `e` names
+    /// without arguments (`Pair`), from its declaration, with its parameters:
+    /// `struct(T,U) a b` or `enum(T) Some/1 None/0`. `None` if `e` names no
+    /// such type.
+    fn generic_shape(&self, pos: Pos, e: &Expr) -> Result<Option<String>, Error> {
+        let Ok(jihoo_syntax::ast::TypeExpr { kind: jihoo_syntax::ast::TypeExprKind::Named(name), .. }) = crate::generic::expr_to_type(e) else {
+            return Ok(None);
+        };
+        let module = self.bindings.module;
+        let Some((key, (dm, decl))) = self.env.key(module, &name).and_then(|k| self.env.type_decl(&k).map(|d| (k, d))) else {
+            return Ok(None);
+        };
+        if decl.params.is_empty() {
+            return Ok(None);
+        }
+        self.env.check_visible(pos, self.env.viewer(module, &name), &key)?;
+        if let Some(p) = decl.params.iter().find(|p| !self.env.is_type_param(dm, p)) {
+            let msg = format!("`type_shape` of a generic type needs parameters that are types, and `{}` of `{name}` is not", p.name);
+            return Err(Error::new(pos, msg));
+        }
+        let params: Vec<&str> = decl.params.iter().map(|p| p.name.as_str()).collect();
+        let parts: Vec<String> = match &decl.variants {
+            Some(vs) => vs.iter().map(|v| format!("{}/{}", v.name, v.fields.len())).collect(),
+            None => decl.fields.iter().map(|f| f.name.clone()).collect(),
+        };
+        let head = format!("{}({})", decl.kind(), params.join(","));
+        Ok(Some(std::iter::once(head).chain(parts).collect::<Vec<_>>().join(" ")))
     }
 
     /// The type `text`, code from expansion `expansion`, has here, where the

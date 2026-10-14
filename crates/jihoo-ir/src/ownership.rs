@@ -23,6 +23,14 @@
 //!   A `copy` of a value that is still used afterwards, or of a parameter,
 //!   is a view on the same terms, so the copy of a list that a `for` loop
 //!   walks costs nothing unless the body changes the list.
+//! - A value that is only *taken apart* (see [`takes`]): its owning parts read
+//!   out once each, in one block, where the value dies, gives the parts away:
+//!   they move out, and only the parts left are freed. So taking `(it, x)` out
+//!   of `Some((it, x))`, as a `for` loop over an iterator does each round,
+//!   copies nothing. A parameter taken apart is one only when the function
+//!   owns it: one that would copy a part it reads clones the parameter on
+//!   entry instead, and so has a consuming version (below) that copies
+//!   nothing.
 //! - Where a register's value dies without being moved (after its last use, on
 //!   a branch that does not use it again, or right after it is made if it is
 //!   never used) a `drop` frees it.
@@ -261,7 +269,8 @@ struct Cx<'a> {
 }
 
 /// The parameters (by position) that `f` must have values of its own of: it
-/// reads them and also changes, consumes or replaces them.
+/// reads them and also changes, consumes or replaces them, or takes them
+/// apart (see [`takes`]) and would have to copy a part it reads.
 fn cloned_params(f: &Function, owning: &mut Owning) -> Vec<usize> {
     let tracked: HashSet<Reg> = (0..f.regs.len() as u32).map(Reg).filter(|&r| owning.owns(f.reg_type(r))).collect();
     if tracked.is_empty() {
@@ -269,23 +278,35 @@ fn cloned_params(f: &Function, owning: &mut Owning) -> Vec<usize> {
     }
     let live_at_entry = liveness(f, &tracked, &HashMap::new())[0].clone();
     // A copy that stays a view of the parameter does not consume it.
-    let roots = views(f, &tracked);
+    let roots = views(f, &tracked, &HashSet::new());
+    let all: HashSet<Reg> = (0..f.params.len() as u32).map(Reg).collect();
+    let taken = takes(f, &tracked, owning, &all);
     (0..f.params.len())
         .filter(|&i| {
             let p = Reg(i as u32);
+            // A part read out of it that cannot stay a view, or that is consumed.
+            let copies_part = taken.moves.iter().any(|(_, d, s)| {
+                *s == p && (!roots.contains_key(d) || f.blocks.iter().flat_map(|b| &b.insts).any(|inst| consumes(inst, *d, &roots)))
+            });
             tracked.contains(&p)
                 && live_at_entry.contains(&p)
-                && f.blocks.iter().any(|b| {
+                && (copies_part || f.blocks.iter().any(|b| {
                     b.insts.iter().any(|inst| {
-                        let alias = matches!(inst, Inst::Copy { dst, .. } if roots.contains_key(dst));
-                        let mut i = inst.clone();
-                        (!alias && consumed(&mut i).into_iter().any(|r| *r == p))
+                        consumes(inst, p, &roots)
                             || defined(inst).contains(&p)
                             || changes(inst, p)
                     }) || matches!(b.term, Terminator::Ret(r) if r == p)
-                })
+                }))
         })
         .collect()
+}
+
+/// Whether `inst` consumes `r`; a copy that stays a view (a key of `roots`)
+/// does not.
+fn consumes(inst: &Inst, r: Reg, roots: &HashMap<Reg, Reg>) -> bool {
+    let alias = matches!(inst, Inst::Copy { dst, .. } if roots.contains_key(dst));
+    let mut i = inst.clone();
+    !alias && consumed(&mut i).into_iter().any(|c| *c == r)
 }
 
 /// Whether values of a type own memory: lists, strings and function values
@@ -294,18 +315,26 @@ fn cloned_params(f: &Function, owning: &mut Owning) -> Vec<usize> {
 pub struct Owning {
     members: HashMap<String, Vec<Type>>,
     memo: HashMap<String, bool>,
+    /// The fields of each struct, and the values of each variant of each enum.
+    fields: HashMap<String, Vec<Type>>,
+    variants: HashMap<String, Vec<Vec<Type>>>,
 }
 
 impl Owning {
     pub fn new(m: &Module) -> Owning {
         let mut members = HashMap::new();
+        let mut fields = HashMap::new();
+        let mut variants = HashMap::new();
         for s in &m.structs {
-            members.insert(s.name.clone(), s.fields.iter().map(|(_, t)| t.clone()).collect());
+            let ts: Vec<Type> = s.fields.iter().map(|(_, t)| t.clone()).collect();
+            members.insert(s.name.clone(), ts.clone());
+            fields.insert(s.name.clone(), ts);
         }
         for e in &m.enums {
             members.insert(e.name.clone(), e.variants.iter().flat_map(|(_, ts)| ts.clone()).collect());
+            variants.insert(e.name.clone(), e.variants.iter().map(|(_, ts)| ts.clone()).collect());
         }
-        Owning { members, memo: HashMap::new() }
+        Owning { members, memo: HashMap::new(), fields, variants }
     }
 
     pub fn owns(&mut self, t: &Type) -> bool {
@@ -535,7 +564,7 @@ fn projection(inst: &Inst) -> Option<(Reg, Reg)> {
 
 /// Which owning registers can stay views, and the root of each. `borrowed`
 /// registers (parameters) are never written, so they are roots that stay.
-fn views(f: &Function, tracked: &HashSet<Reg>) -> HashMap<Reg, Reg> {
+fn views(f: &Function, tracked: &HashSet<Reg>, moves: &HashSet<(usize, Reg, Reg)>) -> HashMap<Reg, Reg> {
     // Only a register written once, by a part read or a copy, and never
     // changed in place, can be a view. A part read starts one; so does a copy
     // of a parameter, or of a value still used after the copy (such as the
@@ -557,7 +586,9 @@ fn views(f: &Function, tracked: &HashSet<Reg>) -> HashMap<Reg, Reg> {
                 }
             }
             if let Some((dst, src)) = projection(inst) {
-                source.insert(dst, (src, true));
+                if !moves.contains(&(b, dst, src)) {
+                    source.insert(dst, (src, true));
+                }
             } else if let Inst::Copy { dst, src } = inst {
                 if dst != src {
                     source.insert(*dst, (*src, src.0 < params || live.contains(src)));
@@ -618,6 +649,190 @@ fn views(f: &Function, tracked: &HashSet<Reg>) -> HashMap<Reg, Reg> {
     }
 }
 
+/// A part of a value: field `index` of a struct, or value `index` of
+/// variant `variant` of an enum.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Part {
+    Field(u32),
+    Payload { variant: u32, index: u32 },
+}
+
+impl Part {
+    /// The instruction that reads this part of `src` into `dst`.
+    fn read(self, dst: Reg, src: Reg) -> Inst {
+        match self {
+            Part::Field(index) => Inst::Field { dst, src, index },
+            Part::Payload { variant, index } => Inst::Payload { dst, src, variant, index },
+        }
+    }
+}
+
+/// `inst` as a read of a part: what it reads into, from what, and which part.
+fn part_read(inst: &Inst) -> Option<(Reg, Reg, Part)> {
+    match *inst {
+        Inst::Field { dst, src, index } => Some((dst, src, Part::Field(index))),
+        Inst::Payload { dst, src, variant, index } => Some((dst, src, Part::Payload { variant, index })),
+        _ => None,
+    }
+}
+
+/// The values a function takes apart, and how.
+struct Takes {
+    /// The part reads that move their part out of the value, as (block, dst,
+    /// src).
+    moves: HashSet<(usize, Reg, Reg)>,
+    /// At the last use of each value taken apart, as (block, dst, src): the
+    /// owning parts still in it, which are freed instead of the value.
+    rest: HashMap<(usize, Reg, Reg), Vec<(Part, Type)>>,
+}
+
+/// The values of `f` that are only taken apart: values of the function's own
+/// (parameters only among `owned_params`, and nothing read out of or copied
+/// from another value, unless taken apart from it in turn) that nothing uses
+/// but `tag` and part reads, with the part reads in one block, each owning
+/// part read once, and the value dead after the last of them. Their owning
+/// parts can then move out: nothing can read the value again, so nothing can
+/// tell.
+fn takes(f: &Function, tracked: &HashSet<Reg>, owning: &mut Owning, owned_params: &HashSet<Reg>) -> Takes {
+    let params = f.params.len() as u32;
+    let base = liveness(f, tracked, &HashMap::new());
+    // Live registers after each instruction.
+    let mut live_after: Vec<Vec<HashSet<Reg>>> = Vec::with_capacity(f.blocks.len());
+    for (b, block) in f.blocks.iter().enumerate() {
+        let mut live = live_out(f, b, &base);
+        step_term(&block.term, &mut live, tracked, &HashMap::new());
+        let mut after = Vec::with_capacity(block.insts.len());
+        for inst in block.insts.iter().rev() {
+            after.push(live.clone());
+            step_back(inst, &mut live, tracked, &HashMap::new());
+        }
+        after.reverse();
+        live_after.push(after);
+    }
+    let mut used: HashMap<Reg, Vec<(usize, usize)>> = HashMap::new();
+    let mut defs: HashMap<Reg, Vec<(usize, usize)>> = HashMap::new();
+    let mut in_term = HashSet::new();
+    for (b, block) in f.blocks.iter().enumerate() {
+        for (i, inst) in block.insts.iter().enumerate() {
+            for r in uses(inst).into_iter().filter(|r| tracked.contains(r)) {
+                used.entry(r).or_default().push((b, i));
+            }
+            for d in defined(inst).into_iter().filter(|d| tracked.contains(d)) {
+                defs.entry(d).or_default().push((b, i));
+            }
+        }
+        in_term.extend(term_uses(&block.term));
+    }
+    let inst = |(b, i): (usize, usize)| &f.blocks[b].insts[i];
+
+    // The values whose uses allow it, with the block they are taken apart in.
+    let mut candidates: HashMap<Reg, usize> = HashMap::new();
+    'values: for (&r, uses) in &used {
+        if (r.0 < params && !owned_params.contains(&r)) || in_term.contains(&r) {
+            continue;
+        }
+        let mut block = None;
+        let mut owning_parts = HashSet::new();
+        let mut variant = None;
+        let mut reads = HashSet::new();
+        for &at in uses {
+            let read = match (inst(at), part_read(inst(at))) {
+                (Inst::Tag { .. }, _) => continue,
+                (_, Some((dst, src, part))) if src == r && dst != r => (dst, part),
+                _ => continue 'values,
+            };
+            if block.is_some_and(|b| b != at.0) || !reads.insert((read.0, r)) {
+                continue 'values;
+            }
+            block = Some(at.0);
+            if let Part::Payload { variant: v, .. } = read.1 {
+                if variant.is_some_and(|w| w != v) {
+                    continue 'values;
+                }
+                variant = Some(v);
+            }
+            if tracked.contains(&read.0) && !owning_parts.insert(read.1) {
+                continue 'values;
+            }
+        }
+        let Some(b) = block else { continue };
+        if owning_parts.is_empty() {
+            continue;
+        }
+        // Dead after its last use in the block, and not written in between.
+        let positions: Vec<usize> = uses.iter().filter(|(ub, _)| *ub == b).map(|(_, i)| *i).collect();
+        let (first, last) = (*positions.iter().min().unwrap(), *positions.iter().max().unwrap());
+        let written = defs.get(&r).is_some_and(|ds| ds.iter().any(|&(db, i)| db == b && i > first && i <= last));
+        if live_after[b][last].contains(&r) || written {
+            continue;
+        }
+        candidates.insert(r, b);
+    }
+    // Each of them must be a value of the function's own: made fresh, or taken
+    // out of another value taken apart.
+    loop {
+        let fresh = |r: &Reg| {
+            let ds = defs.get(r).map_or(&[][..], |ds| &ds[..]);
+            (r.0 < params || !ds.is_empty())
+                && ds.iter().all(|&at| match inst(at) {
+                    Inst::Copy { .. } | Inst::Load { .. } | Inst::Deref { .. } | Inst::Elem { .. } | Inst::GetPath { .. } => false,
+                    i => match part_read(i) {
+                        Some((_, src, _)) => candidates.get(&src) == Some(&at.0),
+                        None => true,
+                    },
+                })
+        };
+        let gone: Vec<Reg> = candidates.keys().filter(|r| !fresh(r)).copied().collect();
+        if gone.is_empty() {
+            break;
+        }
+        for r in gone {
+            candidates.remove(&r);
+        }
+    }
+
+    let mut taken = Takes { moves: HashSet::new(), rest: HashMap::new() };
+    for (&r, &b) in &candidates {
+        let mut parts = HashSet::new();
+        let mut variant = None;
+        let mut last = None;
+        for &(ub, i) in &used[&r] {
+            if ub != b {
+                continue;
+            }
+            let at = inst((ub, i));
+            let dst = defined(at)[0];
+            if last.is_none_or(|(j, _)| i > j) {
+                last = Some((i, dst));
+            }
+            if let Some((dst, _, part)) = part_read(at) {
+                if let Part::Payload { variant: v, .. } = part {
+                    variant = Some(v);
+                }
+                if tracked.contains(&dst) {
+                    taken.moves.insert((b, dst, r));
+                    parts.insert(part);
+                }
+            }
+        }
+        let all: Vec<(Part, Type)> = match (f.reg_type(r), variant) {
+            (Type::Enum(name), Some(v)) => owning.variants[name][v as usize]
+                .iter()
+                .enumerate()
+                .map(|(k, t)| (Part::Payload { variant: v, index: k as u32 }, t.clone()))
+                .collect(),
+            (Type::Struct(name), None) => {
+                owning.fields[name].iter().enumerate().map(|(k, t)| (Part::Field(k as u32), t.clone())).collect()
+            }
+            _ => unreachable!("parts are read out of a struct or an enum"),
+        };
+        let rest = all.into_iter().filter(|(p, t)| !parts.contains(p) && owning.owns(t)).collect();
+        let (_, dst) = last.unwrap();
+        taken.rest.insert((b, dst, r), rest);
+    }
+    taken
+}
+
 /// Inserts clones and drops into `f`. The parameters at `given` are handed
 /// over by the caller (in a consuming version); the others are borrowed.
 fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
@@ -628,6 +843,10 @@ fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
     }
     let cloned = cloned_params(f, owning);
     entry_without_predecessors(f);
+    // Parameters handed over, or copied on entry, are the function's own.
+    let owned_params: HashSet<Reg> =
+        (0..f.params.len()).filter(|i| given.contains(i) || cloned.contains(i)).map(|i| Reg(i as u32)).collect();
+    let taken = takes(f, &tracked, owning, &owned_params);
 
     // Parameters are borrowed. One whose value the function changes, consumes
     // or replaces while it still reads it gets a copy of its own on entry,
@@ -654,10 +873,10 @@ fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
     //
     // The read goes to a view of its own, which the copy is made from, so the
     // value read from stays alive until the copy is made.
-    let mut roots = views(f, &tracked);
+    let mut roots = views(f, &tracked, &taken.moves);
     let mut new_regs = Vec::new();
     let mut next = f.regs.len() as u32;
-    for b in &mut f.blocks {
+    for (k, b) in f.blocks.iter_mut().enumerate() {
         let mut insts = Vec::with_capacity(b.insts.len());
         for mut inst in std::mem::take(&mut b.insts) {
             // What a cell holds can change through any other holder of the
@@ -667,7 +886,7 @@ fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
                 _ => None,
             };
             let copy = projection(&inst)
-                .filter(|(d, _)| tracked.contains(d) && !roots.contains_key(d))
+                .filter(|&(d, s)| tracked.contains(&d) && !roots.contains_key(&d) && !taken.moves.contains(&(k, d, s)))
                 .or(read_from_cell.filter(|(d, _)| tracked.contains(d)));
             match copy {
                 Some((d, src)) => {
@@ -773,9 +992,23 @@ fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
             let mut dying: Vec<Reg> =
                 before.into_iter().filter(|r| owned.contains(r) && !live_after.contains(r) && !moved.contains(r)).collect();
             dying.sort_by_key(|r| r.0);
+            let dst = defined(&inst).first().copied();
             insts.extend(clones);
             insts.push(inst);
-            insts.extend(dying.into_iter().map(|src| Inst::Drop { src }));
+            for src in dying {
+                // A value taken apart frees only the parts left in it.
+                match dst.and_then(|d| taken.rest.get(&(b, d, src))) {
+                    Some(parts) => {
+                        for (part, ty) in parts {
+                            let t = Reg(f.regs.len() as u32);
+                            f.regs.push(ty.clone());
+                            insts.push(part.read(t, src));
+                            insts.push(Inst::Drop { src: t });
+                        }
+                    }
+                    None => insts.push(Inst::Drop { src }),
+                }
+            }
         }
         // `ret` gives its value away: a value of its own moves, a borrowed one
         // or a view is copied. Everything else still owned dies here.

@@ -13,7 +13,7 @@
 //! (`meta.derive!`) and `heavier`, a function bounded by `Weigh`, called as
 //! methods (`x.weigh()`), through the trait (`Weigh.twice(x)`) and the type
 //! (`S0.unit()`), with inferred type arguments, and through `<`, `compare`
-//! and `hash_of`. The
+//! and `hash_of`; and an `Iterator`, `Rep(T)`, that `for` loops walk. The
 //! program prints values with `out` as it goes and the state of its variables
 //! at the end (see `tests/common/mod.rs`). Programs never trap: divisors are
 //! made odd and indexes are taken modulo the length, so the VM and LLVM must
@@ -764,6 +764,10 @@ impl Gen {
             self.pipeline();
             return;
         }
+        if self.traits && depth > 0 && self.loops < 2 && !self.vars.is_empty() && self.rng.chance(4) {
+            self.rep_loop(depth);
+            return;
+        }
         match self.rng.below(27) {
             24 => self.let_pattern(),
             25 | 26 if depth > 0 => self.tuple_match(depth),
@@ -935,6 +939,24 @@ impl Gen {
             self.vars.push(Var { name: i, ty: Ty::I64, mutable: false });
             self.vars.push(Var { name: x, ty: el, mutable: true });
         }
+        self.loops += 1;
+        self.block(depth - 1);
+        self.loops -= 1;
+        self.vars.truncate(scope);
+        self.line("}");
+    }
+
+    /// A `for` loop over an iterator, `Rep(T)`, that holds a copy of a
+    /// variable's value and gives it with each item.
+    fn rep_loop(&mut self, depth: u32) {
+        let scope = self.vars.len();
+        let v = self.rng.below(self.vars.len());
+        let (held, ty) = (self.vars[v].name.clone(), self.vars[v].ty.clone());
+        let (i, x) = (self.fresh("i"), self.fresh("x"));
+        let n = self.rng.below(4);
+        self.line(&format!("for {i}, {x} in (Rep({}) {{ x: {held}, n: {n} }}) {{", self.ty_name(&ty)));
+        self.vars.push(Var { name: i, ty: Ty::I64, mutable: false });
+        self.vars.push(Var { name: x, ty: Ty::Tuple(vec![Ty::I64, ty]), mutable: true });
         self.loops += 1;
         self.block(depth - 1);
         self.loops -= 1;
@@ -1288,6 +1310,25 @@ impl Gen {
             if !derived.is_empty() {
                 self.line(&format!("meta.derive!({}, S{k})", derived.join(", ")));
             }
+        }
+        // An iterator over any type, which gives its value away with each item
+        // and keeps it: natively, a part taken out of `next`'s result.
+        for l in [
+            "struct Rep(T: type) {",
+            "    x: T",
+            "    n: i64",
+            "}",
+            "impl(T: type) Iterator for Rep(T) {",
+            "    type Item = (i64, T)",
+            "    fn next(r: Rep(T)) -> Option((Rep(T), Self.Item)) {",
+            "        if r.n <= 0 {",
+            "            return Option.None",
+            "        }",
+            "        return Option.Some((Rep(T) { x: r.x, n: r.n - 1 }, (r.n, r.x)))",
+            "    }",
+            "}",
+        ] {
+            self.line(l);
         }
         for l in [
             "fn heavier(comptime T: Weigh, a: T, b: T) -> i64 {",

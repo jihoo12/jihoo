@@ -1,5 +1,5 @@
 // `meta.derive!(Show, ...)` writes a struct as `T { a: 1 }` and a variant as
-// `V(1, 2)`; derived `Ord`s sort.
+// `V(1, 2)`; derived `Ord`s sort, generic ones too.
 import lists
 import meta
 
@@ -17,6 +17,13 @@ enum Token {
 meta.derive!(Show, Ord, Item)
 meta.derive!(Show, Ord, Token)
 
+struct Tagged(T: type) {
+    tag: str
+    value: T
+}
+
+meta.derive!(Show, Ord, Tagged)
+
 fn entry() -> i64 {
     let item = Item { name: "pen", count: 3 }
     out(len(item.show()))                     // 28: Item { name: pen, count: 3 }
@@ -28,5 +35,10 @@ fn entry() -> i64 {
     for t in lists.sort(tokens) {
         out(len(t.show()))                    // Num(4) 6, Op(+, 1) 8, Op(+, 2) 8, End 3
     }
+    let ts: [Tagged([i64])] = [Tagged([i64]) { tag: "b", value: [1] }, Tagged([i64]) { tag: "a", value: [2, 3] }]
+    let ts = lists.sort(ts)
+    out(len(ts[0].value))                     // 2: "a" first
+    out(len(ts.show()))                       // [Tagged { tag: a, value: [2, 3] }, ...]
+    out(len(Tagged(Item) { tag: "i", value: item }.show()))
     return len(Token.Op("-", 10).show())      // 9
 }

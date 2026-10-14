@@ -43,6 +43,57 @@ cannot have `comptime` parameters.
 A trait is an item like a struct: it may be `pub`, and other modules name it as
 `alias.Name`.
 
+## Associated types
+
+A trait can also list types, `type Name`, that each impl names with
+`type Name = ...`. Its functions write them `Self.Name`:
+
+```jihoo
+trait Container {
+    type Item
+    fn first(c: Self) -> Self.Item
+}
+
+struct Bag { xs: [str] }
+
+impl Container for Bag {
+    type Item = str
+    fn first(b: Bag) -> str { return b.xs[0] }
+}
+```
+
+`T.Name` is the type for any type `T` with such an impl, written as a type
+anywhere a type can be: `Bag.Item` is `str`, and a function bounded by the
+trait can name the type of its parameter's: `fn first_of(comptime C:
+Container, c: C) -> C.Item`. The trait that gives it is the one the module
+can see that has a type of that name and an impl for `T`; if two have one,
+the type is an error. An impl must give every type of its trait, and a
+generic impl may give one in terms of its parameters (`type Item = T`).
+
+## Supertraits
+
+`trait Name: Other + More` asks every type with `Name` to have `Other` and
+`More` too, so `Name`'s default bodies, and code bounded by `Name`, can use
+their functions:
+
+```jihoo
+trait Named {
+    fn name(x: Self) -> str
+}
+
+trait Greet: Named {
+    fn greet(x: Self) -> str { return "hi " + x.name() }
+}
+
+impl Named for P { fn name(p: P) -> str { return p.n } }
+impl Greet for P {}                         // an error without the impl of `Named`
+```
+
+An impl of `Greet` for a type without a `Named` is an error where it is
+declared, or, for a generic impl, where it is used for such a type. Code that
+can see `Greet` can call `Named`'s functions too, even from a module that
+does not import `Named`'s.
+
 ## Impls
 
 `impl Trait for Type { ... }` gives the trait's functions for `Type`. It must
@@ -127,7 +178,7 @@ Bodies are still checked per instance, as for every generic function.
 
 ## The standard traits
 
-The prelude declares three traits, so every module can use them without an
+The prelude declares four traits, so every module can use them without an
 import.
 
 ### `Ord`
@@ -198,6 +249,49 @@ numbers, `bool` and `str` (the text itself), and for lists (`[1, 2]`),
 `Option` (`Some(1)`, `None`), `Result` (`Ok(1)`, `Err(why)`) and tuples
 (`(1, a)`) whose parts have one.
 
+### `Iterator`
+
+Values that give a sequence of items, one at a time, which a
+[`for`](control-flow.md#for) loop walks:
+
+```jihoo
+pub trait Iterator {
+    type Item
+    fn next(it: Self) -> Option((Self, Self.Item))
+}
+```
+
+`next` takes the iterator and gives what is left of it with the next item,
+or `None` at the end. Like every value, an iterator is not changed in place:
+`next` returns the rest, as the caller of any function that changes a value
+gets the new one back.
+
+```jihoo
+struct Countdown { n: i64 }
+
+impl Iterator for Countdown {
+    type Item = i64
+    fn next(c: Countdown) -> Option((Countdown, i64)) {
+        if c.n == 0 { return Option.None }
+        return Option.Some((Countdown { n: c.n - 1 }, c.n))
+    }
+}
+
+for x in (Countdown { n: 3 }) { print(x) }       // 3, 2, 1
+
+fn total(comptime I: Iterator, it: I) -> I.Item {
+    let s: I.Item = 0
+    for x in it { s = s + x }
+    return s
+}
+```
+
+Natively, the iterator and the item are moved out of `next`'s result, so an
+iterator that holds a list walks it without copying it
+([Lists](lists.md#lists-are-values)). The prelude has no impls of
+`Iterator`: the types it would be for, lists, arrays and strings, `for`
+walks already.
+
 ## Deriving
 
 Writing `Show`, `Hash` or `Ord` field by field is mechanical, so the
@@ -224,8 +318,19 @@ meta.derive!(Show, Ord, Shape)
 Each part needs the trait itself; a part without one is an error where the
 impl is first used, naming the part's type. The impls are written in the
 calling module, as if by hand, so they follow the same rules as one written
-there. `T` may be an instance of a generic type, `meta.derive!(Show, Pair(i64))`;
-a generic impl for every `Pair(T)` is written by hand. The macro reads the
+there. `T` may be an instance of a generic type, `meta.derive!(Show, Pair(i64))`,
+or a generic type's name, for a generic impl that asks the trait of every
+parameter:
+
+```jihoo
+struct Pair(A: type, B: type) { a: A, b: B }
+
+meta.derive!(Show, Ord, Pair)      // impl(A: Show, B: Show) Show for Pair(A, B), and Ord
+
+print(Pair(i64, str) { a: 1, b: "x" })    // Pair { a: 1, b: x }
+```
+
+A generic type shows as its name alone, without its arguments. The macro reads the
 type with `meta.shape`, which works where the macro is called, and since
 `meta` only runs while compiling, deriving costs a program nothing and works
 in freestanding ones for `Hash` and `Ord`.
