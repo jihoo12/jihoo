@@ -114,6 +114,7 @@ impl Display for Inst {
                 write!(f, "{dst} = struct ${}({})", types::struct_name_jir(name), list(fields))
             }
             Inst::Field { dst, src, index } => write!(f, "{dst} = field {src}, {index}"),
+            Inst::Take { dst, src, index } => write!(f, "{dst} = take {src}, {index}"),
             Inst::SetField { dst, src, index, value } => {
                 write!(f, "{dst} = setfield {src}, {index}, {value}")
             }

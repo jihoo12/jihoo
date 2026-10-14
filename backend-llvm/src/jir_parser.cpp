@@ -438,8 +438,8 @@ Inst parse_assign(Line &l) {
     inst.op = Op::Struct;
     inst.text = s.text;
     inst.args = l.reg_list();
-  } else if (w == "field" || w == "fieldptr") {
-    inst.op = w == "field" ? Op::Field : Op::FieldPtr;
+  } else if (w == "field" || w == "take" || w == "fieldptr") {
+    inst.op = w == "field" ? Op::Field : w == "take" ? Op::Take : Op::FieldPtr;
     inst.args = {l.reg()};
     l.punct(",");
     inst.imm = l.index();

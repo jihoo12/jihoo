@@ -26,8 +26,9 @@
 //! With lists (`vm_and_native_agree_on_random_list_programs`), programs also
 //! hold lists `[T]` and strings in variables, fields and elements, push to and
 //! pop from lists, slice, join and compare them, make text with `to_str`, and
-//! pass them to functions that change their copy; they also hold `ref`s and
-//! `cell`s, whose copies share (and, for cells, see each other's changes).
+//! pass them to functions that change their copy, also as `v.f = grown(v.f)`;
+//! they also hold `ref`s and `cell`s, whose copies share (and, for cells, see
+//! each other's changes).
 //! They run `lists.fuse!` pipelines of `map` and `filter` closures ending in
 //! `sum`, `count` or `collect`, and the same pipelines as loops written out,
 //! whose results must be the same.
@@ -181,6 +182,11 @@ impl Gen {
     fn program(mut self) -> String {
         if self.lists {
             self.line("import lists");
+            // Changes its copy of a list: `v.f = grown(v.f)` moves the field
+            // out and back in natively (`take`).
+            for l in ["fn grown(comptime T: type, xs: [T]) -> [T] {", "    push(xs, xs[0])", "    return xs", "}"] {
+                self.line(l);
+            }
         }
         self.traits = self.rng.chance(60);
         if self.traits {
@@ -1012,7 +1018,9 @@ impl Gen {
         let (v, path, e) = lists[self.rng.below(lists.len())].clone();
         let constant = self.rng.chance(50);
         let target = self.place(v, &path, constant);
-        if self.rng.chance(60) {
+        if self.rng.chance(25) {
+            self.line(&format!("{target} = grown({target})"));
+        } else if self.rng.chance(60) {
             let x = self.expr(&e, 2);
             self.line(&format!("push({target}, {x})"));
         } else {

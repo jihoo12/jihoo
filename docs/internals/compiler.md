@@ -99,8 +99,9 @@ Native lists have no GC. `crates/jihoo-ir/src/ownership.rs` runs on the
 finished JIR of a native module and decides, from liveness, where an owning
 value (a list, or a value holding one) moves, where it is cloned, and where
 it is dropped; it also makes the consuming versions of functions (`f.own`),
-and moves the parts out of a value that is only taken apart (`Some((rest,
-x))`), freeing just the parts left in it.
+moves the parts out of a value that is only taken apart (`Some((rest,
+x))`), freeing just the parts left in it, and moves a field out of a struct
+with `take` where the field is written again before anything reads it.
 It needs no borrow checker because values never share memory: pointers may
 not reach owning values (checked in `place.rs`), and references into values
 are [paths](../language/paths.md) (`paths.rs`), which hold indices.

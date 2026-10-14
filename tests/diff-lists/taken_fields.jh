@@ -1,0 +1,110 @@
+// Fields taken out of a struct that is used again: natively a field read
+// that would be copied moves out (`take`) when nothing reads the field before
+// it is written again or the struct dies, and is copied otherwise. Every case
+// here must print the same on the VM.
+
+struct Bag {
+    name: str
+    xs: [i64]
+    n: i64
+}
+
+struct Shelf {
+    left: Bag
+    right: Bag
+}
+
+fn grow(xs: [i64]) -> [i64] {
+    push(xs, len(xs))
+    return xs
+}
+
+fn sum(xs: [i64]) -> i64 {
+    let s = 0
+    for x in xs {
+        s = s + x
+    }
+    return s
+}
+
+fn bag(name: str, n: i64) -> Bag {
+    let xs: [i64] = []
+    for i in 0..n {
+        push(xs, i)
+    }
+    return Bag { name: name, xs: xs, n: n }
+}
+
+// The field is replaced by a function of itself: moved out and back.
+fn replaced(b: Bag, rounds: i64) -> Bag {
+    for i in 0..rounds {
+        b.xs = grow(b.xs)
+    }
+    return b
+}
+
+// Replaced on one way only: the other reads the old field, so it is copied.
+fn sometimes(b: Bag, keep: bool) -> i64 {
+    let ys = grow(b.xs)
+    if keep {
+        return sum(b.xs) * 1000 + sum(ys)
+    }
+    b.xs = ys
+    return sum(b.xs)
+}
+
+// Read again before it is written: copied.
+fn read_again(b: Bag) -> i64 {
+    let ys = grow(b.xs)
+    let before = len(b.xs)
+    b.xs = ys
+    return before * 100 + len(b.xs)
+}
+
+// Another field stays a view while one is taken.
+fn two_fields(b: Bag) -> i64 {
+    let name = b.name
+    b.xs = grow(b.xs)
+    return len(name) * 100 + len(b.xs)
+}
+
+// A field of a field, and the struct dies with the field empty.
+fn nested(s: Shelf) -> i64 {
+    s.left.xs = grow(s.left.xs)
+    let r = s.right
+    r.xs = grow(r.xs)
+    return sum(s.left.xs) + sum(r.xs) * 10
+}
+
+// The struct returned after the field moved out and back in.
+fn swap_names(s: Shelf) -> Shelf {
+    let a = s.left.name
+    s.left.name = s.right.name
+    s.right.name = a
+    return s
+}
+
+fn entry() -> i64 {
+    let b = replaced(bag("b", 3), 4)
+    out(len(b.xs) * 100 + sum(b.xs))
+    out(len(b.name))
+    out(sometimes(bag("s", 3), true))
+    out(sometimes(bag("s", 3), false))
+    out(read_again(bag("r", 5)))
+    out(two_fields(bag("two", 2)))
+    let shelf = Shelf { left: bag("l", 2), right: bag("r", 3) }
+    out(nested(shelf))
+    // The caller's value is unchanged.
+    out(sum(shelf.left.xs) + len(shelf.right.xs))
+    let swapped = swap_names(Shelf { left: bag("left", 1), right: bag("rt", 1) })
+    out(len(swapped.left.name) * 10 + len(swapped.right.name))
+
+    // In a loop of the caller's own, with the struct read after it.
+    let c = bag("c", 0)
+    for i in 0..1000 {
+        c.xs = grow(c.xs)
+        c.n = c.n + 1
+    }
+    out(len(c.xs) + c.n)
+    return 0
+}

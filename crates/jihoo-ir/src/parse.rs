@@ -431,12 +431,14 @@ fn assign(l: &mut Line, dst: Reg) -> Result<Inst> {
             Tok::Named(name) => Inst::Struct { dst, name, fields: l.regs()? },
             t => return l.err(format!("expected a struct like $Name, found {t}")),
         },
-        "field" | "fieldptr" => {
+        "field" | "take" | "fieldptr" => {
             let src = l.reg()?;
             l.punct(",")?;
             let index = l.index()?;
             if op == "field" {
                 Inst::Field { dst, src, index }
+            } else if op == "take" {
+                Inst::Take { dst, src, index }
             } else {
                 Inst::FieldPtr { dst, ptr: src, index }
             }

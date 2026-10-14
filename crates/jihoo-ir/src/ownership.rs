@@ -27,7 +27,14 @@
 //!   out once each, in one block, where the value dies, gives the parts away:
 //!   they move out, and only the parts left are freed. So taking `(it, x)` out
 //!   of `Some((it, x))`, as a `for` loop over an iterator does each round,
-//!   copies nothing. A parameter taken apart is one only when the function
+//!   copies nothing.
+//! - A field read out of a struct that is used again is *taken* (`take`, see
+//!   [`field_takes`]) when the read would otherwise be copied and the struct's
+//!   field is not read again before it is written or the struct dies: the
+//!   field moves out and the struct keeps it empty. So `m.inner = f(m.inner)`
+//!   copies nothing.
+//!
+//!   A parameter taken apart is one only when the function
 //!   owns it: one that would copy a part it reads clones the parameter on
 //!   entry instead, and so has a consuming version (below) that copies
 //!   nothing.
@@ -69,13 +76,18 @@ pub fn insert(m: &mut Module) {
     for f in &mut m.funcs {
         split_params(f, &mut owning);
     }
-    // The parameters each function clones on entry, by position.
+    // The parameters each function clones on entry, by position. Taking
+    // fields does not change them: it takes a parameter's only when the
+    // function clones the parameter anyway.
     let mut cloning: HashMap<String, Vec<usize>> = HashMap::new();
     for f in &m.funcs {
         let c = cloned_params(f, &mut owning);
         if !c.is_empty() {
             cloning.insert(f.name.clone(), c);
         }
+    }
+    for f in &mut m.funcs {
+        field_takes(f, &mut owning, &cloning);
     }
     let originals: HashMap<String, Function> =
         m.funcs.iter().filter(|f| cloning.contains_key(&f.name)).map(|f| (f.name.clone(), f.clone())).collect();
@@ -406,6 +418,7 @@ fn borrowed(inst: &Inst) -> Vec<Reg> {
         | Cast { src, .. }
         | Bitcast { src, .. }
         | Field { src, .. }
+        | Take { src, .. }
         | Tag { src, .. }
         | Payload { src, .. }
         | Deref { src, .. }
@@ -461,7 +474,7 @@ fn defined(inst: &Inst) -> Vec<Reg> {
         CellSet { .. } => vec![],
         Copy { dst, src } if dst == src => vec![],
         Push { root, .. } => vec![*root],
-        Pop { dst, root, .. } => vec![*dst, *root],
+        Pop { dst, root, .. } | Take { dst, src: root, .. } => vec![*dst, *root],
         Select { dst, cases, .. } => [*dst]
             .into_iter()
             .chain(cases.iter().filter_map(|c| match c {
@@ -480,7 +493,7 @@ fn defined(inst: &Inst) -> Vec<Reg> {
 fn changes(inst: &Inst, r: Reg) -> bool {
     use Inst::*;
     match inst {
-        Push { root, .. } | Pop { root, .. } => *root == r,
+        Push { root, .. } | Pop { root, .. } | Take { src: root, .. } => *root == r,
         SetField { dst, src, .. } | SetElem { dst, src, .. } | SetPath { dst, src, .. } => *dst == r && *src == r,
         _ => false,
     }
@@ -647,6 +660,143 @@ fn views(f: &Function, tracked: &HashSet<Reg>, moves: &HashSet<(usize, Reg, Reg)
         }
         excluded.extend(conflicts);
     }
+}
+
+/// Turns reads of a struct's field that would be copied into `take`s where
+/// that cannot be told apart: the struct is the function's own (not a view,
+/// and a parameter only if the function copies it anyway), no view of it is
+/// still used, and on every way on from the read the field is written whole,
+/// or the struct is written or dies, before anything reads the field or the
+/// whole struct. The struct keeps the field empty meanwhile, which writing
+/// it or dropping the struct frees nothing of.
+fn field_takes(f: &mut Function, owning: &mut Owning, cloning: &HashMap<String, Vec<usize>>) {
+    let tracked: HashSet<Reg> = (0..f.regs.len() as u32).map(Reg).filter(|&r| owning.owns(f.reg_type(r))).collect();
+    if tracked.is_empty() {
+        return;
+    }
+    let params = f.params.len() as u32;
+    let roots = views(f, &tracked, &HashSet::new());
+    let copied_params = cloned_params(f, owning);
+    let live_in = liveness(f, &tracked, &roots);
+    let mut found = Vec::new();
+    for (b, block) in f.blocks.iter().enumerate() {
+        let mut live = live_out(f, b, &live_in);
+        step_term(&block.term, &mut live, &tracked, &roots);
+        let mut after = Vec::with_capacity(block.insts.len());
+        for inst in block.insts.iter().rev() {
+            after.push(live.clone());
+            step_back(inst, &mut live, &tracked, &roots);
+        }
+        after.reverse();
+        for (i, inst) in block.insts.iter().enumerate() {
+            let Inst::Field { dst, src, index } = *inst else { continue };
+            if !tracked.contains(&dst) || dst == src || roots.contains_key(&src) {
+                continue;
+            }
+            if src.0 < params && !copied_params.contains(&(src.0 as usize)) {
+                continue;
+            }
+            // Worth it only where the field would be copied: it cannot stay a
+            // view, or it is consumed, or handed to a function that copies it.
+            let copied = !roots.contains_key(&dst)
+                || f.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
+                    consumes(inst, dst, &roots)
+                        || matches!(inst, Inst::Call { func, args, .. }
+                            if cloning.get(func.as_str()).is_some_and(|ps| ps.iter().any(|&p| args[p] == dst)))
+                });
+            let viewed = after[i].iter().any(|v| *v != dst && roots.get(v) == Some(&src));
+            if copied && !viewed && field_unread(f, b, i, src, index) {
+                found.push((b, i));
+            }
+        }
+    }
+    for (b, i) in found {
+        let Inst::Field { dst, src, index } = f.blocks[b].insts[i] else { unreachable!() };
+        f.blocks[b].insts[i] = Inst::Take { dst, src, index };
+    }
+}
+
+/// Whether, on every way on from instruction `at` of block `block`, field
+/// `k` of struct `r` is written whole, or `r` is written or dies, before the
+/// field or the whole of `r` is read.
+fn field_unread(f: &Function, block: usize, at: usize, r: Reg, k: u32) -> bool {
+    enum Step {
+        Next,
+        Fine,
+        Read,
+    }
+    let other = |path: &[PathStep]| matches!(path.first(), Some(PathStep::Field(j)) if *j != k);
+    let step = |inst: &Inst| -> Step {
+        match inst {
+            Inst::Field { src, index, .. } | Inst::Take { src, index, .. } if *src == r => {
+                if *index == k {
+                    Step::Read
+                } else {
+                    Step::Next
+                }
+            }
+            Inst::SetField { dst, src, index, value } if *dst == r && *src == r && *value != r => {
+                if *index == k {
+                    Step::Fine
+                } else {
+                    Step::Next
+                }
+            }
+            Inst::SetPath { dst, src, path, value } if *dst == r && *src == r && *value != r && !path_regs(path).any(|x| x == r) => {
+                match path.as_slice() {
+                    [PathStep::Field(j)] if *j == k => Step::Fine,
+                    _ if other(path) => Step::Next,
+                    _ => Step::Read,
+                }
+            }
+            Inst::GetPath { src, path, .. } if *src == r && !path_regs(path).any(|x| x == r) => {
+                if other(path) {
+                    Step::Next
+                } else {
+                    Step::Read
+                }
+            }
+            Inst::Push { root, path, value } | Inst::Pop { root, path, dst: value } if *root == r && *value != r => {
+                if other(path) && !path_regs(path).any(|x| x == r) {
+                    Step::Next
+                } else {
+                    Step::Read
+                }
+            }
+            Inst::Drop { src } if *src == r => Step::Fine,
+            inst if uses(inst).contains(&r) => Step::Read,
+            inst if defined(inst).contains(&r) => Step::Fine,
+            _ => Step::Next,
+        }
+    };
+    let mut seen = HashSet::new();
+    let mut todo = vec![(block, at + 1)];
+    while let Some((b, from)) = todo.pop() {
+        let mut fine = false;
+        for inst in &f.blocks[b].insts[from..] {
+            match step(inst) {
+                Step::Next => {}
+                Step::Fine => {
+                    fine = true;
+                    break;
+                }
+                Step::Read => return false,
+            }
+        }
+        if fine {
+            continue;
+        }
+        let term = &f.blocks[b].term;
+        if term_uses(term).contains(&r) {
+            return false;
+        }
+        for s in term.successors() {
+            if seen.insert(s.0 as usize) {
+                todo.push((s.0 as usize, 0));
+            }
+        }
+    }
+    true
 }
 
 /// A part of a value: field `index` of a struct, or value `index` of

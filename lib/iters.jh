@@ -14,10 +14,7 @@
 // as it was and gives what is left. `range`, `take`, `count` and `sum` work
 // in every profile; the others need closures or lists, which freestanding
 // programs do not have.
-//
-// An adapter's `next` takes its iterator apart first (`let inner = m.inner`)
-// and builds the rest anew, so natively the inner iterator moves from one
-// round to the next instead of being copied.
+
 
 // The integers from `lo` up to but not including `hi`.
 pub struct Range {

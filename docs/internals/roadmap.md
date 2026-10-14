@@ -107,6 +107,11 @@
     parameter is only taken apart gets a consuming version, so iterator
     adapters (`lib/iters.jh`: `map`, `filter`, `take`, `zip`) copy nothing
     either. `meta.derive!` for a generic type's name writes generic impls.
+32. Moving a field out of a struct that is used again (JIR 16: `take`):
+    natively a field read that would be copied moves out when nothing reads
+    the field before it is written or the struct dies, and the struct keeps
+    the field empty. So `b.xs = grow(b.xs)` and an iterator's
+    `s.inner = rest` copy nothing.
 
 ## Next
 
@@ -123,9 +128,9 @@
 - **Traits** ([design](traits.md)): dynamic dispatch, when a program needs
   it.
 - **Memory:** a report of where native code copies lists (`jihoo build
-  --cost`), which needs source positions in JIR; moving a field out of a
-  value that is used again afterwards (only values that are taken apart
-  give their parts away now).
+  --cost`), which needs source positions in JIR; taking parts reached by a
+  path (`s.left.xs = f(s.left.xs)`), payloads and list elements, as `take`
+  does for fields.
 
 - **Floats:** `fma`, which IEEE also defines exactly, but freestanding code on
   x86_64 would need an exact software version.

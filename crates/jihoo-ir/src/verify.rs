@@ -358,7 +358,9 @@ impl Cx<'_> {
                             expect(dst, &Type::Struct(name.clone()))
                         }
                     }
-                    Inst::Field { dst, src, index } => expect(dst, self.field(ty(src)?, *index)?),
+                    Inst::Field { dst, src, index } | Inst::Take { dst, src, index } => {
+                        expect(dst, self.field(ty(src)?, *index)?)
+                    }
                     Inst::Variant { dst, index, fields } => {
                         let payload = self.variant(ty(dst)?, *index)?;
                         if payload.len() != fields.len() {

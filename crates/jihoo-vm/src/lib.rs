@@ -629,7 +629,9 @@ impl<'m> Vm<'m> {
                 let r = self.alloc_agg(values);
                 self.set(*dst, Value::Agg(r));
             }
-            Inst::Field { dst, src, index } => {
+            // Natively `take` leaves the field empty; nothing reads it here
+            // before it is written again.
+            Inst::Field { dst, src, index } | Inst::Take { dst, src, index } => {
                 let r = self.agg_ref(*src)?;
                 let v = self.heap.items(r)[*index as usize];
                 let v = self.share(v);

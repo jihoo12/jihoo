@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 15)
+# JIR — jihoo IR text format (version 16)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -45,6 +45,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 13 | `chan`, `send`, `recv` and `select` in native modules, on lib/channel.jh |
 | 14 | `codetext`, code as text and text as code at compile time |
 | 15 | `typeof`, and `type` holes in `quote` |
+| 16 | `take`, moving a field out of a struct that is used again |
 
 ## Example
 
@@ -292,6 +293,7 @@ The result type is what the destination register must be declared as.
 |-------------------------------------|-----------------------|--------|---------|
 | `%d = struct $S(%a, %b, ...)`       | every field, in order | `$S`   | build a struct |
 | `%d = field %s, N`                  | `$S`                  | type of field N | read a field |
+| `%d = take %s, N`                   | `$S`                  | type of field N | move a field out (native; see [Ownership](#ownership-native-lists)) |
 | `%d = setfield %s, N, %v`           | `$S`, type of field N | `$S`   | copy of `%s` with field N replaced |
 | `%d = getpath %s, (step, ...)`      | a struct or array; each step `field N` or `elem %i` (`%i: i64`) | type at the end of the path | read a nested part; elements are bounds-checked |
 | `%d = setpath %s, (step, ...), %v`  | as `getpath`, then the type at the end of the path | type of `%s` | copy of `%s` with the nested part replaced |
@@ -432,7 +434,10 @@ In a native module:
   *view* that shares the memory of the value it was read from; the value must
   outlive the view and not change while the view is used, and the view must
   not be dropped. `clone %v, %v` makes a view a value of its own.
-- `pop` moves the element out of the list.
+- `pop` moves the element out of the list, and `take` a field out of a struct,
+  which keeps the field empty: dropping `%s` or writing the field frees
+  nothing of it. The pass makes `take` where the field is not read again
+  before it is written or `%s` dies; the VM reads the field.
 - Call arguments are borrowed: the callee must not change, move or drop its
   parameters (it clones one first), and the caller still owns its argument.
   The pass also makes a *consuming* version `@f.own` of a function that

@@ -436,9 +436,10 @@ made on the way:
   would copy a part, now clones the parameter on entry instead, which makes
   it a function with a consuming version (`f.own`); a caller whose argument
   is at its last use, as a `for` loop's is, hands it over, and the parts move
-  out of it as out of any value taken apart. The adapters take their
-  iterator apart first (`let inner = m.inner`) and build the rest anew, which
-  gives the pass that shape.
+  out of it as out of any value taken apart. The adapters took their
+  iterator apart first (`let inner = m.inner`) to give the pass that shape;
+  since JIR 16 a field replaced after it is read (`s.inner = rest`) moves out
+  with `take`, so either way of writing `next` copies nothing.
 
 `associated_types_and_iterators` and `associated_type_errors` in
 `crates/jihoo-sema/src/tests.rs`, `tests/diff/iterators.jh` and

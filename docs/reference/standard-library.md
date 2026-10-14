@@ -265,10 +265,9 @@ fn main() {
 | `fold(it, init, f: fn(A, I.Item) -> A) -> A` | the items folded into `init` |
 | `count(it) -> i64`, `sum(it) -> I.Item` | how many items, and their sum |
 
-An iterator is a value: walking one leaves it as it was. Each adapter's
-`next` takes its iterator apart and builds the rest anew, so natively the
-inner iterator, and a list it walks, moves from one round to the next and is
-never copied. `range`, `take`, `count` and `sum` work in freestanding programs
+An iterator is a value: walking one leaves it as it was. Natively the inner
+iterator of an adapter, and a list it walks, moves from one round to the
+next and is never copied. `range`, `take`, `count` and `sum` work in freestanding programs
 too; the others need closures or lists.
 
 ## meta
