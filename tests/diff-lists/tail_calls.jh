@@ -1,6 +1,7 @@
-// A function's calls of itself in tail position are jumps, so they run in
-// constant stack in every profile; natively the lists they pass are moved
-// into the parameters and the rest freed before each jump.
+// Calls in tail position run in constant stack in every profile: a
+// function's calls of itself are jumps, and calls of others tail calls.
+// Natively the lists they pass are handed over to the callee, or moved into
+// the parameters, and the rest is freed before each jump or tail call.
 
 // The sum of `xs` from `i` on, with the list passed along.
 fn sum_from(xs: [i64], i: i64, acc: i64) -> i64 {
@@ -60,6 +61,63 @@ fn last(comptime T: type, xs: [T], i: i64) -> T {
     return last(T, xs, i + 1)
 }
 
+// A state machine over a list: states with different parameters pass the
+// list, a struct holding a list and a string to each other.
+struct Seen {
+    odd: [i64]
+    count: i64
+}
+
+fn scan(xs: [i64], i: i64, seen: Seen, tag: str) -> Seen {
+    if i == len(xs) {
+        seen.count = seen.count + len(tag)
+        return seen
+    }
+    if xs[i] % 2 == 1 {
+        return odd(seen, xs, i, tag)
+    }
+    return even(xs, i)(seen, tag)
+}
+
+fn odd(seen: Seen, xs: [i64], i: i64, tag: str) -> Seen {
+    if len(seen.odd) < 4 {
+        push(seen.odd, xs[i])
+    }
+    return scan(xs, i + 1, seen, tag)
+}
+
+// Gives the next state as a function value: calling it is not a tail call
+// of a function of the program, so it nests (once per even element here).
+fn even(xs: [i64], i: i64) -> fn(Seen, str) -> Seen {
+    let rest = xs[i + 1:]
+    return fn(s: Seen, tag: str) -> Seen {
+        s.count = s.count + 1
+        return scan(rest, 0, s, tag + "e")
+    }
+}
+
+// A parameter never read, handed over all the same.
+fn skip(unused: [str], n: i64) -> i64 {
+    if n == 0 {
+        return 0
+    }
+    return skip_more(n - 1, unused)
+}
+
+fn skip_more(n: i64, more: [str]) -> i64 {
+    return skip([], n) + len(more)
+}
+
+// Handed a list it never reads, which it frees on entry.
+fn ignore(xs: [str], box: ref [i64], n: i64) -> i64 {
+    return n
+}
+
+fn ignore_all(n: i64) -> i64 {
+    let mine: [str] = ["x", "y"]
+    return ignore(mine, ref [1, 2, 3], n)
+}
+
 fn entry() -> i64 {
     let xs: [i64] = []
     for i in 0..100000 {
@@ -74,5 +132,16 @@ fn entry() -> i64 {
     out(len(flatten(nested, [])))             // 6
     let words: [str] = ["a", "b", "last"]
     out(len(last(words, 0)))                  // 4
+    let odds: [i64] = []
+    for i in 0..300000 {
+        push(odds, 2 * i + 1)
+    }
+    let s = scan(odds, 0, Seen { odd: [], count: 0 }, "t")
+    out(len(s.odd) * 1000000 + s.count)       // 4000001
+    let mixed: [i64] = [1, 2, 3, 5, 6, 7, 9]
+    let m = scan(mixed, 0, Seen { odd: [], count: 0 }, "t")
+    out(m.odd[3] * 100 + m.count)
+    out(skip(words, 10))
+    out(ignore_all(5))
     return last(xs, 0)
 }

@@ -636,6 +636,19 @@ impl Cx<'_> {
             match &b.term {
                 Terminator::Branch { cond, .. } => expect(cond, &Type::Bool).map_err(at)?,
                 Terminator::Ret(r) => expect(r, &f.ret).map_err(at)?,
+                Terminator::TailCall { func, args } => {
+                    let Some(g) = self.funcs.get(func.as_str()) else {
+                        return Err(at(format!("tail call of @{func}, which is not a function of the module")));
+                    };
+                    if g.params.len() != args.len() {
+                        return Err(at(format!("@{func} takes {} arguments, {} given", g.params.len(), args.len())));
+                    }
+                    args.iter().zip(&g.params).try_for_each(|(a, t)| expect(a, t)).map_err(at)?;
+                    if g.ret != f.ret {
+                        let msg = format!("tail call of @{func}, which returns {}, from a function returning {}", g.ret.jir(), f.ret.jir());
+                        return Err(at(msg));
+                    }
+                }
                 Terminator::Jump(_) | Terminator::Unreachable => {}
             }
             for s in b.term.successors() {

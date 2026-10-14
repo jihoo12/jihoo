@@ -663,6 +663,7 @@ fn statement(l: &mut Line) -> Result<Stmt> {
             Stmt::Term(Terminator::Branch { cond, then, els: l.block()? })
         }
         "ret" => Stmt::Term(Terminator::Ret(l.reg()?)),
+        "tailcall" => Stmt::Term(Terminator::TailCall { func: l.global("a function")?, args: l.regs()? }),
         "unreachable" => Stmt::Term(Terminator::Unreachable),
         _ => return l.err(format!("unknown instruction `{w}`")),
     })

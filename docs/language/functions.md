@@ -41,9 +41,12 @@ The VM allows 10 000 nested calls; deeper recursion stops the program with
 
 ## Tail calls
 
-A function that returns a call of itself, `return f(...)` with nothing done to
-the result, does not nest: the call becomes a jump back to the start of `f`
-with the new arguments, so it runs in constant stack however deep it goes.
+A function that returns a call, `return g(...)` with nothing done to the
+result, does not nest: `g` takes the place of the caller, which is gone
+before `g` runs, so a chain of such calls runs in constant stack however deep
+it goes. A call of the function itself becomes a jump back to its start with
+the new arguments; a call of another function, as in mutual recursion or a
+state machine, is a tail call, whatever the two functions' parameters.
 
 ```jihoo
 fn count(n: i64, acc: i64) -> i64 {
@@ -59,16 +62,26 @@ fn depth(n: i64) -> i64 {
     }
     return 1 + depth(n - 1)            // not a tail call: the result is used
 }
+
+fn is_even(n: i64) -> bool {
+    if n == 0 { return true }
+    return is_odd(n - 1)               // a tail call: is_even(10000000) is fine
+}
+
+fn is_odd(n: i64) -> bool {
+    if n == 0 { return false }
+    return is_even(n - 1)
+}
 ```
 
 This is a rule of the language, the same on the VM, natively and
 freestanding, at every `-O` level, not an optimization that may or may not
 happen. It holds anywhere in the function: in either branch of an `if`, in a
 `match` arm, inside a loop. Lists and strings passed along are moved into the
-parameters, and natively whatever else the round made is freed before the
-jump, so a tail call that would have had to free something after returning is
-one all the same. A call of another function in tail position, as in mutual
-recursion, is an ordinary call.
+parameters or handed over to the callee, and natively whatever else the round made is freed before the
+jump or tail call, so a tail call that would have had to free something after
+returning is one all the same. Calls of C functions and of function values
+(`return f(x)` with `f` a parameter) are ordinary calls.
 
 ## Entry points
 

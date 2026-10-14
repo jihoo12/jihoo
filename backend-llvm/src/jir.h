@@ -12,7 +12,7 @@ namespace jir {
 
 // The one JIR version this backend reads, from the `jir N` header. It must
 // equal JIR_VERSION in crates/jihoo-ir/src/lib.rs (a Rust test checks this).
-constexpr int64_t kVersion = 16;
+constexpr int64_t kVersion = 17;
 
 enum class Profile { Hosted, Native, Freestanding };
 
@@ -180,12 +180,14 @@ struct Inst {
   std::vector<bool> sending;
 };
 
-enum class TermKind { Jump, Branch, Ret, Unreachable };
+enum class TermKind { Jump, Branch, Ret, TailCall, Unreachable };
 
 struct Terminator {
   TermKind kind;
   uint32_t reg = 0;  // Branch condition / Ret value
   uint32_t target = 0, els = 0;
+  std::string func;            // TailCall: the callee
+  std::vector<uint32_t> args;  // TailCall: its arguments
 };
 
 struct Block {

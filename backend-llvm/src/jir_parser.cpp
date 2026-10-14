@@ -753,6 +753,13 @@ Module parse(const std::string &text) {
       } else if (w == "ret") {
         t.kind = TermKind::Ret;
         t.reg = l.reg();
+      } else if (w == "tailcall") {
+        // `tailcall @f(...)`
+        const Tok &f = l.next("a function");
+        if (f.kind != TokKind::Global) fail(no, "expected a function like @name");
+        t.kind = TermKind::TailCall;
+        t.func = f.text;
+        t.args = l.reg_list();
       } else if (w == "unreachable") {
         t.kind = TermKind::Unreachable;
       } else {

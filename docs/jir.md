@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 16)
+# JIR — jihoo IR text format (version 17)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -46,6 +46,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 14 | `codetext`, code as text and text as code at compile time |
 | 15 | `typeof`, and `type` holes in `quote` |
 | 16 | `take`, moving a field out of a struct that is used again |
+| 17 | `tailcall`, a call that takes the caller's place |
 
 ## Example
 
@@ -445,6 +446,10 @@ In a native module:
   arguments for them are at their last use calls it and moves them. A
   thread started with `spawn` owns its arguments and frees them when the
   function returns.
+- `tailcall` *moves* its arguments, as `ret` does its value: the caller's
+  frame is gone, so the callee owns them. It calls the version `@g.tail` of
+  `@g`, which the pass makes, and which owns every parameter of `@g` that
+  owns memory (and frees one it never reads).
 - `repeat`, `splat`, `slice` and `add` on lists copy the elements they take
   (cloning owning ones) and leave their operands as they were.
 - Registers that own memory start out empty, so dropping one that was never
@@ -521,10 +526,22 @@ does. Bool operands are passed as `i8`.
 | `jmp bbN`              | jump |
 | `br %c, bbT, bbF`      | `%c: bool`; go to `bbT` if true, else `bbF` |
 | `ret %a`               | return `%a`, which must have the function's return type |
+| `tailcall @g(%a, ...)` | return what `@g` returns given the arguments, without nesting: the caller's frame is gone before `@g` runs |
 | `unreachable`          | control never gets here |
 
 Returning from `@_start` exits the process: with the returned value if `@_start`
 returns `i64`, with 0 if it returns `unit`.
+
+`tailcall` calls a function of the module, not an extern, that returns the
+caller's type, with arguments of its parameter types; its signature may
+otherwise differ from the caller's. A chain of tail calls runs in constant
+stack. The VM runs the callee in the caller's frame. Natively the functions
+that make or take tail calls get bodies with LLVM's `tailcc` convention, and
+a tail call is a `musttail` call between two of them; each keeps the C
+convention under its own name, for function values, exports and `main`.
+Aggregates go through a buffer (per thread natively) instead of the caller's
+frame, which is gone when the callee copies them, as it does on entry. From
+`@_start`, which has no caller, it is a call followed by the exit.
 
 ## Function values
 
@@ -560,6 +577,9 @@ them), because it has no libc; a native one uses libc's and libm's.
 Scalars and pointers are passed the C way, so a jihoo function whose
 parameters and result are floats, integers of at least 32 bits, pointers or
 `unit` can be handed to C as a callback (as `qsort`'s comparator, say).
+Functions that make or take tail calls have a second body with LLVM's
+`tailcc` convention, which the program's direct calls use (see
+[Terminators](#terminators)).
 
 ### The C ABI
 

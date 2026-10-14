@@ -295,6 +295,9 @@ fn callees(f: &jihoo_ir::Function) -> Vec<String> {
                 out.push(func.clone());
             }
         }
+        if let jihoo_ir::Terminator::TailCall { func, .. } = &b.term {
+            out.push(func.clone());
+        }
     }
     out
 }

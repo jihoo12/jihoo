@@ -673,6 +673,18 @@ fn sync_works_freestanding() {
     assert_eq!(run_compiled("sync-freestanding", src), Some(31));
 }
 
+/// Threads making tail calls at once each pass aggregates through a buffer of
+/// their own (`tests/threads/tail_calls.jh`).
+#[test]
+fn tail_calls_on_many_threads() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let src = std::fs::read_to_string(repo_root().join("tests/threads/tail_calls.jh")).unwrap();
+    assert_eq!(run_compiled("tail_calls", &src), Some(0));
+}
+
 /// `lib/channel.jh` passes values between threads: the worker pool example,
 /// and many senders and receivers at once (`tests/threads/channels.jh`).
 #[test]

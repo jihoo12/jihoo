@@ -840,6 +840,17 @@ struct CFunc {
   cabi::Signature sig;
 };
 
+// The functions that make or take tail calls. Each has a body with LLVM's
+// `tailcc` convention, which guarantees that a `musttail` call between two of
+// them does not grow the stack, whatever their signatures; under its JIR name
+// is a function with the C convention that calls it, for function values,
+// exports and `main`. Aggregates passed in a tail call go through `buf`, since
+// the caller's frame is gone when the callee copies them, which it does first.
+struct Tails {
+  std::unordered_map<std::string, Function *> fns;
+  GlobalVariable *buf = nullptr;
+};
+
 class FnGen {
  public:
   // `fns` holds every function and extern function by JIR name; `externs` says
@@ -848,9 +859,10 @@ class FnGen {
   FnGen(const jir::Function &f, Function *llfn, Module &mod, const Types &types,
         const std::unordered_map<std::string, Function *> &fns,
         const std::unordered_map<std::string, CFunc> &externs, const Triple &triple, bool exit_on_return,
-        bool native, Glue &glue)
+        bool native, Glue &glue, const Tails &tails)
       : f_(f), fn_(llfn), mod_(mod), types_(types), glue_(glue), fns_(fns), externs_(externs), triple_(triple),
-        exit_on_return_(exit_on_return), native_(native), ctx_(mod.getContext()), b_(ctx_), i64_(Type::getInt64Ty(ctx_)) {}
+        exit_on_return_(exit_on_return), native_(native), tails_(tails), ctx_(mod.getContext()), b_(ctx_),
+        i64_(Type::getInt64Ty(ctx_)) {}
 
   void run() {
     auto *entry = BasicBlock::Create(ctx_, "entry", fn_);
@@ -894,6 +906,7 @@ class FnGen {
   const Triple &triple_;
   bool exit_on_return_;
   bool native_;
+  const Tails &tails_;
   LLVMContext &ctx_;
   IRBuilder<> b_;
   Type *i64_;
@@ -906,7 +919,8 @@ class FnGen {
 
   // Calls `callee` of type `ty` with the operands of `inst` from index `first`
   // on, and stores the result in `inst.dst`. `what` names the callee in errors.
-  void call(FunctionType *ty, Value *callee, const jir::Inst &inst, size_t first, const std::string &what) {
+  void call(FunctionType *ty, Value *callee, const jir::Inst &inst, size_t first, const std::string &what,
+            CallingConv::ID cc = CallingConv::C) {
     bool sret = agg(inst.dst);
     size_t n = inst.args.size() - first;
     if (ty->getNumParams() != n + sret) fail(f_.name, "wrong number of arguments to " + what);
@@ -919,7 +933,8 @@ class FnGen {
       if (args.back()->getType() != ty->getParamType(args.size() - 1))
         fail(f_.name, "argument " + std::to_string(i - first + 1) + " to " + what + " has the wrong type");
     }
-    Value *result = b_.CreateCall(ty, callee, args);
+    CallInst *result = b_.CreateCall(ty, callee, args);
+    result->setCallingConv(cc);
     if (!sret) store(inst.dst, result);
   }
 
@@ -1606,6 +1621,8 @@ class FnGen {
         if (it == fns_.end()) fail(f_.name, "call to unknown function @" + inst.text);
         if (auto e = externs_.find(inst.text); e != externs_.end())
           call_extern(e->second, it->second, inst);
+        else if (auto t = tails_.fns.find(inst.text); t != tails_.fns.end())
+          call(t->second->getFunctionType(), t->second, inst, 0, "@" + inst.text, CallingConv::Tail);
         else
           call(it->second->getFunctionType(), it->second, inst, 0, "@" + inst.text);
         return;
@@ -2092,6 +2109,55 @@ class FnGen {
     }
   }
 
+  // `tailcall @g(...)`: a `musttail` call of `g`'s `tailcc` body, whose
+  // result is ours. Aggregates go through the tail call buffer, and an
+  // aggregate result to where ours goes. A freestanding `_start`, which has
+  // no caller to return to, calls `g` and exits with its result.
+  void tail_call(const jir::Terminator &t) {
+    auto it = fns_.find(t.func);
+    if (it == fns_.end() || externs_.count(t.func)) fail(f_.name, "tail call of unknown function @" + t.func);
+    auto tc = tails_.fns.find(t.func);
+    bool tail = tc != tails_.fns.end() && fn_->getCallingConv() == CallingConv::Tail;
+    Function *callee = tail ? tc->second : it->second;
+    FunctionType *ty = callee->getFunctionType();
+    bool sret = Types::is_agg(f_.ret);
+    if (ty->getNumParams() != t.args.size() + sret) fail(f_.name, "wrong number of arguments to @" + t.func);
+    std::vector<Value *> args;
+    Value *result = nullptr;
+    if (sret) {
+      if (!tail) fail(f_.name, "tail call returning an aggregate from @" + f_.name);
+      args.push_back(sret_);
+    }
+    const DataLayout &dl = mod_.getDataLayout();
+    uint64_t at = 0;
+    for (uint32_t r : t.args) {
+      if (agg(r) && tail) {
+        Type *ty = types_.lower(type(r));
+        Value *p = b_.CreateConstInBoundsGEP1_64(b_.getInt8Ty(), tails_.buf, at);
+        memcopy(p, slot(r), type(r));
+        at += alignTo(dl.getTypeAllocSize(ty), 16);
+        args.push_back(p);
+      } else {
+        args.push_back(agg(r) ? slot(r) : load(r));
+      }
+      if (args.back()->getType() != ty->getParamType(args.size() - 1))
+        fail(f_.name, "argument " + std::to_string(args.size() - sret) + " to @" + t.func + " has the wrong type");
+    }
+    CallInst *c = b_.CreateCall(ty, callee, args);
+    if (tail) {
+      c->setCallingConv(CallingConv::Tail);
+      c->setTailCallKind(CallInst::TCK_MustTail);
+      if (c->getType()->isVoidTy()) b_.CreateRetVoid();
+      else b_.CreateRet(c);
+      return;
+    }
+    if (!exit_on_return_) fail(f_.name, "tail call of @" + t.func + " outside the functions that make tail calls");
+    result = f_.ret.kind == jir::Type::Int ? static_cast<Value *>(c) : b_.getInt64(0);
+    int64_t exit_nr = triple_.getArch() == Triple::aarch64 ? 93 : 60;
+    b_.CreateCall(syscall_asm(ctx_, triple_, 2), {b_.getInt64(exit_nr), result});
+    b_.CreateUnreachable();
+  }
+
   void term(const jir::Terminator &t) {
     switch (t.kind) {
       case jir::TermKind::Jump: b_.CreateBr(block(t.target)); return;
@@ -2100,6 +2166,7 @@ class FnGen {
         b_.CreateCondBr(load(t.reg), block(t.target), block(t.els));
         return;
       case jir::TermKind::Unreachable: b_.CreateUnreachable(); return;
+      case jir::TermKind::TailCall: tail_call(t); return;
       case jir::TermKind::Ret:
         if (type(t.reg) != f_.ret) fail(f_.name, "returned value has the wrong type");
         if (exit_on_return_) {
@@ -2721,12 +2788,59 @@ std::unique_ptr<llvm::Module> codegen(const jir::Module &m, LLVMContext &ctx, co
   if (entry == m.funcs.end()) throw CodegenError(std::string(native ? "native" : "freestanding") + " module needs @" + entry_name);
   if (!entry->params.empty() && !native) throw CodegenError("@_start must take no parameters");
 
+  // The functions that make tail calls and those they call get `tailcc`
+  // bodies; a freestanding `_start` never returns, and makes ordinary calls.
+  Tails tails;
+  uint64_t buf_size = 0;
+  for (const auto &f : m.funcs) {
+    for (const auto &b : f.blocks) {
+      if (b.term.kind != jir::TermKind::TailCall) continue;
+      auto g = std::find_if(m.funcs.begin(), m.funcs.end(), [&](const jir::Function &g) { return g.name == b.term.func; });
+      if (g == m.funcs.end()) throw CodegenError("tail call of unknown function @" + b.term.func + " in @" + f.name);
+      for (const jir::Function *h : {&f, &*g}) {
+        if ((!native && h->name == "_start") || tails.fns.count(h->name)) continue;
+        auto *tc = Function::Create(types.signature(*h), GlobalValue::InternalLinkage, "jihoo." + h->name + ".tc", mod.get());
+        tc->copyAttributesFrom(fns[h->name]);  // the convention too, so it comes after
+        tc->setCallingConv(CallingConv::Tail);
+        tails.fns[h->name] = tc;
+      }
+      uint64_t size = 0;
+      for (const auto &p : g->params)
+        if (Types::is_agg(p)) size += alignTo(dl.getTypeAllocSize(types.lower(p)), 16);
+      buf_size = std::max(buf_size, size);
+    }
+  }
+  if (buf_size > 0) {
+    auto *ty = ArrayType::get(Type::getInt8Ty(ctx), buf_size);
+    tails.buf = new GlobalVariable(*mod, ty, false, GlobalValue::InternalLinkage, ConstantAggregateZero::get(ty),
+                                   "jihoo.tailcall.args");
+    tails.buf->setAlignment(Align(16));
+    // Threads make tail calls of their own (native only: freestanding
+    // programs have no threads, and no thread-local storage set up).
+    if (native) tails.buf->setThreadLocal(true);
+  }
+
   std::unordered_map<std::string, Function *> exports;
   for (const auto &f : m.funcs)
     if (!f.export_name.empty()) exports[f.export_name] = fns[f.name];
   glue.set_exports(std::move(exports));
-  for (const auto &f : m.funcs)
-    FnGen(f, fns[f.name], *mod, types, fns, externs, triple, !native && f.name == "_start", native, glue).run();
+  for (const auto &f : m.funcs) {
+    auto tc = tails.fns.find(f.name);
+    if (tc == tails.fns.end()) {
+      FnGen(f, fns[f.name], *mod, types, fns, externs, triple, !native && f.name == "_start", native, glue, tails).run();
+      continue;
+    }
+    FnGen(f, tc->second, *mod, types, fns, externs, triple, false, native, glue, tails).run();
+    // Under the JIR name, the C convention: a call of the body.
+    Function *w = fns[f.name];
+    IRBuilder<> b(BasicBlock::Create(ctx, "entry", w));
+    std::vector<Value *> args;
+    for (auto &a : w->args()) args.push_back(&a);
+    CallInst *c = b.CreateCall(tc->second, args);
+    c->setCallingConv(CallingConv::Tail);
+    if (c->getType()->isVoidTy()) b.CreateRetVoid();
+    else b.CreateRet(c);
+  }
   for (const auto &f : m.funcs)
     if (!f.export_name.empty()) define_export(*mod, types, triple, f, fns[f.name]);
   if (native) {

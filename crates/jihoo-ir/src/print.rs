@@ -193,6 +193,10 @@ impl Display for Terminator {
             Terminator::Jump(b) => write!(f, "jmp {b}"),
             Terminator::Branch { cond, then, els } => write!(f, "br {cond}, {then}, {els}"),
             Terminator::Ret(r) => write!(f, "ret {r}"),
+            Terminator::TailCall { func, args } => {
+                let args: Vec<String> = args.iter().map(Reg::to_string).collect();
+                write!(f, "tailcall @{func}({})", args.join(", "))
+            }
             Terminator::Unreachable => write!(f, "unreachable"),
         }
     }

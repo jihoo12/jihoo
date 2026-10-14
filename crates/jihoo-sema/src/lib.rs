@@ -1025,7 +1025,7 @@ impl<'a> FnCx<'a> {
                     Some(e) => {
                         let r = self.expr(e, Some(&ret))?;
                         self.expect(e.pos, r, &ret, "the return value")?;
-                        // `return f(...)` in `f` itself: a jump, not a call.
+                        // `return g(...)`: a jump or a tail call, not a call.
                         if self.tail_call(r) {
                             let dead = self.new_block();
                             self.switch_to(dead);

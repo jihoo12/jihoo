@@ -24,7 +24,7 @@ pub use verify::verify;
 /// module instead of compiling it with other rules. Bump it whenever the
 /// format or the meaning of anything in it changes (see "Versions" in
 /// `docs/jir.md`); the `version` tests check that both sides and the spec agree.
-pub const JIR_VERSION: u32 = 16;
+pub const JIR_VERSION: u32 = 17;
 
 /// Language profile, selected with `#![native]` or `#![freestanding]` at the
 /// top of a source file.
@@ -557,6 +557,11 @@ pub enum Terminator {
     /// Goes to `then` when the `bool` `cond` is true.
     Branch { cond: Reg, then: BlockId, els: BlockId },
     Ret(Reg),
+    /// Returns what `func`, a function of the module (not an extern), returns
+    /// given `args`, which takes the place of this call: the caller's frame is
+    /// gone first, so a chain of them runs in constant stack. `func` returns
+    /// the caller's type.
+    TailCall { func: String, args: Vec<Reg> },
     /// Control never gets here.
     Unreachable,
 }
@@ -566,7 +571,7 @@ impl Terminator {
         match self {
             Terminator::Jump(b) => vec![*b],
             Terminator::Branch { then, els, .. } => vec![*then, *els],
-            Terminator::Ret(_) | Terminator::Unreachable => vec![],
+            Terminator::Ret(_) | Terminator::TailCall { .. } | Terminator::Unreachable => vec![],
         }
     }
 
@@ -574,7 +579,7 @@ impl Terminator {
         match self {
             Terminator::Jump(b) => vec![b],
             Terminator::Branch { then, els, .. } => vec![then, els],
-            Terminator::Ret(_) | Terminator::Unreachable => vec![],
+            Terminator::Ret(_) | Terminator::TailCall { .. } | Terminator::Unreachable => vec![],
         }
     }
 
@@ -583,6 +588,7 @@ impl Terminator {
         match self {
             Terminator::Branch { cond, .. } => vec![cond],
             Terminator::Ret(r) => vec![r],
+            Terminator::TailCall { args, .. } => args.iter_mut().collect(),
             Terminator::Jump(_) | Terminator::Unreachable => vec![],
         }
     }

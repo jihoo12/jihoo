@@ -51,6 +51,17 @@ hidden first parameter. Scalars and pointers are passed the C way, which is
 why jihoo functions with scalar signatures work as C callbacks. The details
 are in [JIR](../jir.md#native-abi).
 
+A function that makes or takes a [tail call](../jir.md#terminators) also gets
+a body with LLVM's `tailcc` convention, `jihoo.f.tc`, and calls between such
+bodies use it: a tail call is a `musttail` call, which `tailcc` guarantees at
+every `-O` level and on both targets even when the two signatures differ.
+`jihoo.f` stays a C-convention function that calls the body, so function
+values, exports and `main` see no difference. A tail call cannot pass an
+aggregate by pointer into its own frame, which is gone when the callee runs;
+it copies it into `jihoo.tailcall.args`, a buffer as large as the largest
+tail call needs (thread-local natively), which the callee copies out of
+first.
+
 ## The C ABI
 
 C passes structs by value its own way, which LLVM leaves to the compiler of

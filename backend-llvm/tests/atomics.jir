@@ -2,7 +2,7 @@
 ; back, arithmetic wraps, and a failed compare-and-swap changes nothing. Each
 ; check sets one bit of the result.
 ; expect: exit 127
-jir 16
+jir 17
 profile freestanding
 
 fn @bit(bool, i64) -> i64 {

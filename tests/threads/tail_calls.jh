@@ -1,0 +1,63 @@
+#![native]
+// Tail calls on many threads at once: each passes structs and arrays by
+// value through tail calls, which natively go through a buffer of the
+// thread's own (crates/jihoo-cli/tests/differential.rs). Exits with 0 if
+// every thread gets what the main thread got alone.
+import thread
+
+struct State {
+    seed: u64
+    n: i64
+    mix: [u64; 4]
+}
+
+fn step_a(s: State, rounds: i64) -> State {
+    if rounds == 0 {
+        return s
+    }
+    s.seed = s.seed * 6364136223846793005 + 1442695040888963407
+    s.mix[s.n % 4] = s.mix[s.n % 4] ^ s.seed
+    return step_b(rounds - 1, s.mix, s)
+}
+
+fn step_b(rounds: i64, mix: [u64; 4], s: State) -> State {
+    s.n = s.n + 1
+    s.mix = [mix[1], mix[2], mix[3], mix[0] + s.seed]
+    return step_a(s, rounds)
+}
+
+fn digest(seed: u64) -> u64 {
+    let s = step_a(State { seed: seed, n: 0, mix: [0, 0, 0, 0] }, 200000)
+    return s.mix[0] ^ s.mix[1] ^ s.mix[2] ^ s.mix[3] ^ (s.n as u64)
+}
+
+struct Job {
+    seed: u64
+    got: u64
+}
+
+fn worker(arg: *u8) -> i64 {
+    let j = arg as *Job
+    j.got = digest(j.seed)
+    return 0
+}
+
+fn main() -> i64 {
+    let jobs: [Job; 8] = [Job { seed: 0, got: 0 }; 8]
+    let ts: [Option(thread.Thread); 8] = [Option.None; 8]
+    for i in 0..8 {
+        jobs[i].seed = (i * 7919 + 1) as u64
+        ts[i] = thread.spawn(worker, &jobs[i] as *u8)
+    }
+    let bad = 0
+    for i in 0..8 {
+        match ts[i] {
+            Some(t) => thread.join(&t)
+            None => return 2
+        }
+        if jobs[i].got != digest(jobs[i].seed) {
+            bad += 1
+        }
+    }
+    return bad
+}

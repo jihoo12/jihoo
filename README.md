@@ -112,9 +112,10 @@ nix build
 v0. In every profile: static types with local inference; `bool`, `i8`…`u64`
 and `f32`/`f64`, with exact float builtins (`sqrt`, `floor`, `round`, ...);
 structs, tuples, bounds-checked arrays and enums with `match`, `Option` and `Result`;
-`while` and `for` loops (over ranges, arrays, lists, strings and iterators); blocks as
-expressions; function values; generic functions and structs, with inferred
-type arguments; traits with impls and bounds (`comptime T: Ord`),
+`while` and `for` loops (over ranges, arrays, lists, strings and
+iterators); blocks as expressions; function values; tail calls, which never
+grow the stack; generic functions and structs, with inferred type arguments;
+traits with impls and bounds (`comptime T: Ord`),
 associated types and supertraits, and the standard traits `Ord`, `Hash` and
 `Show`, which `meta.derive!` writes, and `Iterator`, which `for` walks;
 modules with private items and fields; compile-time evaluation (`const`,

@@ -1,0 +1,38 @@
+; `tailcall` between functions of different signatures, passing a struct
+; by value, runs in constant stack at any -O: a million rounds, then 42.
+; expect: exit 42
+jir 17
+profile freestanding
+
+struct $P { a: i64, b: i64 } size 16 align 8
+
+fn @down(i64, $P) -> i64 {
+  regs i64 $P i64 bool i64 i64
+bb0:
+  %2 = const 0
+  %3 = eq %0, %2
+  br %3, bb1, bb2
+bb1:
+  %4 = field %1, 1
+  ret %4
+bb2:
+  %5 = const 1
+  %0 = sub %0, %5
+  tailcall @swap(%1, %0, %5)
+}
+
+fn @swap($P, i64, i64) -> i64 {
+  regs $P i64 i64
+bb0:
+  tailcall @down(%1, %0)
+}
+
+fn @_start() -> i64 {
+  regs i64 i64 i64 $P
+bb0:
+  %0 = const 1000000
+  %1 = const 0
+  %2 = const 42
+  %3 = struct $P(%1, %2)
+  tailcall @down(%0, %3)
+}

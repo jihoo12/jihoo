@@ -7,7 +7,8 @@
 //! in part, compared, and passed to and returned from functions; `if`, `match`
 //! (on integers, and on tuples with nested patterns), `let` patterns, `while`
 //! and `for` loops with `break` and `continue`, compound assignment, and
-//! functions that return a part of a value of their own; and, in most
+//! functions that return a part of a value of their own, and tail calls
+//! between functions of different signatures; and, in most
 //! programs, a trait `Weigh` with a default, impls of it for random structs
 //! and scalar types and a generic impl for pairs, derived `Ord` and `Hash`
 //! (`meta.derive!`) and `heavier`, a function bounded by `Weigh`, called as
@@ -254,7 +255,40 @@ impl Gen {
         self.indent -= 1;
         self.line("}");
         self.vars.clear();
-        self.funcs.push((params, ret));
+        self.funcs.push((params.clone(), ret.clone()));
+        if self.rng.chance(50) {
+            self.tail_calls(k, &params, &ret);
+        }
+    }
+
+    /// `f{j}`, which gives what `f{k}` does through a few tail calls between
+    /// `t{j}` and `u{j}`, functions with other signatures: natively the
+    /// arguments are handed over at each step.
+    fn tail_calls(&mut self, k: usize, params: &[Ty], ret: &Ty) {
+        let j = self.funcs.len();
+        let ret_name = self.ty_name(ret);
+        let typed: Vec<String> = params.iter().enumerate().map(|(i, t)| format!("p{i}: {}", self.ty_name(t))).collect();
+        let names: Vec<String> = (0..params.len()).map(|i| format!("p{i}")).collect();
+        let (typed, names) = (typed.join(", "), names.join(", "));
+        let sep = if params.is_empty() { "" } else { ", " };
+        let rounds = self.rng.below(5);
+        for l in [
+            format!("fn f{j}({typed}) -> {ret_name} {{"),
+            format!("    return t{j}({rounds}{sep}{names})"),
+            "}".to_string(),
+            format!("fn t{j}(n: i64{sep}{typed}) -> {ret_name} {{"),
+            "    if n > 0 {".to_string(),
+            format!("        return u{j}({names}{sep}n - 1)"),
+            "    }".to_string(),
+            format!("    return f{k}({names})"),
+            "}".to_string(),
+            format!("fn u{j}({typed}{sep}n: i64) -> {ret_name} {{"),
+            format!("    return t{j}(n{sep}{names})"),
+            "}".to_string(),
+        ] {
+            self.line(&l);
+        }
+        self.funcs.push((params.to_vec(), ret.clone()));
     }
 
     /// A part of a value of the function's own, to be returned: the value is
@@ -770,8 +804,7 @@ impl Gen {
             self.pipeline();
             return;
         }
-        if self.traits && depth > 0 && self.loops < 2 && !self.vars.is_empty() && self.rng.chance(4) {
-            self.rep_loop(depth);
+        if self.traits && depth > 0 && self.loops < 2 && self.rng.chance(4) && self.rep_loop(depth) {
             return;
         }
         match self.rng.below(27) {
@@ -954,9 +987,14 @@ impl Gen {
 
     /// A `for` loop over an iterator, `Rep(T)`, that holds a copy of a
     /// variable's value and gives it with each item.
-    fn rep_loop(&mut self, depth: u32) {
+    fn rep_loop(&mut self, depth: u32) -> bool {
+        // A type argument is parsed as an expression, which `cell T` is not.
+        let held: Vec<usize> = (0..self.vars.len()).filter(|&v| !self.ty_name(&self.vars[v].ty).contains("cell ")).collect();
+        if held.is_empty() {
+            return false;
+        }
         let scope = self.vars.len();
-        let v = self.rng.below(self.vars.len());
+        let v = *self.rng.pick(&held);
         let (held, ty) = (self.vars[v].name.clone(), self.vars[v].ty.clone());
         let (i, x) = (self.fresh("i"), self.fresh("x"));
         let n = self.rng.below(4);
@@ -968,6 +1006,7 @@ impl Gen {
         self.loops -= 1;
         self.vars.truncate(scope);
         self.line("}");
+        true
     }
 
     /// Replaces what a cell somewhere in a variable holds, or pushes to the

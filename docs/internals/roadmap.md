@@ -112,6 +112,12 @@
     the field before it is written or the struct dies, and the struct keeps
     the field empty. So `b.xs = grow(b.xs)` and an iterator's
     `s.inner = rest` copy nothing.
+33. Tail calls between functions (JIR 17: `tailcall`): `return g(...)` does
+    not nest, so mutual recursion and state machines run in constant stack
+    in every profile, at every `-O` and on both targets. The VM runs the
+    callee in the caller's frame; LLVM gets `musttail` calls between
+    `tailcc` bodies, which allows any two signatures; the ownership pass
+    hands the arguments over to a version of the callee that owns them.
 
 ## Next
 
@@ -134,10 +140,8 @@
 
 - **Floats:** `fma`, which IEEE also defines exactly, but freestanding code on
   x86_64 would need an exact software version.
-- **Tail calls** between functions (mutual recursion, state machines): a JIR
-  `tailcall` that the VM runs in the caller's frame and LLVM as `musttail`,
-  whose rules on signatures may call for an explicit form that is an error
-  where it cannot hold.
+- **Tail calls** through function values (`return f(x)` with `f` a
+  parameter), which need a convention for every function value.
 - **Native code:** structs by value through function values handed to C
   (callbacks take scalars only); `print` in freestanding programs.
 - **Concurrency:** weaker memory orders (acquire/release) for code that needs

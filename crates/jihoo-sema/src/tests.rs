@@ -865,6 +865,23 @@ fn tail_calls_to_itself_are_jumps() {
     assert_eq!(calls("depth"), 1, "{m}");
 }
 
+#[test]
+fn tail_calls_between_functions() {
+    let src = "fn is_even(n: i64) -> bool {\n  if n == 0 { return true }\n  return is_odd(n - 1, 0)\n}\n\
+               fn is_odd(n: i64, unused: u8) -> bool {\n  if n == 0 { return false }\n  return is_even(n - 1)\n}\n\
+               fn twice(f: fn(i64) -> i64, x: i64) -> i64 {\n  return f(f(x))\n}\n\
+               fn inc(x: i64) -> i64 {\n  return x + 1\n}\n\
+               fn main() {\n  print(is_even(1000000))\n  print(twice(inc, 1))\n}";
+    // A million calls deep: more than the VM's call stack holds.
+    assert_eq!(run(src), "true\n3\n");
+    let m = check(src).unwrap();
+    let tail = |f: &str| m.func(f).unwrap().blocks.iter().filter(|b| matches!(b.term, ir::Terminator::TailCall { .. })).count();
+    assert_eq!(tail("is_even"), 1, "{m}");
+    assert_eq!(tail("is_odd"), 1, "{m}");
+    // A function value is called, not tail called.
+    assert_eq!(tail("twice"), 0, "{m}");
+}
+
 // ---- function values ----
 
 #[test]

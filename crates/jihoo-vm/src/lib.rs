@@ -376,6 +376,17 @@ impl<'m> Vm<'m> {
                     }
                 }
                 Terminator::Unreachable => return Err(self.error("reached `unreachable`")),
+                // The callee's frame takes the place of this one, and returns
+                // where this one would have.
+                Terminator::TailCall { func, args } => {
+                    let ret_dst = frame.ret_dst;
+                    let callee = self.func_index(func);
+                    let next = self.call_frame(callee, &[], args, ret_dst);
+                    let done = self.stack.pop().unwrap();
+                    self.reg_pool.push(done.regs);
+                    self.stack.push(next);
+                    self.safepoint()?;
+                }
                 Terminator::Ret(r) => {
                     let v = frame.regs[r.0 as usize];
                     let done = self.stack.pop().unwrap();

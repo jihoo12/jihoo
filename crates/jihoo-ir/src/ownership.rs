@@ -89,26 +89,56 @@ pub fn insert(m: &mut Module) {
     for f in &mut m.funcs {
         field_takes(f, &mut owning, &cloning);
     }
-    let originals: HashMap<String, Function> =
-        m.funcs.iter().filter(|f| cloning.contains_key(&f.name)).map(|f| (f.name.clone(), f.clone())).collect();
+    // The parameters of each function that own memory, which its version for
+    // tail calls takes over.
+    let mut owning_params: HashMap<String, Vec<usize>> = HashMap::new();
+    for f in &m.funcs {
+        let ps: Vec<usize> = (0..f.params.len()).filter(|&i| owning.owns(&f.params[i])).collect();
+        if !ps.is_empty() {
+            owning_params.insert(f.name.clone(), ps);
+        }
+    }
+    let originals: HashMap<String, Function> = m
+        .funcs
+        .iter()
+        .filter(|f| cloning.contains_key(&f.name) || owning_params.contains_key(&f.name))
+        .map(|f| (f.name.clone(), f.clone()))
+        .collect();
     let mut wanted = BTreeSet::new();
-    let mut cx = Cx { owning: &mut owning, cloning: &cloning, wanted: &mut wanted };
+    let mut tails = BTreeSet::new();
+    let mut cx = Cx { owning: &mut owning, cloning: &cloning, owning_params: &owning_params, wanted: &mut wanted, tails: &mut tails };
     for f in &mut m.funcs {
         function(f, &mut cx, &[]);
     }
-    // The consuming versions that calls asked for, and those they ask for.
+    // The consuming versions that calls asked for, those for tail calls, and
+    // those they ask for in turn.
     let mut made = HashSet::new();
-    while let Some(name) = wanted.pop_first() {
-        if !made.insert(name.clone()) {
+    loop {
+        let (name, given, version) = if let Some(name) = wanted.pop_first() {
+            let given = cloning[&name].clone();
+            (name.clone(), given, consuming(&name))
+        } else if let Some(name) = tails.pop_first() {
+            let given = owning_params[&name].clone();
+            (name.clone(), given, tail_version(&name))
+        } else {
+            break;
+        };
+        if !made.insert(version.clone()) {
             continue;
         }
         let mut f = originals[&name].clone();
-        f.name = consuming(&name);
+        f.name = version;
         f.export = None;
-        let mut cx = Cx { owning: &mut owning, cloning: &cloning, wanted: &mut wanted };
-        function(&mut f, &mut cx, &cloning[&name]);
+        let mut cx = Cx { owning: &mut owning, cloning: &cloning, owning_params: &owning_params, wanted: &mut wanted, tails: &mut tails };
+        function(&mut f, &mut cx, &given);
         m.funcs.push(f);
     }
+}
+
+/// The version of function `f` that tail calls call: it takes over every
+/// parameter that owns memory, since the caller's frame is gone.
+fn tail_version(f: &str) -> String {
+    format!("{f}.tail")
 }
 
 /// Gives a parameter's later values registers of their own where they never
@@ -276,8 +306,12 @@ struct Cx<'a> {
     owning: &'a mut Owning,
     /// The parameters each function clones on entry.
     cloning: &'a HashMap<String, Vec<usize>>,
+    /// The parameters of each function that own memory.
+    owning_params: &'a HashMap<String, Vec<usize>>,
     /// Functions whose consuming version a call uses.
     wanted: &'a mut BTreeSet<String>,
+    /// Functions whose version for tail calls a tail call uses.
+    tails: &'a mut BTreeSet<String>,
 }
 
 /// The parameters (by position) that `f` must have values of its own of: it
@@ -307,7 +341,7 @@ fn cloned_params(f: &Function, owning: &mut Owning) -> Vec<usize> {
                         consumes(inst, p, &roots)
                             || defined(inst).contains(&p)
                             || changes(inst, p)
-                    }) || matches!(b.term, Terminator::Ret(r) if r == p)
+                    }) || term_uses(&b.term).contains(&p)
                 }))
         })
         .collect()
@@ -503,6 +537,7 @@ fn term_uses(t: &Terminator) -> Vec<Reg> {
     match t {
         Terminator::Branch { cond, .. } => vec![*cond],
         Terminator::Ret(r) => vec![*r],
+        Terminator::TailCall { args, .. } => args.clone(),
         Terminator::Jump(_) | Terminator::Unreachable => vec![],
     }
 }
@@ -1017,6 +1052,14 @@ fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
         }
     }
     f.blocks[0].insts.splice(0..0, entry_clones);
+    // A parameter handed over that is never read dies at once (added last,
+    // so that the drop is not taken for a use that needs one after it).
+    let unread: Vec<Inst> = given
+        .iter()
+        .map(|&i| Reg(i as u32))
+        .filter(|p| tracked.contains(p) && !live_at_entry.contains(p))
+        .map(|src| Inst::Drop { src })
+        .collect();
 
     // Parts read out of values are views where that cannot be told apart from
     // a copy; the others become copies right after the read.
@@ -1176,6 +1219,35 @@ fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
                 insts.extend(dying.into_iter().map(|src| Inst::Drop { src }));
             }
         }
+        // A tail call gives its arguments away, as `ret` does its value, to
+        // the callee's version that takes them over.
+        if let Terminator::TailCall { func, args } = &mut term {
+            let mut dying = Vec::new();
+            let mut moved = HashSet::new();
+            for a in args.iter_mut() {
+                if !tracked.contains(a) {
+                    continue;
+                }
+                if let Some(&root) = roots.get(a) {
+                    if owned.contains(&root) && !dying.contains(&root) {
+                        dying.push(root);
+                    }
+                }
+                if borrowed_params.contains(a) || !moved.insert(*a) {
+                    let t = Reg(f.regs.len() as u32);
+                    f.regs.push(f.regs[a.0 as usize].clone());
+                    insts.push(Inst::Clone { dst: t, src: *a });
+                    *a = t;
+                }
+            }
+            dying.retain(|x| !moved.contains(x));
+            dying.sort_by_key(|x| x.0);
+            insts.extend(dying.into_iter().map(|src| Inst::Drop { src }));
+            if cx.owning_params.contains_key(func.as_str()) {
+                cx.tails.insert(func.clone());
+                *func = tail_version(func);
+            }
+        }
         f.blocks[b] = Block { insts, term };
     }
 
@@ -1203,6 +1275,7 @@ fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
             }
         }
     }
+    f.blocks[0].insts.splice(0..0, unread);
 }
 
 /// How many edges lead to each block.
