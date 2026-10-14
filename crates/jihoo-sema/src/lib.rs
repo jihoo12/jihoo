@@ -53,9 +53,22 @@ pub fn analyze(prog: &Program) -> Result<ir::Module, Vec<Error>> {
     analyze_modules(&[root, jihoo_syntax::loader::prelude(1)])
 }
 
+/// What to put into the JIR beyond the program itself.
+#[derive(Clone, Copy, Default)]
+pub struct Options {
+    /// Source positions (`loc`), whose files are numbered as `Pos::file`;
+    /// the module's `files` are left for the caller to name.
+    pub locs: bool,
+}
+
 /// Checks and lowers a program made of modules (see `jihoo_syntax::loader`);
 /// `mods[0]` is the root, whose attributes choose the profile.
 pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
+    analyze_modules_with(mods, Options::default())
+}
+
+/// `analyze_modules`, with `opts`.
+pub fn analyze_modules_with(mods: &[Module], opts: Options) -> Result<ir::Module, Vec<Error>> {
     let mut errors = Vec::new();
 
     // Without an attribute, a program is native.
@@ -110,7 +123,9 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
     let expanded = expand_item_macros(profile, mods)?;
     let mods = &expanded[..];
 
-    let (env, name_errors) = Env::new(profile, mods);
+    let (mut env, name_errors) = Env::new(profile, mods);
+    env.locs = opts.locs;
+    let env = env;
     errors.extend(name_errors);
     if !errors.is_empty() {
         return Err(errors);
@@ -292,7 +307,11 @@ pub fn analyze_modules(mods: &[Module]) -> Result<ir::Module, Vec<Error>> {
     let externs = externs.into_iter().map(|(_, e)| e).collect();
 
     if errors.is_empty() {
-        let mut m = ir::Module { profile, target: ir::Target::host(), structs, enums, externs, funcs };
+        let files = match opts.locs {
+            true => vec![String::new(); mods.iter().map(|m| m.file as usize + 1).max().unwrap_or(0)],
+            false => vec![],
+        };
+        let mut m = ir::Module { profile, target: ir::Target::host(), structs, enums, externs, funcs, files };
         // Native lists have no GC: decide where values move, are copied and are freed.
         if profile == Profile::Native {
             ir::ownership::insert(&mut m);
@@ -480,6 +499,8 @@ struct FnCx<'a> {
     /// The `while` loops around the current statement, innermost last: where
     /// `continue` and `break` jump to.
     loops: Vec<Loop>,
+    /// The position the last `loc` gave, and its block, with `Env::locs`.
+    last_loc: Option<(BlockId, Pos)>,
 }
 
 #[derive(Clone, Copy)]
@@ -553,7 +574,18 @@ impl<'a> FnCx<'a> {
             captured: HashSet::new(),
             closure_regs: HashMap::new(),
             loops: Vec::new(),
+            last_loc: None,
         }
+    }
+
+    /// With `Env::locs`, says that the code from here on was written at
+    /// `pos`, unless the block says so already.
+    fn note(&mut self, pos: Pos) {
+        if !self.env.locs || pos.line == 0 || self.last_loc == Some((self.cur, pos)) {
+            return;
+        }
+        self.last_loc = Some((self.cur, pos));
+        self.emit(Inst::Loc { file: u32::from(pos.file), line: pos.line, col: pos.col });
     }
 
     fn profile(&self) -> Profile {
@@ -563,6 +595,7 @@ impl<'a> FnCx<'a> {
     /// Lowers `f` as the JIR function `name` (an instance name for generics).
     fn lower_fn(mut self, f: &FnDecl, name: &str) -> Result<ir::Function, Error> {
         self.name = Some(name.to_string());
+        self.note(f.pos);
         let sig = self.sig.clone();
         self.in_macro =
             f.is_compile_time() || self.env.sig_holds_code(&sig) || self.env.module_is_comptime(self.bindings.module);
@@ -1117,6 +1150,7 @@ impl<'a> FnCx<'a> {
     /// Lowers `e`. `expected` is only a hint for integer literals; callers still
     /// check the resulting type themselves.
     fn expr(&mut self, e: &Expr, expected: Option<&Type>) -> Result<Reg, Error> {
+        self.note(e.pos);
         Ok(match &e.kind {
             ExprKind::Int(n) => self.int_literal(e.pos, *n as i128, expected)?,
             ExprKind::Unary(UnOp::Neg, inner) if matches!(inner.kind, ExprKind::Int(_)) => {

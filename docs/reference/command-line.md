@@ -83,6 +83,28 @@ jihoo run fib.jir                    # and run it
 | `-I <dir>` | also look for imported modules in `<dir>`; may be repeated |
 | `-O0` … `-O3` | how much the LLVM backend optimizes native and freestanding programs, `-O2` by default (`build`, `run`). `-O0` keeps every allocation and free the compiler inserts, which is what checking memory with valgrind needs: optimized code may drop or merge them |
 | `--target <t>` | the machine to compile for, `x86_64` or `aarch64` (Linux); the default is this machine. It picks the [per-target modules](../language/modules.md#per-target-modules) and is recorded in the JIR (`build`, `emit-ir`; `run` only runs on this machine) |
+| `--cost` | also print where a native program copies lists, strings and closures, and why (`build`); see [below](#copies) |
+
+## Copies
+
+Natively, the compiler copies a list (or a string, or a closure's captured
+values) only where the program's meaning needs it: where a value is still
+used after it is assigned, stored or passed on to something that keeps or
+changes it ([Lists in native programs](../language/lists.md#lists-in-native-programs)).
+`jihoo build --cost` lists those places:
+
+```text
+$ jihoo build --cost shelf.jh
+shelf.jh:17:1: copies [i64] in @grow: parameter 1 is copied on entry, since the function changes or keeps it; a caller that hands it over at its last use calls a version that does not copy it
+shelf.jh:53:17: copies [i64] in @report: a part read out of a value is copied, since the part or the value changes while the other is still used
+2 copies
+```
+
+Each line is one copy in the program: where, of what type, in which function
+(as JIR names it, so `@f.own` is the version of `f` that takes its arguments
+over), and why. A copy of a `ref` or a cell is not listed: it counts one more
+holder. Functions the program never calls are left out, as is the copying
+version of a function whose callers all hand their arguments over.
 
 ## Environment
 
@@ -94,6 +116,7 @@ jihoo run fib.jir                    # and run it
 | `JIHOO_CC` | the C compiler that links native programs | `cc` in `PATH` |
 | `JIHOO_GC_STRESS` | `1`: collect garbage before every allocation, to find GC bugs | off |
 | `JIHOO_VM_CHECK` | `1`: before every in-place update, check that nothing else refers to the object, to find sharing bugs | off |
+| `JIHOO_LOCS` | set: write source positions into the JIR of every program, as `--cost` does, to test that they change nothing | off |
 
 The Nix package sets these so that everything is found; from a source checkout,
 set `JIHOO_LLC` to the backend you built

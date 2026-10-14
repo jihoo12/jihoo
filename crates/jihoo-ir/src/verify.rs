@@ -14,12 +14,15 @@ struct Cx<'m> {
     externs: HashMap<&'m str, &'m ExternFn>,
     structs: HashMap<&'m str, &'m StructDef>,
     enums: HashMap<&'m str, &'m EnumDef>,
+    /// How many source files the module names.
+    module_files: usize,
 }
 
 pub fn verify(m: &Module) -> Result<(), String> {
     let cx = Cx {
         profile: m.profile,
         funcs: m.funcs.iter().map(|f| (f.name.as_str(), f)).collect(),
+        module_files: m.files.len(),
         externs: m.externs.iter().map(|e| (e.name.as_str(), e)).collect(),
         structs: m.structs.iter().map(|s| (s.name.as_str(), s)).collect(),
         enums: m.enums.iter().map(|e| (e.name.as_str(), e)).collect(),
@@ -616,6 +619,13 @@ impl Cx<'_> {
                     }
                     Inst::ReadLine { dst } => expect(dst, &Type::Str),
                     Inst::Trap => Ok(()),
+                    Inst::Loc { file, .. } => {
+                        if *file as usize >= self.module_files {
+                            Err(format!("`loc` names file {file}, but the module has {}", self.module_files))
+                        } else {
+                            Ok(())
+                        }
+                    }
                     Inst::Unique { .. } => Err("`unique` only exists at compile time".into()),
                     Inst::Stringify { .. } => Err("`stringify` only exists at compile time".into()),
                     Inst::CodeText { .. } => Err("`codetext` only exists at compile time".into()),

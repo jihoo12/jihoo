@@ -653,6 +653,13 @@ fn statement(l: &mut Line) -> Result<Stmt> {
         "print" => Stmt::Inst(Inst::Print { src: l.reg()? }),
         "drop" => Stmt::Inst(Inst::Drop { src: l.reg()? }),
         "trap" => Stmt::Inst(Inst::Trap),
+        "loc" => {
+            let file = l.index()?;
+            l.punct(",")?;
+            let line = l.index()?;
+            l.punct(",")?;
+            Stmt::Inst(Inst::Loc { file, line, col: l.index()? })
+        }
         "fence" => Stmt::Inst(Inst::Fence),
         "jmp" => Stmt::Term(Terminator::Jump(l.block()?)),
         "br" => {
@@ -786,6 +793,7 @@ pub fn parse(text: &str) -> Result<Module> {
         enums: vec![],
         externs: vec![],
         funcs: vec![],
+        files: vec![],
     };
     let (mut version, mut profile, mut target) = (false, false, false);
     // The function being read, whether its `regs` line is next, and whether
@@ -845,6 +853,14 @@ pub fn parse(text: &str) -> Result<Module> {
                         msg: format!("unknown target `{t}`; the targets are x86_64 and aarch64"),
                     })?;
                     target = true;
+                    l.end()?;
+                }
+                "file" => {
+                    let n = l.index()?;
+                    if n as usize != m.files.len() {
+                        return l.err(format!("expected file {}, the next in order", m.files.len()));
+                    }
+                    m.files.push(l.str()?);
                     l.end()?;
                 }
                 "struct" => m.structs.push(struct_def(&mut l)?),

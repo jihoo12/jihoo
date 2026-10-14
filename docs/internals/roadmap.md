@@ -118,6 +118,9 @@
     callee in the caller's frame; LLVM gets `musttail` calls between
     `tailcc` bodies, which allows any two signatures; the ownership pass
     hands the arguments over to a version of the callee that owns them.
+34. `jihoo build --cost`: where a native program copies lists, strings and
+    closures, and why, from source positions in JIR (JIR 18: `file`, `loc`),
+    which sema writes when asked and the backend reads past.
 
 ## Next
 
@@ -133,10 +136,8 @@
   the same stages written out as a loop.
 - **Traits** ([design](traits.md)): dynamic dispatch, when a program needs
   it.
-- **Memory:** a report of where native code copies lists (`jihoo build
-  --cost`), which needs source positions in JIR; taking parts reached by a
-  path (`s.left.xs = f(s.left.xs)`), payloads and list elements, as `take`
-  does for fields.
+- **Memory:** taking parts reached by a path (`s.left.xs = f(s.left.xs)`),
+  payloads and list elements, as `take` does for fields.
 
 - **Floats:** `fma`, which IEEE also defines exactly, but freestanding code on
   x86_64 would need an exact software version.

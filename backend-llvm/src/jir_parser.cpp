@@ -550,6 +550,11 @@ Module parse(const std::string &text) {
         if (t.text != "x86_64" && t.text != "aarch64")
           fail(no, "unknown target `" + t.text + "`; the targets are x86_64 and aarch64");
         m.target = t.text;
+      } else if (first.kind == TokKind::Word && first.text == "file") {
+        if (l.index() != m.files.size()) fail(no, "expected file " + std::to_string(m.files.size()) + ", the next in order");
+        const Tok &path = l.next("a file name");
+        if (path.kind != TokKind::Str) fail(no, "expected a file name in quotes");
+        m.files.push_back(path.text);
       } else if (first.kind == TokKind::Word && first.text == "struct") {
         const Tok &name = l.next("a struct name");
         if (name.kind != TokKind::StructName) fail(no, "expected a struct like $Name");
@@ -687,6 +692,16 @@ Module parse(const std::string &text) {
       }
       const std::string &w = l.next("an instruction").text;
       Terminator &t = block->term;
+      // `loc F, L, C`: where the code after it was written. Nothing to run.
+      if (w == "loc") {
+        if (l.index() >= m.files.size()) fail(no, "`loc` names a file the module does not have");
+        l.punct(",");
+        l.index();
+        l.punct(",");
+        l.index();
+        l.end();
+        continue;
+      }
       if (w == "trap" || w == "fence") {
         Inst inst{};
         inst.op = w == "trap" ? Op::Trap : Op::Fence;

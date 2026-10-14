@@ -247,6 +247,33 @@ fn optimization_levels() {
     std::fs::remove_dir_all(&work).unwrap();
 }
 
+/// `jihoo build --cost` lists the copies a native program makes, where and
+/// why, and only those of functions it runs.
+#[test]
+fn cost_lists_copies() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let work = common::work_dir("cost");
+    let path = work.join("cost.jh");
+    let src = "fn grow(xs: [i64]) -> [i64] {\n    push(xs, 1)\n    return xs\n}\n\n\
+               fn main() {\n    let xs: [i64] = [1]\n    let ys = grow(xs)\n    let r = ref [1]\n    let s = r\n    \
+               print(len(xs) + len(ys) + len(*s))\n    let zs = grow(ys)\n    print(len(zs))\n}\n";
+    std::fs::write(&path, src).unwrap();
+    let out = Command::new(JIHOO).arg("build").arg("--cost").arg(&path).arg("-o").arg(work.join("cost")).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).replace(&format!("{}/", work.display()), "");
+    // `xs` is still printed after `grow(xs)`, so that call copies it; `ys`
+    // is handed over at its last use, to `grow.own`, which copies nothing.
+    // The copy of a `ref` counts one more holder and is not listed.
+    let want = "cost.jh:1:1: copies [i64] in @grow: parameter 1 is copied on entry, since the function changes or keeps it; \
+                a caller that hands it over at its last use calls a version that does not copy it\n1 copy\n";
+    assert_eq!(text, want, "{}", String::from_utf8_lossy(&out.stderr));
+    let out = Command::new(JIHOO).args(["emit-ir", "--cost"]).arg(&path).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("`--cost` is for `jihoo build`"));
+    std::fs::remove_dir_all(&work).unwrap();
+}
+
 /// Errors in an imported module name that module's file.
 #[test]
 fn errors_in_imported_modules_name_their_file() {

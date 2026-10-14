@@ -25,6 +25,8 @@ options:
   --target <t>  compile for x86_64 or aarch64 Linux (emit-ir, build;
               default: this machine)
   -O0 ... -O3 how much the LLVM backend optimizes (run, build; default -O2)
+  --cost      also list where a native program copies lists, strings and
+              closures, and why (build)
 
 link inputs (native programs only, passed on to the C compiler; `run` and
 `build`):
@@ -68,6 +70,8 @@ struct Opts {
     args: Vec<String>,
     /// `-O0` ... `-O3`, for the LLVM backend.
     opt: Option<String>,
+    /// `--cost`: list the copies the program makes.
+    cost: bool,
 }
 
 /// Files `jihoo build` passes on to the C compiler.
@@ -82,6 +86,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
     let mut target_given = false;
     let mut program_args = Vec::new();
     let mut opt = None;
+    let mut cost = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -98,6 +103,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
                 target_given = true;
             }
             "-O0" | "-O1" | "-O2" | "-O3" => opt = Some(a.clone()),
+            "--cost" => cost = true,
             "-l" | "-L" => link.push(format!("{a}{}", it.next().ok_or_else(|| format!("`{a}` needs an argument"))?)),
             s if (s.starts_with("-l") || s.starts_with("-L")) && s.len() > 2 => link.push(s.to_string()),
             s if s.starts_with('-') => return Err(format!("unknown option `{s}`\n\n{USAGE}")),
@@ -109,7 +115,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
         }
     }
     let input = input.ok_or_else(|| format!("missing input file\n\n{USAGE}"))?;
-    Ok(Opts { input, output, include, target, target_given, link, args: program_args, opt })
+    Ok(Opts { input, output, include, target, target_given, link, args: program_args, opt, cost })
 }
 
 /// `parse_opts` for commands that do not link or run.
@@ -124,6 +130,9 @@ fn parse_opts_no_link(args: &[String]) -> Result<Opts, String> {
     if let Some(o) = &opts.opt {
         return Err(format!("`{o}` is for the LLVM backend; only `jihoo build` and `jihoo run` use it"));
     }
+    if opts.cost {
+        return Err("`--cost` is for `jihoo build`".into());
+    }
     Ok(opts)
 }
 
@@ -135,6 +144,9 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
     match cmd.as_str() {
         "run" => {
             let opts = parse_opts(rest)?;
+            if opts.cost {
+                return Err("`--cost` is for `jihoo build`".into());
+            }
             if opts.output.is_some() {
                 return Err("`jihoo run` writes no output file; use `jihoo build -o`".into());
             }
@@ -220,9 +232,16 @@ fn compile(opts: &Opts) -> Result<Module, String> {
     }
     let loaded = jihoo_syntax::loader::load(path, &search_path(&opts.include), opts.target.as_str())
         .map_err(|(e, files)| render(&files, &e))?;
-    let mut m = jihoo_sema::analyze_modules(&loaded.modules).map_err(|errs| {
+    // Source positions for `--cost`, or always with JIHOO_LOCS (for testing
+    // that they change nothing).
+    let locs = opts.cost || std::env::var_os("JIHOO_LOCS").is_some();
+    let sema_opts = jihoo_sema::Options { locs };
+    let mut m = jihoo_sema::analyze_modules_with(&loaded.modules, sema_opts).map_err(|errs| {
         errs.iter().map(|e| render(&loaded.files, e)).collect::<Vec<_>>().join("\nerror: ")
     })?;
+    for (i, name) in m.files.iter_mut().enumerate() {
+        *name = loaded.files.get(i).map(|p| p.display().to_string()).unwrap_or_default();
+    }
     m.target = opts.target;
     jihoo_ir::verify(&m).map_err(|e| format!("{}: invalid IR: {e}", path.display()))?;
     Ok(m)
@@ -243,6 +262,9 @@ fn build(opts: &Opts) -> Result<(), String> {
             opts.input.display()
         ));
     }
+    if opts.cost {
+        print_cost(&m);
+    }
     let out = opts.output.clone().unwrap_or_else(|| opts.input.with_extension(""));
     // Without an extension, the default output is the source file itself.
     if same_file(&out, &opts.input) {
@@ -252,6 +274,26 @@ fn build(opts: &Opts) -> Result<(), String> {
         ));
     }
     link(&m, opts, &out)
+}
+
+/// `--cost`: the copies `m` makes, one a line, as `file:line:col: ...`.
+fn print_cost(m: &Module) {
+    let copies = jihoo_ir::cost::copies(m);
+    for c in &copies {
+        let at = match c.loc {
+            Some((file, line, col)) => {
+                let file = m.files.get(file as usize).map_or("?", String::as_str);
+                format!("{file}:{line}:{col}")
+            }
+            None => "?".to_string(),
+        };
+        println!("{at}: copies {} in @{}: {}", c.ty, c.func, c.why);
+    }
+    match copies.len() {
+        0 => println!("no copies"),
+        1 => println!("1 copy"),
+        n => println!("{n} copies"),
+    }
 }
 
 /// `jihoo run` for a native or freestanding program: builds it in a fresh

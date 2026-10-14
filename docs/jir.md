@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 17)
+# JIR — jihoo IR text format (version 18)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -47,6 +47,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 15 | `typeof`, and `type` holes in `quote` |
 | 16 | `take`, moving a field out of a struct that is used again |
 | 17 | `tailcall`, a call that takes the caller's place |
+| 18 | `file` headers and `loc`, source positions |
 
 ## Example
 
@@ -99,9 +100,10 @@ bb3:
 ## Module
 
 ```
-jir 15                               ; format version, must come first
+jir 18                               ; format version, must come first
 profile hosted|native|freestanding   ; language profile
 target x86_64|aarch64                ; the machine, 64-bit Linux
+file N "path"                        ; zero or more source files, numbered from 0 in order
 struct ...                           ; zero or more structs
 enum ...                             ; zero or more enums
 extern ...                           ; zero or more C functions (native only)
@@ -492,6 +494,7 @@ there, as `load` is.
 |---------------------------------|-----------------------|--------|---------|
 | `%d = syscall(%n, %a, ...)`     | int or `*T`, 1 to 7 operands | `i64` | native and freestanding only: raw Linux syscall `%n` |
 | `trap`                          |                       |        | stop the program: a runtime error on the VM, `llvm.trap` natively (as a failed bounds or division check); the block ends with `unreachable` after it |
+| `loc F, L, C`                   |                       |        | nothing: the instructions after it, up to the next `loc` in the block, come from line `L`, column `C` of file `F` (a `file` header). `jihoo` writes them only when asked (`build --cost`), and reads them to say where a copy is made; the backend reads past them |
 | `print %a`                      | number, `bool`, `str` (hosted, native) or `*u8` (native) |      | hosted and native: print the value and a newline (floats as the shortest text that reads back exactly, ties rounded up: `0.1`, `1.0`, `1e100`, `inf`, `NaN`; a `*u8` is a NUL-terminated string); natively through the C library's `stdout` |
 | `%d = to_str %a`                | number or `bool`      | `str`  | hosted, native and macros: the value as text, as `print` writes it |
 | `%d = unique %p`                | `str`                 | `str`  | compile time only: `p` plus a number unique in this compilation |

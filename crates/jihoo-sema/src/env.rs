@@ -155,6 +155,8 @@ pub(crate) struct Env<'p> {
     pub(crate) eq_checking: RefCell<Vec<String>>,
     /// The next number `unique` hands out, across every compile-time run.
     pub uniques: Cell<u64>,
+    /// Whether functions get source positions (`loc`), for `jihoo build --cost`.
+    pub locs: bool,
     /// The structs and enums `type_of` has named, as `#type:N`: an index here.
     code_types: RefCell<Vec<Type>>,
     /// Generic instances by key, their keys by name, and the ones not compiled yet.
@@ -215,6 +217,7 @@ impl<'p> Env<'p> {
             eq_helpers: RefCell::new(HashMap::new()),
             eq_checking: RefCell::new(Vec::new()),
             uniques: Cell::new(0),
+            locs: false,
             code_types: RefCell::default(),
             instances: RefCell::new(HashMap::new()),
             struct_keys: RefCell::new(HashMap::new()),

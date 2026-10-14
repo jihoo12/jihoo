@@ -1,6 +1,6 @@
 ; The entry point's symbol cannot be exported.
 ; expect: error the symbol `_start` is taken
-jir 17
+jir 18
 profile freestanding
 
 fn @f() -> unit export @_start {

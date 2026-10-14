@@ -110,6 +110,9 @@ frees it there; nothing is counted or collected while the program runs.
   `xs` in place.
 - A thread started with `go f(xs)` gets its own list, and frees it.
 
+`jihoo build --cost` lists every place a program copies a list, and why
+([Command line](../reference/command-line.md#copies)).
+
 A pointer cannot reach a list, or a value holding one: `&xs` is an error, as
 is reading such a value through a pointer, since only its variable may free
 its memory. To refer to a part of a value, use a [path](paths.md).

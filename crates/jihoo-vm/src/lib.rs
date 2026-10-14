@@ -977,6 +977,7 @@ impl<'m> Vm<'m> {
                 writeln!(out, "{line}").map_err(|e| self.error(&format!("print failed: {e}")))?;
             }
             Inst::Trap => return Err(self.error("trap: the program called `trap()`")),
+            Inst::Loc { .. } => {}
             Inst::Syscall { .. } => return Err(self.error("`syscall` is not available on the VM")),
             Inst::Asm { .. } => return Err(self.error("inline asm is not available on the VM")),
             Inst::Quote { dst, pieces, holes, kinds } => {

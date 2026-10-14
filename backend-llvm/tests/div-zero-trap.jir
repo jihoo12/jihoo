@@ -1,6 +1,6 @@
 ; Integer division by zero traps.
 ; expect: trap
-jir 17
+jir 18
 profile freestanding
 
 fn @div(u32, u32) -> u32 {

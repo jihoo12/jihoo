@@ -12,7 +12,7 @@ namespace jir {
 
 // The one JIR version this backend reads, from the `jir N` header. It must
 // equal JIR_VERSION in crates/jihoo-ir/src/lib.rs (a Rust test checks this).
-constexpr int64_t kVersion = 17;
+constexpr int64_t kVersion = 18;
 
 enum class Profile { Hosted, Native, Freestanding };
 
@@ -213,6 +213,9 @@ struct Module {
   std::vector<EnumDef> enums;
   std::vector<ExternFn> externs;
   std::vector<Function> funcs;
+  // Source files by number, for `loc` (which says where code was written, and
+  // which the backend reads past).
+  std::vector<std::string> files;
 };
 
 }  // namespace jir

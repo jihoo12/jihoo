@@ -9,6 +9,7 @@ JIHOO_LLC=$PWD/backend-llvm/build/jihoo-llc cargo test --test differential
 JIHOO_LLC=$PWD/backend-llvm/build/jihoo-llc JIHOO_FUZZ_SEEDS=2000 cargo test --release --test fuzz
 JIHOO_GC_STRESS=1 cargo test                 # with a collection at every allocation
 JIHOO_VM_CHECK=1 cargo test                  # checking every in-place update against the heap
+JIHOO_LOCS=1 cargo test --test differential  # with source positions in the JIR, which must change nothing
 nix flake check                              # everything, with the packaged toolchain
 ```
 

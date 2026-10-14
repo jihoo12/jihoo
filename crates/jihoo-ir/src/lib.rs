@@ -7,6 +7,7 @@
 //! SSA: a register may be assigned many times (a `let` variable is a register).
 //! The LLVM backend gives each register an alloca and lets mem2reg clean up.
 
+pub mod cost;
 pub mod layout;
 pub mod ownership;
 mod parse;
@@ -24,7 +25,7 @@ pub use verify::verify;
 /// module instead of compiling it with other rules. Bump it whenever the
 /// format or the meaning of anything in it changes (see "Versions" in
 /// `docs/jir.md`); the `version` tests check that both sides and the spec agree.
-pub const JIR_VERSION: u32 = 17;
+pub const JIR_VERSION: u32 = 18;
 
 /// Language profile, selected with `#![native]` or `#![freestanding]` at the
 /// top of a source file.
@@ -117,6 +118,8 @@ pub struct Module {
     /// C functions the program calls (native only), by symbol name.
     pub externs: Vec<ExternFn>,
     pub funcs: Vec<Function>,
+    /// The source files that `loc` instructions name, by number.
+    pub files: Vec<String>,
 }
 
 impl Module {
@@ -461,6 +464,10 @@ pub enum Inst {
     /// Stops the program: an error on the VM, a trap natively. The block
     /// ends with `unreachable` after it.
     Trap,
+    /// Does nothing: the code after it, up to the next `loc`, was written at
+    /// line `line`, column `col` of source file `file` (see `Module::files`).
+    /// Made only when asked for (`jihoo build --cost`).
+    Loc { file: u32, line: u32, col: u32 },
     /// Hosted-only builtin.
     Print { src: Reg },
     /// Hosted (and macros): a number or bool as text.
@@ -655,7 +662,7 @@ impl Inst {
                 }))
                 .collect(),
             Print { src } | Drop { src } => vec![src],
-            Trap | Fence => vec![],
+            Trap | Fence | Loc { .. } => vec![],
             Call { dst, args, .. }
             | Struct { dst, fields: args, .. }
             | Variant { dst, fields: args, .. }

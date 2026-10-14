@@ -1,5 +1,5 @@
 ; The targets are x86_64 and aarch64.
 ; expect: error unknown target `riscv64`
-jir 17
+jir 18
 profile freestanding
 target riscv64

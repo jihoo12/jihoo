@@ -22,6 +22,9 @@ impl Display for Module {
         writeln!(f, "jir {JIR_VERSION}")?;
         writeln!(f, "profile {}", self.profile.as_str())?;
         writeln!(f, "target {}", self.target.as_str())?;
+        for (i, file) in self.files.iter().enumerate() {
+            writeln!(f, "file {i} {}", quote(file))?;
+        }
         for s in &self.structs {
             writeln!(f)?;
             let fields: Vec<String> = s.fields.iter().map(|(n, t)| format!("{n}: {}", t.jir())).collect();
@@ -162,6 +165,7 @@ impl Display for Inst {
             Inst::Syscall { dst, args } => write!(f, "{dst} = syscall({})", list(args)),
             Inst::Print { src } => write!(f, "print {src}"),
             Inst::Trap => write!(f, "trap"),
+            Inst::Loc { file, line, col } => write!(f, "loc {file}, {line}, {col}"),
             Inst::ToStr { dst, src } => write!(f, "{dst} = to_str {src}"),
             Inst::Len { dst, src } => write!(f, "{dst} = len {src}"),
             Inst::StrByte { dst, src, index } => write!(f, "{dst} = strbyte {src}, {index}"),

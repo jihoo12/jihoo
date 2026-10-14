@@ -442,7 +442,7 @@ fn consumed(inst: &mut Inst) -> Vec<&mut Reg> {
 fn borrowed(inst: &Inst) -> Vec<Reg> {
     use Inst::*;
     match inst {
-        Const { .. } | FConst { .. } | Unit { .. } | Str { .. } | FuncRef { .. } | ReadLine { .. } | Trap | Fence => {
+        Const { .. } | FConst { .. } | Unit { .. } | Str { .. } | FuncRef { .. } | ReadLine { .. } | Trap | Fence | Loc { .. } => {
             vec![]
         }
         Copy { .. } | Struct { .. } | Variant { .. } | Array { .. } | Ref { .. } | Closure { .. } | Spawn { .. } => vec![],
@@ -502,7 +502,7 @@ fn borrowed(inst: &Inst) -> Vec<Reg> {
 fn defined(inst: &Inst) -> Vec<Reg> {
     use Inst::*;
     match inst {
-        Store { .. } | AtomicStore { .. } | Send { .. } | Spawn { .. } | Print { .. } | Trap | Fence | Drop { .. } => {
+        Store { .. } | AtomicStore { .. } | Send { .. } | Spawn { .. } | Print { .. } | Trap | Fence | Drop { .. } | Loc { .. } => {
             vec![]
         }
         CellSet { .. } => vec![],

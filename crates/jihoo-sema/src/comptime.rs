@@ -46,6 +46,7 @@ impl ComptimeModule {
             enums: vec![],
             externs: vec![],
             funcs: vec![],
+            files: vec![],
         };
         ComptimeModule { module: Rc::new(module), program: Rc::default() }
     }
