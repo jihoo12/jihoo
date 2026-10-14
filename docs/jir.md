@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 18)
+# JIR — jihoo IR text format (version 19)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -48,6 +48,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 16 | `take`, moving a field out of a struct that is used again |
 | 17 | `tailcall`, a call that takes the caller's place |
 | 18 | `file` headers and `loc`, source positions |
+| 19 | `take` moves a part at a path (`take %s, (field 0, elem %i)`), not only a field |
 
 ## Example
 
@@ -296,9 +297,9 @@ The result type is what the destination register must be declared as.
 |-------------------------------------|-----------------------|--------|---------|
 | `%d = struct $S(%a, %b, ...)`       | every field, in order | `$S`   | build a struct |
 | `%d = field %s, N`                  | `$S`                  | type of field N | read a field |
-| `%d = take %s, N`                   | `$S`                  | type of field N | move a field out (native; see [Ownership](#ownership-native-lists)) |
 | `%d = setfield %s, N, %v`           | `$S`, type of field N | `$S`   | copy of `%s` with field N replaced |
 | `%d = getpath %s, (step, ...)`      | a struct or array; each step `field N` or `elem %i` (`%i: i64`) | type at the end of the path | read a nested part; elements are bounds-checked |
+| `%d = take %s, (...)`               | as `getpath`          | type of the part | move the part out, leaving it empty (native; see [Ownership](#ownership-native-lists)) |
 | `%d = setpath %s, (step, ...), %v`  | as `getpath`, then the type at the end of the path | type of `%s` | copy of `%s` with the nested part replaced |
 
 `setfield`, `setelem` and `setpath` describe values: natively and on the VM they
@@ -437,10 +438,11 @@ In a native module:
   *view* that shares the memory of the value it was read from; the value must
   outlive the view and not change while the view is used, and the view must
   not be dropped. `clone %v, %v` makes a view a value of its own.
-- `pop` moves the element out of the list, and `take` a field out of a struct,
-  which keeps the field empty: dropping `%s` or writing the field frees
-  nothing of it. The pass makes `take` where the field is not read again
-  before it is written or `%s` dies; the VM reads the field.
+- `pop` moves the element out of the list, and `take %s, (path)` the part at
+  the path out of `%s`, which keeps the part empty: dropping `%s` or writing
+  the part frees nothing of it. The pass makes `take` where the part is not
+  read again before it, or a part holding it, is written, or `%s` dies; the
+  VM reads the part.
 - Call arguments are borrowed: the callee must not change, move or drop its
   parameters (it clones one first), and the caller still owns its argument.
   The pass also makes a *consuming* version `@f.own` of a function that

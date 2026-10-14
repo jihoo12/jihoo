@@ -25,7 +25,7 @@ pub use verify::verify;
 /// module instead of compiling it with other rules. Bump it whenever the
 /// format or the meaning of anything in it changes (see "Versions" in
 /// `docs/jir.md`); the `version` tests check that both sides and the spec agree.
-pub const JIR_VERSION: u32 = 18;
+pub const JIR_VERSION: u32 = 19;
 
 /// Language profile, selected with `#![native]` or `#![freestanding]` at the
 /// top of a source file.
@@ -381,12 +381,12 @@ pub enum Inst {
     Struct { dst: Reg, name: String, fields: Vec<Reg> },
     /// Reads field `index` of a struct value.
     Field { dst: Reg, src: Reg, index: u32 },
-    /// Moves field `index` out of struct `src`, which keeps the field empty
-    /// (natively, as a register never written: dropping it frees nothing)
-    /// until it is written again. Only the ownership pass makes it, where the
-    /// field is not read before it is written or `src` dies; the VM reads the
-    /// field.
-    Take { dst: Reg, src: Reg, index: u32 },
+    /// Moves the part of `src` at `path` (fields of structs, elements of
+    /// arrays and lists) out of it, and `src` keeps the part empty (natively,
+    /// as a register never written: dropping it frees nothing) until it is
+    /// written again. Only the ownership pass makes it, where the part is not
+    /// read before it is written or `src` dies; the VM reads the part.
+    Take { dst: Reg, src: Reg, path: Vec<PathStep> },
     /// A copy of struct `src` with field `index` replaced by `value`.
     SetField { dst: Reg, src: Reg, index: u32, value: Reg },
     /// Native and freestanding only: `*ptr`.
@@ -616,7 +616,6 @@ impl Inst {
             | Cast { dst, src }
             | Bitcast { dst, src }
             | Field { dst, src, .. }
-            | Take { dst, src, .. }
             | Tag { dst, src }
             | Payload { dst, src, .. }
             | Ref { dst, src }
@@ -647,7 +646,7 @@ impl Inst {
             Slice { dst, src, lo, hi } => vec![dst, src, lo, hi],
             Store { ptr, value } | AtomicStore { ptr, value } | Send { chan: ptr, value } => vec![ptr, value],
             Spawn { callee, args } => std::iter::once(callee).chain(args).collect(),
-            GetPath { dst, src, path } | CellGet { dst, cell: src, path } => {
+            GetPath { dst, src, path } | CellGet { dst, cell: src, path } | Take { dst, src, path } => {
                 [dst, src].into_iter().chain(path_regs(path)).collect()
             }
             NewCell { dst, value } => vec![dst, value],

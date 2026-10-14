@@ -1790,14 +1790,13 @@ class FnGen {
         return;
       }
       case Op::Take: {
-        // The field moves out; what is left is empty, as a register never
+        // The part moves out; what is left is empty, as a register never
         // written is, so freeing or replacing it frees nothing.
-        const jir::Type &st = type(arg_reg(0));
-        if (inst.dst == arg_reg(0)) fail(f_.name, "`take` into the struct it takes from");
-        const jir::Type &ft = types_.field(st, inst.imm);
-        Value *at = b_.CreateStructGEP(types_.lower(st), slot(arg_reg(0)), unsigned(inst.imm));
+        if (inst.dst == arg_reg(0)) fail(f_.name, "`take` into the value it takes from");
+        auto [at, t] = path_addr(type(arg_reg(0)), slot(arg_reg(0)), inst.path);
+        if (*t != type(inst.dst)) fail(f_.name, "`take` result has the wrong type");
         read_part(inst.dst, at);
-        b_.CreateStore(Constant::getNullValue(types_.lower(ft)), at);
+        b_.CreateStore(Constant::getNullValue(types_.lower(*t)), at);
         return;
       }
       case Op::SetField: {

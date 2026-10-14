@@ -1,6 +1,6 @@
 ; Jumps go to blocks of the same function.
 ; expect: error jump to missing block bb7
-jir 18
+jir 19
 profile freestanding
 
 fn @_start() -> i64 {

@@ -28,11 +28,12 @@
 //!   they move out, and only the parts left are freed. So taking `(it, x)` out
 //!   of `Some((it, x))`, as a `for` loop over an iterator does each round,
 //!   copies nothing.
-//! - A field read out of a struct that is used again is *taken* (`take`, see
-//!   [`field_takes`]) when the read would otherwise be copied and the struct's
-//!   field is not read again before it is written or the struct dies: the
-//!   field moves out and the struct keeps it empty. So `m.inner = f(m.inner)`
-//!   copies nothing.
+//! - A part read out of a value that is used again (a field, an element, or
+//!   a path of them) is *taken* (`take`, see [`field_takes`]) when the read
+//!   would otherwise be copied and the part is not read again before it, or
+//!   a part holding it, is written, or the value dies: the part moves out
+//!   and the value keeps it empty. So `m.inner = f(m.inner)` and
+//!   `rows[i] = f(rows[i])` copy nothing.
 //!
 //!   A parameter taken apart is one only when the function
 //!   owns it: one that would copy a part it reads clones the parameter on
@@ -452,7 +453,6 @@ fn borrowed(inst: &Inst) -> Vec<Reg> {
         | Cast { src, .. }
         | Bitcast { src, .. }
         | Field { src, .. }
-        | Take { src, .. }
         | Tag { src, .. }
         | Payload { src, .. }
         | Deref { src, .. }
@@ -481,7 +481,9 @@ fn borrowed(inst: &Inst) -> Vec<Reg> {
         AtomicCas { ptr, expected, new, .. } => vec![*ptr, *expected, *new],
         Slice { src, lo, hi, .. } => vec![*src, *lo, *hi],
         Store { ptr, .. } | Send { chan: ptr, .. } => vec![*ptr],
-        GetPath { src, path, .. } | CellGet { cell: src, path, .. } => [*src].into_iter().chain(path_regs(path)).collect(),
+        GetPath { src, path, .. } | CellGet { cell: src, path, .. } | Take { src, path, .. } => {
+            [*src].into_iter().chain(path_regs(path)).collect()
+        }
         CellSet { cell, path, .. } => [*cell].into_iter().chain(path_regs(path)).collect(),
         Push { root, path, .. } | Pop { root, path, .. } => [*root].into_iter().chain(path_regs(path)).collect(),
         NewCell { .. } => vec![],
@@ -697,13 +699,14 @@ fn views(f: &Function, tracked: &HashSet<Reg>, moves: &HashSet<(usize, Reg, Reg)
     }
 }
 
-/// Turns reads of a struct's field that would be copied into `take`s where
-/// that cannot be told apart: the struct is the function's own (not a view,
-/// and a parameter only if the function copies it anyway), no view of it is
-/// still used, and on every way on from the read the field is written whole,
-/// or the struct is written or dies, before anything reads the field or the
-/// whole struct. The struct keeps the field empty meanwhile, which writing
-/// it or dropping the struct frees nothing of.
+/// Turns reads of a part of a value (a field, an element, or a path of them)
+/// that would be copied into `take`s where that cannot be told apart: the
+/// value is the function's own (not a view, and a parameter only if the
+/// function copies it anyway), no view of it is still used, and on every way
+/// on from the read the part, or a part holding it, is written whole, or the
+/// value is written or dies, before anything reads the part or the whole
+/// value. The value keeps the part empty meanwhile, which writing it or
+/// dropping the value frees nothing of.
 fn field_takes(f: &mut Function, owning: &mut Owning, cloning: &HashMap<String, Vec<usize>>) {
     let tracked: HashSet<Reg> = (0..f.regs.len() as u32).map(Reg).filter(|&r| owning.owns(f.reg_type(r))).collect();
     if tracked.is_empty() {
@@ -724,14 +727,14 @@ fn field_takes(f: &mut Function, owning: &mut Owning, cloning: &HashMap<String, 
         }
         after.reverse();
         for (i, inst) in block.insts.iter().enumerate() {
-            let Inst::Field { dst, src, index } = *inst else { continue };
-            if !tracked.contains(&dst) || dst == src || roots.contains_key(&src) {
+            let Some((dst, src, path)) = part_path(inst) else { continue };
+            if !tracked.contains(&dst) || dst == src || roots.contains_key(&src) || path_regs(&path).any(|x| x == src) {
                 continue;
             }
             if src.0 < params && !copied_params.contains(&(src.0 as usize)) {
                 continue;
             }
-            // Worth it only where the field would be copied: it cannot stay a
+            // Worth it only where the part would be copied: it cannot stay a
             // view, or it is consumed, or handed to a function that copies it.
             let copied = !roots.contains_key(&dst)
                 || f.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
@@ -740,64 +743,96 @@ fn field_takes(f: &mut Function, owning: &mut Owning, cloning: &HashMap<String, 
                             if cloning.get(func.as_str()).is_some_and(|ps| ps.iter().any(|&p| args[p] == dst)))
                 });
             let viewed = after[i].iter().any(|v| *v != dst && roots.get(v) == Some(&src));
-            if copied && !viewed && field_unread(f, b, i, src, index) {
-                found.push((b, i));
+            if copied && !viewed && part_unread(f, b, i, src, &path) {
+                found.push((b, i, dst, src, path));
             }
         }
     }
-    for (b, i) in found {
-        let Inst::Field { dst, src, index } = f.blocks[b].insts[i] else { unreachable!() };
-        f.blocks[b].insts[i] = Inst::Take { dst, src, index };
+    for (b, i, dst, src, path) in found {
+        f.blocks[b].insts[i] = Inst::Take { dst, src, path };
     }
 }
 
-/// Whether, on every way on from instruction `at` of block `block`, field
-/// `k` of struct `r` is written whole, or `r` is written or dies, before the
-/// field or the whole of `r` is read.
-fn field_unread(f: &Function, block: usize, at: usize, r: Reg, k: u32) -> bool {
+/// `inst` as a read of a part that a `take` could move out: its result, what
+/// it reads from, and the part's path.
+fn part_path(inst: &Inst) -> Option<(Reg, Reg, Vec<PathStep>)> {
+    match inst {
+        Inst::Field { dst, src, index } => Some((*dst, *src, vec![PathStep::Field(*index)])),
+        Inst::Elem { dst, src, index } => Some((*dst, *src, vec![PathStep::Elem(*index)])),
+        Inst::GetPath { dst, src, path } => Some((*dst, *src, path.clone())),
+        _ => None,
+    }
+}
+
+/// How the part of a value at path `q` stands to the part at `p`.
+#[derive(PartialEq)]
+enum Overlap {
+    /// No part of one is part of the other.
+    Disjoint,
+    Same,
+    /// `q` is a part of `p`.
+    Inside,
+    /// `p` is a part of `q`.
+    Holds,
+    /// Elements at different index registers, which may be the same.
+    Unknown,
+}
+
+fn overlap(p: &[PathStep], q: &[PathStep]) -> Overlap {
+    for (a, b) in p.iter().zip(q) {
+        match (a, b) {
+            (PathStep::Field(x), PathStep::Field(y)) if x != y => return Overlap::Disjoint,
+            (PathStep::Field(_), PathStep::Field(_)) => {}
+            (PathStep::Elem(x), PathStep::Elem(y)) if x == y => {}
+            _ => return Overlap::Unknown,
+        }
+    }
+    match q.len().cmp(&p.len()) {
+        std::cmp::Ordering::Equal => Overlap::Same,
+        std::cmp::Ordering::Greater => Overlap::Inside,
+        std::cmp::Ordering::Less => Overlap::Holds,
+    }
+}
+
+/// Whether, on every way on from instruction `at` of block `block`, the part
+/// of `r` at path `p` (or a part holding it) is written whole, or `r` is
+/// written or dies, before the part or the whole of `r` is read. A part
+/// written at an unknown element, or inside the empty part, counts as read;
+/// so does writing a register the path indexes with, after which the same
+/// register may mean another element.
+fn part_unread(f: &Function, block: usize, at: usize, r: Reg, p: &[PathStep]) -> bool {
     enum Step {
         Next,
         Fine,
         Read,
     }
-    let other = |path: &[PathStep]| matches!(path.first(), Some(PathStep::Field(j)) if *j != k);
+    let indices: Vec<Reg> = path_regs(p).collect();
+    let read = |q: &[PathStep]| if overlap(p, q) == Overlap::Disjoint { Step::Next } else { Step::Read };
+    let write = |q: &[PathStep]| match overlap(p, q) {
+        Overlap::Disjoint => Step::Next,
+        Overlap::Same | Overlap::Holds => Step::Fine,
+        Overlap::Inside | Overlap::Unknown => Step::Read,
+    };
     let step = |inst: &Inst| -> Step {
+        if defined(inst).iter().any(|d| indices.contains(d)) {
+            return Step::Read;
+        }
+        let mentions = |path: &[PathStep]| path_regs(path).any(|x| x == r);
         match inst {
-            Inst::Field { src, index, .. } | Inst::Take { src, index, .. } if *src == r => {
-                if *index == k {
-                    Step::Read
-                } else {
-                    Step::Next
-                }
-            }
+            Inst::Field { src, index, .. } if *src == r => read(&[PathStep::Field(*index)]),
+            Inst::Elem { src, index, .. } if *src == r && *index != r => read(&[PathStep::Elem(*index)]),
+            Inst::GetPath { src, path, .. } | Inst::Take { src, path, .. } if *src == r && !mentions(path) => read(path),
             Inst::SetField { dst, src, index, value } if *dst == r && *src == r && *value != r => {
-                if *index == k {
-                    Step::Fine
-                } else {
-                    Step::Next
-                }
+                write(&[PathStep::Field(*index)])
             }
-            Inst::SetPath { dst, src, path, value } if *dst == r && *src == r && *value != r && !path_regs(path).any(|x| x == r) => {
-                match path.as_slice() {
-                    [PathStep::Field(j)] if *j == k => Step::Fine,
-                    _ if other(path) => Step::Next,
-                    _ => Step::Read,
-                }
+            Inst::SetElem { dst, src, index, value } if *dst == r && *src == r && *value != r && *index != r => {
+                write(&[PathStep::Elem(*index)])
             }
-            Inst::GetPath { src, path, .. } if *src == r && !path_regs(path).any(|x| x == r) => {
-                if other(path) {
-                    Step::Next
-                } else {
-                    Step::Read
-                }
+            Inst::SetPath { dst, src, path, value } if *dst == r && *src == r && *value != r && !mentions(path) => {
+                write(path)
             }
-            Inst::Push { root, path, value } | Inst::Pop { root, path, dst: value } if *root == r && *value != r => {
-                if other(path) && !path_regs(path).any(|x| x == r) {
-                    Step::Next
-                } else {
-                    Step::Read
-                }
-            }
+            Inst::Push { root, path, value } if *root == r && *value != r && !mentions(path) => read(path),
+            Inst::Pop { root, path, dst } if *root == r && *dst != r && !mentions(path) => read(path),
             Inst::Drop { src } if *src == r => Step::Fine,
             inst if uses(inst).contains(&r) => Step::Read,
             inst if defined(inst).contains(&r) => Step::Fine,

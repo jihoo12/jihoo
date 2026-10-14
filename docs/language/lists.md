@@ -107,7 +107,8 @@ frees it there; nothing is counted or collected while the program runs.
 - A function that only reads a list parameter never copies it. One that
   changes it copies it once, as on the VM, unless the caller's list was at
   its last use: then the function takes it over, so `xs = f(xs)` changes
-  `xs` in place.
+  `xs` in place. The same holds for a part: `rows[i] = f(rows[i])` and
+  `b.items = f(b.items)` move the part out and back.
 - A thread started with `go f(xs)` gets its own list, and frees it.
 
 `jihoo build --cost` lists every place a program copies a list, and why

@@ -1,7 +1,8 @@
-// Fields taken out of a struct that is used again: natively a field read
-// that would be copied moves out (`take`) when nothing reads the field before
-// it is written again or the struct dies, and is copied otherwise. Every case
-// here must print the same on the VM.
+// Parts taken out of a value that is used again: natively a read of a
+// field, an element or a path of them that would be copied moves out
+// (`take`) when nothing reads the part before it is written again or the
+// value dies, and is copied otherwise. Every case here must print the same
+// on the VM.
 
 struct Bag {
     name: str
@@ -84,6 +85,56 @@ fn swap_names(s: Shelf) -> Shelf {
     return s
 }
 
+// Elements of a list replaced by a function of themselves.
+fn grow_all(rows: [[i64]]) -> [[i64]] {
+    for i in 0..len(rows) {
+        rows[i] = grow(rows[i])
+    }
+    return rows
+}
+
+// Another index: the element may be the same one, so it is copied.
+fn cross(rows: [[i64]], i: i64, j: i64) -> i64 {
+    let r = grow(rows[i])
+    rows[j] = r
+    return len(rows[i]) * 10 + len(rows[j])
+}
+
+// The index changes between the read and the write: copied.
+fn shifted(rows: [[i64]], i: i64) -> i64 {
+    let r = grow(rows[i])
+    i = 0
+    rows[i] = r
+    return len(rows[0]) * 10 + len(rows[len(rows) - 1])
+}
+
+// Written inside the part before the part is: copied (an empty list would
+// have no element 0 to write).
+fn inside(s: Shelf) -> i64 {
+    let xs = grow(s.left.xs)
+    s.left.xs[0] = 7
+    s.left.xs = xs
+    return sum(s.left.xs)
+}
+
+// A path through elements and fields, in a loop.
+fn deep(shelves: [Shelf], rounds: i64) -> [Shelf] {
+    for r in 0..rounds {
+        for i in 0..len(shelves) {
+            shelves[i].right.xs = grow(shelves[i].right.xs)
+        }
+    }
+    return shelves
+}
+
+// An array of lists.
+fn columns(cols: [[i64]; 3]) -> i64 {
+    for i in 0..3 {
+        cols[i] = grow(cols[i])
+    }
+    return len(cols[0]) + len(cols[1]) * 10 + len(cols[2]) * 100
+}
+
 fn entry() -> i64 {
     let b = replaced(bag("b", 3), 4)
     out(len(b.xs) * 100 + sum(b.xs))
@@ -106,5 +157,20 @@ fn entry() -> i64 {
         c.n = c.n + 1
     }
     out(len(c.xs) + c.n)
+
+    let rows: [[i64]] = [[], [1], [1, 2]]
+    let g = grow_all(grow_all(rows))
+    out(len(g[0]) * 100 + len(g[1]) * 10 + len(g[2]))
+    out(len(rows[2]))
+    out(cross(rows, 1, 1))
+    out(cross(rows, 1, 2))
+    out(shifted(rows, 2))
+    out(inside(Shelf { left: bag("i", 2), right: bag("j", 0) }))
+    let shelves: [Shelf] = [Shelf { left: bag("a", 1), right: bag("b", 2) }, Shelf { left: bag("c", 0), right: bag("d", 0) }]
+    let d = deep(shelves, 50)
+    out(len(d[0].right.xs) * 1000 + len(d[1].right.xs))
+    out(len(shelves[0].right.xs))
+    let empty: [i64] = []
+    out(columns([empty, [1], [1, 2]]))
     return 0
 }

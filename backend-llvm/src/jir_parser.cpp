@@ -438,8 +438,8 @@ Inst parse_assign(Line &l) {
     inst.op = Op::Struct;
     inst.text = s.text;
     inst.args = l.reg_list();
-  } else if (w == "field" || w == "take" || w == "fieldptr") {
-    inst.op = w == "field" ? Op::Field : w == "take" ? Op::Take : Op::FieldPtr;
+  } else if (w == "field" || w == "fieldptr") {
+    inst.op = w == "field" ? Op::Field : Op::FieldPtr;
     inst.args = {l.reg()};
     l.punct(",");
     inst.imm = l.index();
@@ -468,9 +468,9 @@ Inst parse_assign(Line &l) {
     uint32_t i = l.reg();
     l.punct(",");
     inst.args = {a, i, l.reg()};
-  } else if (w == "getpath" || w == "setpath") {
-    // `getpath %s, (field N, elem %i, ...)` / `setpath %s, (...), %v`
-    inst.op = w == "getpath" ? Op::GetPath : Op::SetPath;
+  } else if (w == "getpath" || w == "take" || w == "setpath") {
+    // `getpath %s, (field N, elem %i, ...)`, `take %s, (...)` / `setpath %s, (...), %v`
+    inst.op = w == "getpath" ? Op::GetPath : w == "take" ? Op::Take : Op::SetPath;
     inst.args = {l.reg()};
     l.punct(",");
     inst.path = l.path();

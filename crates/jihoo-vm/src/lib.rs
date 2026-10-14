@@ -640,9 +640,7 @@ impl<'m> Vm<'m> {
                 let r = self.alloc_agg(values);
                 self.set(*dst, Value::Agg(r));
             }
-            // Natively `take` leaves the field empty; nothing reads it here
-            // before it is written again.
-            Inst::Field { dst, src, index } | Inst::Take { dst, src, index } => {
+            Inst::Field { dst, src, index } => {
                 let r = self.agg_ref(*src)?;
                 let v = self.heap.items(r)[*index as usize];
                 let v = self.share(v);
@@ -653,7 +651,9 @@ impl<'m> Vm<'m> {
                 let v = self.shared(*value);
                 self.update(*dst, *src, r, *index as usize, v);
             }
-            Inst::GetPath { dst, src, path } => {
+            // Natively `take` leaves the part empty; nothing reads it here
+            // before it is written again.
+            Inst::GetPath { dst, src, path } | Inst::Take { dst, src, path } => {
                 let v = self.get_in(self.get(*src), path)?;
                 self.set(*dst, v);
             }

@@ -361,7 +361,7 @@ impl Cx<'_> {
                             expect(dst, &Type::Struct(name.clone()))
                         }
                     }
-                    Inst::Field { dst, src, index } | Inst::Take { dst, src, index } => {
+                    Inst::Field { dst, src, index } => {
                         expect(dst, self.field(ty(src)?, *index)?)
                     }
                     Inst::Variant { dst, index, fields } => {
@@ -495,7 +495,7 @@ impl Cx<'_> {
                         Type::Cell(t) => expect(value, &self.walk(t, path, &f.regs)?),
                         t => Err(format!("`cellset` needs a cell, found {}", t.jir())),
                     },
-                    Inst::GetPath { dst, src, path } => {
+                    Inst::GetPath { dst, src, path } | Inst::Take { dst, src, path } => {
                         let t = self.walk(ty(src)?, path, &f.regs)?;
                         expect(dst, &t)
                     }

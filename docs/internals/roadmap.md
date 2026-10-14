@@ -121,6 +121,11 @@
 34. `jihoo build --cost`: where a native program copies lists, strings and
     closures, and why, from source positions in JIR (JIR 18: `file`, `loc`),
     which sema writes when asked and the backend reads past.
+35. `take` for any path of fields and elements (JIR 19): `rows[i] =
+    f(rows[i])` and `shelves[i].right.xs = f(shelves[i].right.xs)` move the
+    part out and back. Paths are compared step by step; elements at
+    different index registers, or an index written in between, count as the
+    same element, so the part is copied.
 
 ## Next
 
@@ -136,8 +141,9 @@
   the same stages written out as a loop.
 - **Traits** ([design](traits.md)): dynamic dispatch, when a program needs
   it.
-- **Memory:** taking parts reached by a path (`s.left.xs = f(s.left.xs)`),
-  payloads and list elements, as `take` does for fields.
+- **Memory:** taking an enum's payload out of a value that is used again
+  (`take` covers fields and elements; payloads move only out of values
+  that are only taken apart).
 
 - **Floats:** `fma`, which IEEE also defines exactly, but freestanding code on
   x86_64 would need an exact software version.

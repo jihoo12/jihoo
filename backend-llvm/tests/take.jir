@@ -1,7 +1,7 @@
 ; `take` moves a field out of a struct and leaves it empty (all zeros), which
 ; a later `setfield` writes over: 7 taken, 0 left, then 5 written.
 ; expect: exit 75
-jir 18
+jir 19
 profile freestanding
 
 struct $P { x: i64, y: i64 } size 16 align 8
@@ -12,7 +12,7 @@ bb0:
   %0 = const 7
   %1 = const 3
   %2 = struct $P(%0, %1)
-  %3 = take %2, 0
+  %3 = take %2, (field 0)
   %4 = field %2, 0
   %5 = const 5
   %2 = setfield %2, 0, %5

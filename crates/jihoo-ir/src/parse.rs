@@ -431,14 +431,12 @@ fn assign(l: &mut Line, dst: Reg) -> Result<Inst> {
             Tok::Named(name) => Inst::Struct { dst, name, fields: l.regs()? },
             t => return l.err(format!("expected a struct like $Name, found {t}")),
         },
-        "field" | "take" | "fieldptr" => {
+        "field" | "fieldptr" => {
             let src = l.reg()?;
             l.punct(",")?;
             let index = l.index()?;
             if op == "field" {
                 Inst::Field { dst, src, index }
-            } else if op == "take" {
-                Inst::Take { dst, src, index }
             } else {
                 Inst::FieldPtr { dst, ptr: src, index }
             }
@@ -504,10 +502,18 @@ fn assign(l: &mut Line, dst: Reg) -> Result<Inst> {
             l.punct(",")?;
             Inst::CellGet { dst, cell, path: l.path()? }
         }
-        "getpath" => {
+        "getpath" | "take" => {
             let src = l.reg()?;
             l.punct(",")?;
-            Inst::GetPath { dst, src, path: l.path()? }
+            let path = l.path()?;
+            if path.is_empty() {
+                return l.err("empty path");
+            }
+            if op == "take" {
+                Inst::Take { dst, src, path }
+            } else {
+                Inst::GetPath { dst, src, path }
+            }
         }
         "setpath" => {
             let src = l.reg()?;
