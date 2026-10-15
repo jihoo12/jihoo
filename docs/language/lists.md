@@ -119,6 +119,9 @@ is collected while the program runs.
   its last use: then the function takes it over, so `xs = f(xs)` changes
   `xs` in place. The same holds for a part: `rows[i] = f(rows[i])` and
   `b.items = f(b.items)` move the part out and back.
+- `xs = lists.map(xs, f)` to the same type, and `lists.filter`, write into
+  `xs`'s memory: the library's rules for them allocate nothing when the list
+  is handed over.
 - A thread started with `go f(xs)` gets its own list, and frees it.
 
 `jihoo build --cost` lists every place a program copies (shares) a list, and why

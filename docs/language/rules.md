@@ -86,7 +86,11 @@ alone. When several rules match, the first that fits applies, in order of
 their names. Rules do not apply inside rules, so a rule can call what it
 replaces.
 
-`jihoo emit-ir` shows the calls of rules.
+`jihoo emit-ir` shows the calls of rules. The standard library has some:
+`lists.map` to the same type and `lists.filter` become `map_in_place` and
+`filter_in_place`, which write into the list they are given
+([Standard library](../reference/standard-library.md#lists)). They take
+part in the order of names like any other rule.
 
 ## Rules and effects
 

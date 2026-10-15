@@ -1,0 +1,59 @@
+// `lists.map` and `lists.filter` to a list of the same type become
+// `map_in_place` and `filter_in_place`, rules that write the result into the
+// list's own memory: natively nothing is allocated when the list is handed
+// over. The list passed in must still look unchanged wherever it is used
+// again, and elements that own memory (strings, lists) must move and free
+// correctly. Everything must print the same as on the VM.
+import lists
+import strings
+
+fn total(xs: [i64]) -> i64 {
+    let s = 0
+    for x in xs {
+        s += x
+    }
+    return s
+}
+
+fn entry() -> i64 {
+    // Handed over: written in place.
+    let xs: [i64] = [1, 2, 3, 4, 5, 6]
+    xs = lists.map(xs, fn(x: i64) -> i64 { return x * 10 + 1 })
+    xs = lists.filter(xs, fn(x: i64) -> bool { return x % 3 != 0 })
+    out(total(xs))
+    out(len(xs))
+
+    // Still used afterwards: the original keeps its values.
+    let ys: [i64] = [5, 6, 7]
+    let zs = lists.map(ys, fn(y: i64) -> i64 { return y - 5 })
+    out(total(ys))
+    out(total(zs))
+    let kept = lists.filter(ys, fn(y: i64) -> bool { return y > 5 })
+    out(len(ys) * 10 + len(kept))
+
+    // Strings: elements that own memory move, and the dropped ones are freed.
+    let words: [str] = ["alpha", "be", "gamma", "do", "epsilon"]
+    let saved = words
+    words = lists.map(words, fn(w: str) -> str { return strings.to_upper(w) })
+    words = lists.filter(words, fn(w: str) -> bool { return len(w) > 2 })
+    out(len(words))
+    out(len(strings.join(words, ",")))
+    out(len(strings.join(saved, ",")))
+    out(words[0][0] as i64)
+    out(saved[0][0] as i64)
+
+    // Lists of lists: the inner lists are shared, then written.
+    let rows: [[i64]] = [[1, 2], [3], [4, 5, 6]]
+    let before = rows
+    rows = lists.map(rows, fn(r: [i64]) -> [i64] { return r + [0] })
+    rows = lists.filter(rows, fn(r: [i64]) -> bool { return len(r) > 2 })
+    out(len(rows))
+    out(total(rows[0]) + total(rows[1]))
+    out(len(before[0]) * 100 + len(before[1]) * 10 + len(before[2]))
+
+    // Nothing kept, and everything kept.
+    let none = lists.filter(xs, fn(x: i64) -> bool { return x < 0 })
+    let all = lists.filter(xs, fn(x: i64) -> bool { return x > 0 })
+    out(len(none) * 10 + len(all))
+    return 0
+}

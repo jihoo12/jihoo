@@ -1,10 +1,11 @@
 # Design: native memory
 
-Status: steps 1 to 3 are done: [counted buffers](#1-counted-buffers-done),
-[uniqueness checks that fold away](#2-uniqueness-checks-that-fold-away-done)
-and [the ownership checker](#3-ownership-the-compiler-checks-done). Programs
+Status: steps 1 to 4 are done: [counted buffers](#1-counted-buffers-done),
+[uniqueness checks that fold away](#2-uniqueness-checks-that-fold-away-done),
+[the ownership checker](#3-ownership-the-compiler-checks-done) and
+[reuse for `map` and `filter`](#4-reuse-done-for-map-and-filter). Programs
 that needed copies are 25 to 100 times faster, and nothing else got slower
-([measurements](#measurements)). Steps 4 and 5 are left. Nothing here changes
+([measurements](#measurements)). Step 5 is left. Nothing here changes
 the language: values keep their meaning, and hosted programs do not change.
 
 ## Why
@@ -190,13 +191,43 @@ leak").
 So the pass can keep learning to avoid copies, and a mistake in it shows
 up as a compile error, not as memory corruption in a program.
 
-### 4. Reuse
+### 4. Reuse (done for `map` and `filter`)
 
-With counts, a buffer that is unique when its value dies can be reused for
-the value built from it, as Perceus does. `lists.map` over a list handed
-over, with elements of the same size, would write the results into the same
-buffer: no allocation and no free. Today the pass gets this only for `xs =
-f(xs)` written in place.
+A buffer that is unique when its value dies can hold the value built from
+it. Perceus reuses the memory of a dying constructor for the next one of
+the same size; for lists the gain is in writing the result into the input,
+because `map` allocates its result before the input dies. Measured on 20
+rounds of `xs = lists.map(xs, f)` over 2 million integers: 0.10 s and
+33 MB, where a loop writing `xs[i]` in place takes 0.04 s and 17 MB.
+
+jihoo has a way to say this without teaching the compiler about `map`:
+[rewrite rules](../language/rules.md), which the compiler checks against
+what they replace. `lib/lists.jh` now has
+
+```jihoo
+pub fn map_in_place(comptime T: type, xs: [T], f: fn(T) -> T) -> [T] replaces map(xs, f) {
+    for i in 0..len(xs) {
+        xs[i] = f(xs[i])
+    }
+    return xs
+}
+```
+
+and `filter_in_place`, which moves the kept elements to the front and pops
+the rest. A rule applies only where the types fit, so `map_in_place` only
+replaces a `map` to the same type. It writes `xs`, so it has a consuming
+version, which `xs = lists.map(xs, f)` calls: nothing is allocated. Where
+`xs` is still used, the call copies it once, at the first write, as
+`map` did. The `map` above now takes 0.05 s and 17 MB.
+
+Rules apply only where the functions they are given are inert (no effects,
+certain to return), since rules may reorder calls. To count `x % 3 == 0`
+as inert, the effect analysis now knows that dividing by a constant other
+than 0 and -1 cannot trap. A function with a loop (`strings.to_upper`) is
+still not inert, so `map` over strings with it is compiled as written. The
+in-place rules call `f` in the same order as `map`, so they could apply to
+any `f`; that needs the rule checker to compare the order in which a rule
+and its pattern call the functions they are given, which the roadmap has.
 
 ### 5. Later, in the language
 
@@ -267,5 +298,6 @@ The cost in memory is 8 bytes for each list or string buffer.
 1. ~~Counted buffers in the backend.~~ Done.
 2. ~~Uniqueness checks that fold away.~~ Done.
 3. ~~Explicit ownership in JIR and the checker.~~ Done.
-4. Reuse of unique buffers.
+4. ~~Reuse of unique buffers~~, for `map` and `filter`, as rules. Done. Next:
+   checking the order of calls in rules, so that they apply to any `f`.
 5. `inout` parameters, if programs still want them.

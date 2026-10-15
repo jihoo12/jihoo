@@ -341,6 +341,33 @@ fn main() {
     std::fs::remove_dir_all(&work).unwrap();
 }
 
+/// `xs = lists.map(xs, f)` and `lists.filter` to the same type become the
+/// library's in-place rules, and take the list over: no list is allocated.
+/// A function with an effect keeps the call as written.
+#[test]
+fn map_and_filter_reuse_the_list() {
+    let work = common::work_dir("in-place");
+    let path = work.join("in_place.jh");
+    let src = "import lists\n\nfn main() {\n    let xs: [i64] = [1, 2, 3]\n    \
+               xs = lists.map(xs, fn(x: i64) -> i64 { return x * 2 })\n    \
+               xs = lists.filter(xs, fn(x: i64) -> bool { return x % 4 == 0 })\n    \
+               let ys = lists.map(xs, fn(x: i64) -> i64 { print(x)\n return x })\n    \
+               let zs = lists.map(xs, fn(x: i64) -> str { return to_str(x) })\n    \
+               print(len(ys) + len(zs))\n}\n";
+    std::fs::write(&path, src).unwrap();
+    let out = Command::new(JIHOO).arg("emit-ir").arg(&path).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let jir = String::from_utf8_lossy(&out.stdout);
+    let main = &jir[jir.find("fn @main(").unwrap()..];
+    let main = &main[..main.find("\n}\n").unwrap()];
+    let calls: Vec<&str> = main.lines().filter_map(|l| l.split("call @lists.").nth(1)).map(|c| c.split('(').next().unwrap()).collect();
+    assert!(calls[0].starts_with("map_in_place") && calls[0].ends_with(".own"), "{calls:?}");
+    assert!(calls[1].starts_with("filter_in_place") && calls[1].ends_with(".own"), "{calls:?}");
+    // It prints: kept as written. To another type: kept too.
+    assert!(calls[2].starts_with("map.") && calls[3].starts_with("map."), "{calls:?}");
+    std::fs::remove_dir_all(&work).unwrap();
+}
+
 /// Errors in an imported module name that module's file.
 #[test]
 fn errors_in_imported_modules_name_their_file() {

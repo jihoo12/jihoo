@@ -166,6 +166,14 @@ fn main() {
 | `contains(T, xs, x) -> bool` | whether `x` is in `xs` |
 | `range(lo, hi) -> [i64]` | `lo` up to but not including `hi` |
 
+`map` to the same type and `filter` reuse the list's memory: the module has
+[rules](../language/rules.md) `map_in_place` and `filter_in_place` that
+replace them where `f` or `keep` has no effects, and write the result into
+the list passed in. Natively, `xs = lists.map(xs, f)` then allocates
+nothing; where `xs` is still used, it is copied once, at the first write.
+Either way the result is the same, and the compiler checks the rules
+against what they replace.
+
 `examples/words.jh` puts `read_line`, `strings` and `lists` together: it counts
 the words of its input and prints the most common ones.
 
@@ -173,7 +181,8 @@ the words of its input and prints the most common ones.
 
 `lists.fuse!(xs, stage...)` runs a pipeline over `xs` as one loop, building no
 list between the stages, so it is as fast as the loop written out by hand;
-`map`, `filter` and `fold` above build a new list each.
+`map`, `filter` and `fold` above make a list each (in place for `map` to
+the same type and `filter`, as above).
 
 ```jihoo
 let total = lists.fuse!(xs,

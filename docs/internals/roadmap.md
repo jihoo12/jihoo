@@ -191,6 +191,12 @@
     LLVM fold the checks away, so loops of writes cost what they did. Keeping
     2,000 versions of a 200 x 200 grid went from 0.51 s and 643 MB to 0.02 s
     and 14 MB; programs that copied nothing take the same time.
+45. `lists.map` to the same type and `lists.filter` write into the list
+    they are given, through rules in `lib/lists.jh` (`map_in_place`,
+    `filter_in_place`) that the compiler checks: `xs = lists.map(xs, f)`
+    allocates nothing (0.05 s and 17 MB instead of 0.10 s and 33 MB on 2
+    million integers). Dividing by a constant other than 0 and -1 counts as
+    inert for rules, so `x % 3 == 0` can be given to them.
 
 ## Next
 
@@ -213,8 +219,9 @@
   invariants of a module's structs, so that `pub` functions taking them can
   be tried; `old(e)` for the value of an expression at the start; and
   telling apart runtime contract failures from other traps natively.
-- **Memory** ([design](memory.md)): reuse of unique buffers (a `map` over a
-  list handed over writing into the same memory). Also taking an enum's payload out of a value that is used again
+- **Memory** ([design](memory.md)): rules that apply to functions with
+  effects when they keep the order of calls (so that `map_in_place` applies
+  to any `f`). Also taking an enum's payload out of a value that is used again
   (`take` covers fields and elements; payloads move only out of values
   that are only taken apart).
 

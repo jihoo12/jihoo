@@ -15,6 +15,7 @@
 //! being compiled) counts as doing anything, and any loop or recursion as
 //! possibly never returning.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use jihoo_ir::{BinOp, Function, Inst, Reg, Terminator, Type};
@@ -143,6 +144,24 @@ impl crate::env::Env<'_> {
         ty: &dyn Fn(Reg) -> Type,
         fin: &mut bool,
     ) -> Effects {
+        let insts: Vec<&Inst> = insts.collect();
+        // Registers every write of which is the same constant.
+        let mut consts: HashMap<Reg, Option<i64>> = HashMap::new();
+        for inst in &insts {
+            match inst {
+                Inst::Const { dst, value } => {
+                    let c = consts.entry(*dst).or_insert(Some(*value));
+                    if *c != Some(*value) {
+                        *c = None;
+                    }
+                }
+                other => {
+                    if let Some(d) = other.dst() {
+                        consts.insert(d, None);
+                    }
+                }
+            }
+        }
         let mut e = Effects::NONE;
         for inst in insts {
             e |= match inst {
@@ -177,8 +196,14 @@ impl crate::env::Env<'_> {
                 | Inst::ToStr { .. }
                 | Inst::ParseFloat { .. }
                 | Inst::Len { .. } => Effects::NONE,
-                // Integer division traps on 0 (and MIN / -1).
-                Inst::Binary { op: BinOp::Div | BinOp::Rem, lhs, .. } if !matches!(ty(*lhs), Type::Float(_)) => Effects::MAY_FAIL,
+                // Integer division traps on 0 (and MIN / -1), so not by any
+                // other constant.
+                Inst::Binary { op: BinOp::Div | BinOp::Rem, lhs, rhs, .. } if !matches!(ty(*lhs), Type::Float(_)) => {
+                    match consts.get(rhs) {
+                        Some(Some(c)) if *c != 0 && *c != -1 => Effects::NONE,
+                        _ => Effects::MAY_FAIL,
+                    }
+                }
                 Inst::Binary { .. } => Effects::NONE,
                 // Bounds-checked.
                 Inst::GetPath { path, .. } | Inst::SetPath { path, .. } => {
