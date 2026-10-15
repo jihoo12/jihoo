@@ -284,7 +284,8 @@ impl Env<'_> {
 }
 
 /// `a` on `vm`'s heap, to pass as an argument: a macro's code arguments,
-/// numbers, bools and `str`, and the values contracts are tried with.
+/// numbers, bools and `str`, and the values contracts and rules are tried
+/// with.
 pub(crate) fn arg(vm: &mut Vm, a: &ConstValue) -> Value {
     match a {
         ConstValue::Unit => Value::Unit,
@@ -297,7 +298,8 @@ pub(crate) fn arg(vm: &mut Vm, a: &ConstValue) -> Value {
             let items = items.iter().map(|x| arg(vm, x)).collect();
             vm.alloc_list(items)
         }
-        ConstValue::Func(_) => unreachable!("arguments are never functions"),
+        // The functions rules are checked with (`rules.rs`).
+        ConstValue::Func(name) => vm.func_value(name).expect("a function the run has"),
     }
 }
 

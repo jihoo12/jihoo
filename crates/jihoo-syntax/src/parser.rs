@@ -471,8 +471,8 @@ impl Parser {
         }
         self.expect(&Tok::RParen, "`)`")?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
-        let (contracts, nocopy) = self.contracts()?;
-        let first = contracts.first().map(|c| c.pos).into_iter().chain(nocopy).min_by_key(|p| (p.line, p.col));
+        let (contracts, nocopy, replaces) = self.contracts()?;
+        let first = contracts.first().map(|c| c.pos).into_iter().chain(nocopy).chain(replaces.as_ref().map(|c| c.pos)).min_by_key(|p| (p.line, p.col));
         if let (true, Some(pos)) = (is_extern, first) {
             return Err(Error::new(pos, "a C function cannot have a contract; wrap it in a jihoo function that does"));
         }
@@ -481,21 +481,25 @@ impl Parser {
         }
         if is_extern || (body_optional && *self.peek() != Tok::LBrace) {
             let body = Block { stmts: vec![], end: pos };
-            return Ok((FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, contracts, nocopy, body }, false));
+            return Ok((FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, contracts, nocopy, replaces, body }, false));
         }
         let body = self.block()?;
-        Ok((FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, contracts, nocopy, body }, true))
+        Ok((FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, contracts, nocopy, replaces, body }, true))
     }
 
-    /// `requires cond`, `ensures cond` and `nocopy` after a signature. The
-    /// words are only special here, so they stay free as names everywhere else.
-    fn contracts(&mut self) -> PResult<(Vec<Contract>, Option<Pos>)> {
+    /// `requires cond`, `ensures cond`, `nocopy` and `replaces pattern` after
+    /// a signature. The words are only special here, so they stay free as
+    /// names everywhere else.
+    #[allow(clippy::type_complexity)]
+    fn contracts(&mut self) -> PResult<(Vec<Contract>, Option<Pos>, Option<Contract>)> {
         let mut out = Vec::new();
         let mut nocopy = None;
+        let mut replaces: Option<Contract> = None;
         loop {
             let kind = match self.peek() {
                 Tok::Ident(w) if w == "requires" => ContractKind::Requires,
                 Tok::Ident(w) if w == "ensures" => ContractKind::Ensures,
+                Tok::Ident(w) if w == "replaces" => ContractKind::Replaces,
                 Tok::Ident(w) if w == "nocopy" => {
                     let pos = self.bump().pos;
                     if nocopy.replace(pos).is_some() {
@@ -503,12 +507,19 @@ impl Parser {
                     }
                     continue;
                 }
-                _ => return Ok((out, nocopy)),
+                _ => return Ok((out, nocopy, replaces)),
             };
             let pos = self.bump().pos;
             let start = self.cur().start;
             let cond = self.cond()?;
             let text = self.src[start..self.prev_end()].to_string();
+            if kind == ContractKind::Replaces {
+                if replaces.is_some() {
+                    return Err(Error::new(pos, "a function replaces one pattern; write another function for another"));
+                }
+                replaces = Some(Contract { pos, kind, cond, text });
+                continue;
+            }
             out.push(Contract { pos, kind, cond, text });
         }
     }

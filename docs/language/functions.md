@@ -26,8 +26,10 @@ private to their [module](modules.md) unless declared `pub fn`.
 
 Between the signature and the body, `requires` and `ensures` clauses can state
 a [contract](contracts.md), which the compiler tries to break while compiling
-and the program checks as it runs, and `nocopy` says that natively the
-function [copies no list, string or closure](nocopy.md).
+and the program checks as it runs; `nocopy` says that natively the
+function [copies no list, string or closure](nocopy.md); and `replaces`
+makes it a [rewrite rule](rules.md) that calls matching a pattern use instead,
+once the compiler has checked it computes the same.
 
 There is no overloading, no default arguments, and no methods: functions that
 work on a type take it as a parameter, usually first (`push(v, x)`; for a

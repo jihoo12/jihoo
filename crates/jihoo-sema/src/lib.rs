@@ -31,6 +31,7 @@ mod paths;
 mod patterns;
 mod place;
 mod refute;
+mod rules;
 mod tail_calls;
 mod tasks;
 mod traits;
@@ -251,6 +252,9 @@ pub fn analyze_modules_with(mods: &[Module], opts: Options) -> Result<ir::Module
     }
     funcs.extend(env.lambdas());
     // Running code with errors would only find them again.
+    if errors.is_empty() {
+        errors.extend(env.check_rules(&funcs));
+    }
     if errors.is_empty() {
         errors.extend(env.refute_contracts(&funcs));
     }
@@ -523,6 +527,8 @@ struct FnCx<'a> {
     last_loc: Option<(BlockId, Pos)>,
     /// In a function with `ensures`, where `return` goes (`contracts.rs`).
     exit: Option<contracts::Exit>,
+    /// Lowering a rule or its pattern, where rules do not apply (`rules.rs`).
+    in_rule: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -598,6 +604,7 @@ impl<'a> FnCx<'a> {
             loops: Vec::new(),
             last_loc: None,
             exit: None,
+            in_rule: false,
         }
     }
 
@@ -636,6 +643,7 @@ impl<'a> FnCx<'a> {
             self.closure_regs.insert(name.to_string(), regs);
         }
 
+        self.check_rule(f)?;
         self.contracts_start(f, name)?;
         self.block(&f.body)?;
         self.contracts_end(f, name)?;
@@ -1728,6 +1736,10 @@ impl<'a> FnCx<'a> {
                 }
                 let key = self.env.key_or_err(pos, &self.bindings, name)?;
                 self.env.check_visible(pos, self.env.viewer(self.bindings.module, name), &key)?;
+                // A call a rule replaces calls the rule instead.
+                if let Some(r) = self.try_rules(pos, name, &key, args)? {
+                    return Ok(r);
+                }
                 if let Some(decl) = self.env.generic(&key) {
                     return self.call_generic(pos, &key, decl, args);
                 }

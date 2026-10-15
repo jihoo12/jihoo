@@ -1,0 +1,26 @@
+// A fusion rule over the `lists` library: `map` of a `map` in one pass,
+// checked while compiling with functions the compiler made up.
+import lists
+
+fn map_map(comptime T: type, comptime U: type, comptime V: type, xs: [T], g: fn(T) -> U, f: fn(U) -> V) -> [V]
+    replaces lists.map(lists.map(xs, g), f)
+{
+    let out: [V] = []
+    for x in xs {
+        push(out, f(g(x)))
+    }
+    return out
+}
+
+fn entry() -> i64 {
+    let xs: [i64] = [1, 2, 3]
+    let ys = lists.map(lists.map(xs, fn(x: i64) -> i64 { return x + 1 }), fn(x: i64) -> i64 { return x * 10 })
+    for y in ys {
+        out(y)
+    }
+    let flags = lists.map(lists.map(xs, fn(x: i64) -> i64 { return x * x }), fn(x: i64) -> bool { return x > 3 })
+    for f in flags {
+        if f { out(1) } else { out(0) }
+    }
+    return len(ys)
+}

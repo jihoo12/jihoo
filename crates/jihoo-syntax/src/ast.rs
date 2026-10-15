@@ -164,6 +164,10 @@ pub struct FnDecl {
     /// Where `nocopy` is, if the function promises that natively, it and
     /// everything it calls copy no list, string or closure.
     pub nocopy: Option<Pos>,
+    /// `replaces pattern`: the function is a rewrite rule. Calls that match
+    /// `pattern`, whose variables are the function's parameters, call it
+    /// instead, once the compiler has checked that it computes the same.
+    pub replaces: Option<Contract>,
     pub body: Block,
 }
 
@@ -175,6 +179,9 @@ pub enum ContractKind {
     /// Holds when the function returns, with `result` the value returned; the
     /// function's duty.
     Ensures,
+    /// `replaces pattern`: not a condition but the code the function stands
+    /// for (`FnDecl::replaces`).
+    Replaces,
 }
 
 impl ContractKind {
@@ -182,6 +189,7 @@ impl ContractKind {
         match self {
             ContractKind::Requires => "requires",
             ContractKind::Ensures => "ensures",
+            ContractKind::Replaces => "replaces",
         }
     }
 }
@@ -876,6 +884,10 @@ pub fn set_program_pos(p: &mut Program, pos: Pos) {
         if let Some(p) = &mut f.nocopy {
             *p = pos;
         }
+        if let Some(c) = &mut f.replaces {
+            c.pos = pos;
+            set_pos(&mut c.cond, pos);
+        }
         f.contracts.iter_mut().for_each(|c| {
             c.pos = pos;
             set_pos(&mut c.cond, pos);
@@ -1174,7 +1186,7 @@ pub fn names_in_program(p: &mut Program, f: &mut dyn FnMut(&mut String, NameRole
         if let Some(t) = &mut func.ret {
             names_in_type(t, f);
         }
-        func.contracts.iter_mut().for_each(|c| names_in_expr(&mut c.cond, f));
+        func.contracts.iter_mut().chain(&mut func.replaces).for_each(|c| names_in_expr(&mut c.cond, f));
         names_in_block(&mut func.body, f);
     }
     for m in &mut p.macro_calls {

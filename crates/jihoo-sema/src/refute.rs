@@ -25,7 +25,7 @@
 //! run while compiling (C functions, `syscall`, `asm`) is only checked when it
 //! runs.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use jihoo_ir::{FloatTy, Function, IntTy, Terminator, Type};
@@ -136,7 +136,7 @@ impl<'p> Env<'p> {
             fuel: BUDGET,
         };
 
-        let mut gen = Gen { env: self, rng: seed(&f.name) };
+        let mut gen = Gen::new(self, &f.name);
         let specials: Vec<Vec<ConstValue>> = s.params.iter().map(|t| gen.specials(t, DEPTH)).collect();
         let total: usize = specials.iter().map(Vec::len).try_fold(1usize, |a, n| a.checked_mul(n)).unwrap_or(usize::MAX);
         for i in 0..CASES {
@@ -295,7 +295,7 @@ impl<'p> Env<'p> {
     }
 
     fn report(&self, s: &Subject, args: &[ConstValue], failure: Failure) -> Error {
-        let gen = Gen { env: self, rng: 0 };
+        let gen = Gen::new(self, "");
         let show_call = |name: &str, tys: &[Type], args: &[ConstValue]| {
             let shown: Vec<String> = tys.iter().zip(args).map(|(t, v)| gen.show(t, v)).collect();
             format!("{name}({})", shown.join(", "))
@@ -330,7 +330,7 @@ impl<'p> Env<'p> {
                 };
                 let msg = match kind {
                     ContractKind::Requires => format!("contract broken: {call} calls {inner}, which breaks `{name}`'s {text}"),
-                    ContractKind::Ensures => format!("contract broken: {call} calls {inner}, which breaks its own {text}"),
+                    ContractKind::Ensures | ContractKind::Replaces => format!("contract broken: {call} calls {inner}, which breaks its own {text}"),
                 };
                 (decl.map_or(s.decl.pos, |_| s.decl.pos), msg)
             }
@@ -348,7 +348,7 @@ impl<'p> Env<'p> {
 
     /// Whether the compiler can make up values of `t` for a function of
     /// `module`, `public` or not. `seen` breaks cycles through `ref`.
-    fn makeable(&self, t: &Type, module: usize, public: bool, seen: &mut HashSet<String>) -> bool {
+    pub(crate) fn makeable(&self, t: &Type, module: usize, public: bool, seen: &mut HashSet<String>) -> bool {
         match t {
             Type::Int(_) | Type::Float(_) | Type::Bool | Type::Str => true,
             Type::List(e) | Type::Array(e, _) | Type::Ref(e) => self.makeable(e, module, public, seen),
@@ -403,13 +403,21 @@ fn seed(name: &str) -> u64 {
 }
 
 /// Makes up values of a type, shows them, and makes them smaller.
-struct Gen<'e, 'p> {
+pub(crate) struct Gen<'e, 'p> {
     env: &'e Env<'p>,
     /// xorshift64 state.
     rng: u64,
+    /// Functions to pass for a function type (by how the type is written),
+    /// simplest first, which `rules.rs` makes; and how each one reads.
+    pub(crate) fns: HashMap<String, Vec<String>>,
+    pub(crate) fn_text: HashMap<String, String>,
 }
 
-impl Gen<'_, '_> {
+impl<'e, 'p> Gen<'e, 'p> {
+    pub(crate) fn new(env: &'e Env<'p>, seed_from: &str) -> Self {
+        Gen { env, rng: seed(seed_from), fns: HashMap::new(), fn_text: HashMap::new() }
+    }
+
     fn next(&mut self) -> u64 {
         self.rng ^= self.rng << 13;
         self.rng ^= self.rng >> 7;
@@ -421,7 +429,7 @@ impl Gen<'_, '_> {
         self.next() % n.max(1)
     }
 
-    fn int(t: IntTy, v: i128) -> ConstValue {
+    pub(crate) fn int(t: IntTy, v: i128) -> ConstValue {
         ConstValue::Int(t.wrap(v as i64))
     }
 
@@ -431,7 +439,7 @@ impl Gen<'_, '_> {
 
     /// The values where code tends to go wrong, simplest first. Empty when
     /// `depth` runs out on the way to a value.
-    fn specials(&mut self, t: &Type, depth: u32) -> Vec<ConstValue> {
+    pub(crate) fn specials(&mut self, t: &Type, depth: u32) -> Vec<ConstValue> {
         match t {
             &Type::Int(it) => {
                 let (lo, hi) = (it.min(), it.max());
@@ -469,6 +477,7 @@ impl Gen<'_, '_> {
                 self.specials(inner, depth - 1).into_iter().take(4).map(|x| ConstValue::Agg(vec![x])).collect()
             }
             Type::Ref(_) => vec![],
+            Type::Fn(..) => self.fns.get(&t.to_string()).map_or(vec![], |fs| fs.iter().map(|f| ConstValue::Func(f.clone())).collect()),
             Type::Struct(name) => {
                 let Ok(fields) = self.env.struct_fields(Pos::default(), name) else { return vec![] };
                 let per: Vec<Vec<ConstValue>> = fields.iter().map(|(_, ft)| self.specials(ft, depth)).collect();
@@ -500,7 +509,7 @@ impl Gen<'_, '_> {
     }
 
     /// A random value of `t`, of about `size`; `None` when `depth` runs out.
-    fn random(&mut self, t: &Type, size: u32, depth: u32) -> Option<ConstValue> {
+    pub(crate) fn random(&mut self, t: &Type, size: u32, depth: u32) -> Option<ConstValue> {
         let size = size as i128;
         Some(match t {
             &Type::Int(it) => {
@@ -539,6 +548,11 @@ impl Gen<'_, '_> {
             }
             Type::Array(e, n) if *n > 256 => ConstValue::Agg(vec![self.random(e, size as u32, depth)?; *n as usize]),
             Type::Array(e, n) => ConstValue::Agg((0..*n).map(|_| self.random(e, size as u32, depth)).collect::<Option<_>>()?),
+            Type::Fn(..) => {
+                let n = self.fns.get(&t.to_string())?.len();
+                let i = self.below(n as u64) as usize;
+                ConstValue::Func(self.fns[&t.to_string()].get(i)?.clone())
+            }
             Type::Ref(_) if depth == 0 => return None,
             Type::Ref(inner) => ConstValue::Agg(vec![self.random(inner, size as u32, depth - 1)?]),
             Type::Struct(name) => {
@@ -564,7 +578,7 @@ impl Gen<'_, '_> {
     }
 
     /// Values a little simpler than `v`, to try in its place.
-    fn shrinks(&mut self, t: &Type, v: &ConstValue) -> Vec<ConstValue> {
+    pub(crate) fn shrinks(&mut self, t: &Type, v: &ConstValue) -> Vec<ConstValue> {
         match (t, v) {
             (&Type::Int(it), &ConstValue::Int(x)) => {
                 let x = if it == IntTy::U64 { x as u64 as i128 } else { x as i128 };
@@ -583,6 +597,11 @@ impl Gen<'_, '_> {
                 out.into_iter().map(|c| Self::int(it, c)).collect()
             }
             (Type::Bool, ConstValue::Bool(true)) => vec![ConstValue::Bool(false)],
+            // The functions before it are simpler.
+            (Type::Fn(..), ConstValue::Func(f)) => {
+                let fs = self.fns.get(&t.to_string()).cloned().unwrap_or_default();
+                fs.iter().take_while(|g| *g != f).map(|g| ConstValue::Func(g.clone())).collect()
+            }
             (&Type::Float(ft), &ConstValue::Float(bits)) => {
                 let x = f64::from_bits(bits);
                 let mut out = Vec::new();
@@ -674,7 +693,7 @@ impl Gen<'_, '_> {
     }
 
     /// `v` as it would be written in jihoo, more or less.
-    fn show(&self, t: &Type, v: &ConstValue) -> String {
+    pub(crate) fn show(&self, t: &Type, v: &ConstValue) -> String {
         let list = |tys: &mut dyn Iterator<Item = Type>, items: &[ConstValue]| {
             items.iter().zip(tys).map(|(x, t)| self.show(&t, x)).collect::<Vec<_>>().join(", ")
         };
@@ -691,6 +710,7 @@ impl Gen<'_, '_> {
                 }
             }
             (_, ConstValue::Str(s)) => format!("{s:?}"),
+            (_, ConstValue::Func(f)) => self.fn_text.get(f).cloned().unwrap_or_else(|| f.clone()),
             (Type::List(e) | Type::Array(e, _), ConstValue::Agg(items)) => {
                 format!("[{}]", list(&mut std::iter::repeat((**e).clone()), items))
             }

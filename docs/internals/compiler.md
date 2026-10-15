@@ -58,6 +58,26 @@ of the call of `g` that broke it, and anything else is a trap. Errors that say
 the code cannot run on the VM (pointers, `syscall`) make it give up on the
 function. The failing input is shrunk while the failure stays the same.
 
+## Rewrite rules
+
+`crates/jihoo-sema/src/rules.rs` applies and checks rules
+([Rewrite rules](../language/rules.md)). Rules are indexed by the key of the
+function their pattern calls. When `FnCx::call` resolves a call to a key that
+has rules, it matches the call's AST against each pattern: items by key,
+literals by value, the rule's parameters standing for any code. It then
+lowers the matched parts in source order with a snapshot taken: their types
+are unified strictly against the rule's parameters, as inference does. If
+they fit, the call goes to the rule (an instance, for a generic one).
+Otherwise the snapshot is restored and the call compiled as written. Rules
+are off in a rule's body and in the pattern helper.
+
+Once the program is lowered, each rule (plus each generic rule at `i64` for
+its type parameters) gets a helper `f.pattern` that evaluates the pattern.
+Both run on the VM with inputs from `refute.rs`'s generator, plus functions
+written for parameters of function type (`f.arg.N`). Results are compared as
+constants (any NaN equals any other), along with what each side prints;
+traps only match traps.
+
 ## Copy-free functions
 
 `crates/jihoo-sema/src/nocopy.rs` checks `nocopy` functions

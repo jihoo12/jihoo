@@ -1,0 +1,49 @@
+// Rewrite rules: a function with `replaces pattern` computes what the
+// pattern does, and every call that matches the pattern calls it instead.
+// The compiler checks that claim first: it runs both on the VM with inputs it
+// makes up (and small functions, for parameters that take functions) and
+// refuses a rule that gives anything different. Change `power(x, 2)` below to
+// `power(x, 3)` and the build stops:
+//
+//   `square` does not do what it replaces: with x = -1, `power(x, 3)` gives -1,
+//   but `square` gives 1
+//
+//   jihoo run examples/rules.jh
+//   jihoo emit-ir examples/rules.jh     // `main` calls `square` and `map_map`
+
+import lists
+
+fn power(x: i64, n: i64) -> i64 {
+    let r = 1
+    for i in 0..n {
+        r = r * x
+    }
+    return r
+}
+
+fn square(x: i64) -> i64 replaces power(x, 2) {
+    return x * x
+}
+
+// `map` of a `map` in one pass, without the list in between; checked with
+// functions such as `fn(x) x + 1` for `g` and `f`.
+fn map_map(comptime T: type, comptime U: type, comptime V: type,
+           xs: [T], g: fn(T) -> U, f: fn(U) -> V) -> [V]
+    replaces lists.map(lists.map(xs, g), f)
+{
+    let out: [V] = []
+    for x in xs {
+        push(out, f(g(x)))
+    }
+    return out
+}
+
+fn main() {
+    let a = 12
+    print(power(a, 2))                   // 144, by `square`
+    print(power(a, 3))                   // 1728: no rule for that
+    let xs: [i64] = [1, 2, 3]
+    let tens = lists.map(lists.map(xs, fn(x: i64) -> i64 { return x + 1 }),
+                         fn(x: i64) -> str { return to_str(x * 10) })
+    print(tens)                          // [20, 30, 40], in one pass
+}

@@ -143,6 +143,14 @@
     value. With `lists.sort_by` reading its length first, iterator chains
     and `lists.sort` copy nothing over a list handed to them; the examples
     and list tests copy 132 times instead of 153.
+38. Rewrite rules ([Rewrite rules](../language/rules.md)): a function with
+    `replaces pattern` is a rule. Calls matching the pattern call it
+    instead, with the matched parts evaluated once, in order, and the rule
+    applied only where their types fit. Before that, the compiler runs every
+    rule next to its pattern on the VM, with the inputs contracts are tried
+    with and functions it writes for parameters of function type, and
+    refuses a rule that gives a different value, prints differently or
+    traps differently. Generic rules are also checked at `i64`.
 
 ## Next
 
@@ -158,6 +166,9 @@
   the same stages written out as a loop.
 - **Traits** ([design](traits.md)): dynamic dispatch, when a program needs
   it.
+- **Rules:** comparing the effects of the functions a rule is given (a
+  rule that reorders calls is checked with functions that have none), and
+  patterns that are operators (`x * 1`) or methods.
 - **Contracts:** clauses on trait functions, which every impl would keep;
   invariants of a module's structs, so that `pub` functions taking them can
   be tried; `old(e)` for the value of an expression at the start; and

@@ -1,0 +1,54 @@
+// Rewrite rules: each was checked while compiling to compute what it
+// replaces, so the programs print the same whether or not they apply.
+
+fn power(x: i64, n: i64) -> i64 {
+    let r = 1
+    let i = 0
+    while i < n {
+        r = r * x
+        i = i + 1
+    }
+    return r
+}
+
+fn square(x: i64) -> i64 replaces power(x, 2) {
+    return x * x
+}
+
+fn div(a: i64, b: i64) -> i64 {
+    return a / b
+}
+
+// Division rounds towards zero, a shift down: only right for a >= 0, so the
+// rule replaces a pattern that says so.
+fn half_of_abs(a: i64) -> i64 replaces div(abs(a), 2) {
+    return abs(a) >> 1
+}
+
+fn abs(a: i64) -> i64 {
+    if a < 0 { return 0 - a }
+    return a
+}
+
+fn twice(comptime T: type, x: T, f: fn(T) -> T) -> T {
+    return f(f(x))
+}
+
+fn inc(x: i64) -> i64 {
+    return x + 1
+}
+
+fn plus_two(x: i64) -> i64 replaces twice(x, inc) {
+    return x + 2
+}
+
+fn entry() -> i64 {
+    out(power(7, 2))
+    out(power(3, 3))
+    out(div(abs(0 - 9), 2))
+    out(div(abs(9), 3))
+    out(twice(40, inc))
+    let a: u8 = 3
+    out(twice(a, fn(x: u8) -> u8 { return x * 2 }) as i64)
+    return square(5) + power(2, 2)
+}

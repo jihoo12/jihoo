@@ -123,6 +123,9 @@ pub(crate) struct Env<'p> {
     /// (root-module items keep their plain names). Values are (module, decl).
     struct_decls: HashMap<String, (usize, &'p StructDecl)>,
     fn_decls: HashMap<String, (usize, &'p FnDecl)>,
+    /// The rules by the key of the function their pattern calls, once asked
+    /// for (`rules.rs`).
+    pub(crate) rule_index: std::cell::OnceCell<HashMap<String, Vec<String>>>,
     const_decls: HashMap<String, (usize, &'p ConstDecl)>,
     /// Traits by key, like the declarations above.
     pub(crate) trait_decls: HashMap<String, (usize, &'p TraitDecl)>,
@@ -200,6 +203,7 @@ impl<'p> Env<'p> {
             prelude: mods.iter().position(|m| m.name == jihoo_syntax::loader::PRELUDE),
             struct_decls: HashMap::new(),
             fn_decls: HashMap::new(),
+            rule_index: std::cell::OnceCell::new(),
             const_decls: HashMap::new(),
             trait_decls: HashMap::new(),
             impls: Vec::new(),
@@ -1167,6 +1171,11 @@ impl<'p> Env<'p> {
                 })
             },
         )
+    }
+
+    /// Every function declaration, by key, with its module.
+    pub(crate) fn fn_decls_iter(&self) -> impl Iterator<Item = (&str, (usize, &'p FnDecl))> + '_ {
+        self.fn_decls.iter().map(|(k, &v)| (k.as_str(), v))
     }
 
     /// The declaration that function `name` (a plain function or a generic

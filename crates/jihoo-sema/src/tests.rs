@@ -2455,3 +2455,101 @@ fn handed_on_parameters_copy_nothing() {
     .unwrap_err();
     assert!(e.contains("copies fn(i64) -> i64 here: a value is put into a new value and copied, since it is still used afterwards"), "{e}");
 }
+
+// ---- rules ----
+
+const POW: &str = "fn pow(x: i64, n: i64) -> i64 {\n  let r = 1\n  for i in 0..n { r = r * x }\n  return r\n}\n";
+
+#[test]
+fn rules_replace_calls() {
+    let src = format!("{POW}fn square(x: i64) -> i64 replaces pow(x, 2) {{\n  return x * x\n}}\n\
+                       fn main() {{ let a = 7\n print(pow(a, 2))\n print(pow(a, 3))\n print(pow(a + 1, 2)) }}");
+    assert_eq!(run(&src), "49\n343\n64\n");
+    let m = check(&src).unwrap();
+    let main = m.func("main").unwrap().to_string();
+    assert_eq!(main.matches("call @square(").count(), 2, "{main}");
+    assert_eq!(main.matches("call @pow(").count(), 1, "{main}");
+    // Not inside the rule itself, which may call what it replaces.
+    let src = format!("{POW}fn square(x: i64) -> i64 replaces pow(x, 2) {{\n  return pow(x, 2)\n}}\nfn main() {{ print(pow(3, 2)) }}");
+    assert_eq!(run(&src), "9\n");
+    // A local function value of the same name is not the function.
+    let src = format!("{POW}fn square(x: i64) -> i64 replaces pow(x, 2) {{\n  return x * x\n}}\n\
+                       fn main() {{ let pow = fn(a: i64, b: i64) -> i64 {{ return a - b }}\n print(pow(5, 2)) }}");
+    assert_eq!(run(&src), "3\n");
+}
+
+#[test]
+fn rules_keep_the_order_of_evaluation() {
+    // The parts are evaluated once each, as written, though the rule takes
+    // its parameters in another order.
+    let src = "fn sub(a: i64, b: i64) -> i64 { return a - b }\nfn neg(a: i64) -> i64 { return 0 - a }\n\
+               fn flip(b: i64, a: i64) -> i64 replaces sub(neg(a), b) {\n  return 0 - a - b\n}\n\
+               fn say(x: i64) -> i64 { print(x)\n return x }\n\
+               fn main() { print(sub(neg(say(1)), say(2))) }";
+    assert_eq!(run(src), "1\n2\n-3\n");
+    assert!(check(src).unwrap().func("main").unwrap().to_string().contains("call @flip("));
+}
+
+#[test]
+fn generic_rules_and_types_that_do_not_fit() {
+    let rev = "fn rev(comptime T: type, xs: [T]) -> [T] {\n  let out: [T] = []\n  for i in 0..len(xs) { push(out, xs[len(xs) - 1 - i]) }\n  return out\n}\n";
+    let src = format!("{rev}fn twice_reversed(comptime T: type, xs: [T]) -> [T] replaces rev(rev(xs)) {{\n  return xs\n}}\n\
+                       fn ints(xs: [i64]) -> [i64] replaces rev(rev(xs)) {{\n  return xs\n}}\n\
+                       fn main() {{ let a: [str] = [\"a\", \"b\"]\n print(rev(rev(a)))\n print(rev(rev([1, 2]))) }}");
+    assert_eq!(run(&src), "[a, b]\n[1, 2]\n");
+    let m = check(&src).unwrap();
+    let main = m.func("main").unwrap().to_string();
+    // `ints` comes first by name; it does not fit `[str]`, so the generic
+    // rule takes that call, rolled back cleanly.
+    assert!(main.contains("call @ints(") && main.contains("call @twice_reversed.") && !main.contains("call @rev"), "{main}");
+    // A rule for i64 leaves an i32 call as written.
+    let src = "fn twice(comptime T: type, x: T, f: fn(T) -> T) -> T { return f(f(x)) }\n\
+               fn inc(x: i64) -> i64 { return x + 1 }\nfn inc32(x: i32) -> i32 { return x + 1 }\n\
+               fn plus_two(x: i64) -> i64 replaces twice(x, inc) {\n  return x + 2\n}\n\
+               fn main() { let a: i32 = 1\n print(twice(a, inc32))\n print(twice(5, inc)) }";
+    assert_eq!(run(src), "3\n7\n");
+    assert!(check(src).unwrap().func("main").unwrap().to_string().contains("call @plus_two("));
+}
+
+#[test]
+fn rules_are_checked() {
+    let e = err(&format!("{POW}fn cube(x: i64) -> i64 replaces pow(x, 3) {{\n  return x * x + x\n}}\nfn main() {{}}"));
+    assert_eq!(e, "6:24: `cube` does not do what it replaces: with x = 1, `pow(x, 3)` gives 1, but `cube` gives 2");
+    // A trap on one side only differs too.
+    let e = err("fn div(a: i64, b: i64) -> i64 { return a / b }\nfn half(a: i64) -> i64 replaces div(a, 2) {\n  return a >> 1\n}\nfn main() {}");
+    assert!(e.contains("with a = -1, `div(a, 2)` gives 0, but `half` gives -1"), "{e}");
+    // Functions are made up for function parameters, and shown.
+    let map = "fn map(xs: [i64], f: fn(i64) -> i64) -> [i64] {\n  let out: [i64] = []\n  for x in xs { push(out, f(x)) }\n  return out\n}\n";
+    let e = err(&format!("{map}fn fused(xs: [i64], f: fn(i64) -> i64, g: fn(i64) -> i64) -> [i64] replaces map(map(xs, f), g) {{\n  return map(xs, fn(x: i64) -> i64 {{ return f(g(x)) }})\n}}\nfn main() {{}}"));
+    assert!(e.contains("`fused` does not do what it replaces: with xs = [0], f = fn(x) x + 1, g = fn(x) 0"), "{e}");
+    check(&format!("{map}fn fused(xs: [i64], f: fn(i64) -> i64, g: fn(i64) -> i64) -> [i64] replaces map(map(xs, f), g) {{\n  return map(xs, fn(x: i64) -> i64 {{ return g(f(x)) }})\n}}\nfn main() {{}}")).unwrap();
+    // A generic rule the program never uses is checked with i64.
+    let e = err(&format!("{map}fn id(comptime T: type, x: T) -> T {{ return x }}\nfn wrong(comptime T: type, x: T) -> T replaces id(id(x)) {{\n  let y = x\n  return id(y)\n}}\n\
+                          fn twice(x: i64) -> i64 {{ return x + x }}\nfn bad(x: i64) -> i64 replaces twice(x) {{\n  return x * 3\n}}\nfn main() {{}}"));
+    assert!(e.contains("`bad` does not do what it replaces: with x = 1"), "{e}");
+    // What a rule prints counts.
+    let e = err("fn noisy(x: i64) -> i64 { print(x)\n return x }\nfn quiet(x: i64) -> i64 replaces noisy(x) {\n  return x\n}\nfn main() {}");
+    assert!(e.contains("with x = 0, `noisy(x)` prints \"0\\n\", but `quiet` prints \"\""), "{e}");
+}
+
+#[test]
+fn rule_errors() {
+    let e = err(&format!("{POW}fn sq(x: i64) -> i64 replaces x * x {{\n  return x * x\n}}\nfn main() {{}}"));
+    assert!(e.contains("a pattern is a call"), "{e}");
+    let e = err(&format!("{POW}fn sq(x: i64, y: i64) -> i64 replaces pow(x, 2) {{\n  return x * x\n}}\nfn main() {{}}"));
+    assert!(e.contains("the pattern does not use `y`"), "{e}");
+    let e = err(&format!("{POW}fn sq(x: i64) -> i64 replaces pow(x, x) {{\n  return x\n}}\nfn main() {{}}"));
+    assert!(e.contains("the pattern uses `x` 2 times"), "{e}");
+    let e = err(&format!("{POW}fn sq(x: i64) -> i64 replaces pow(x, [2][0]) {{\n  return x\n}}\nfn main() {{}}"));
+    assert!(e.contains("a pattern holds calls, operators, literals"), "{e}");
+    let e = err("fn f(x: i64) -> i64 replaces f(x) {\n  return x\n}\nfn main() {}");
+    assert!(e.contains("cannot replace calls of itself"), "{e}");
+    let e = err(&format!("{POW}fn sq(x: i64) -> bool replaces pow(x, 2) {{\n  return true\n}}\nfn main() {{}}"));
+    assert!(e.contains("the pattern gives i64, but `sq` returns bool"), "{e}");
+    let e = err("#![native]\nfn get(p: *i64) -> i64 { return *p }\nfn get2(p: *i64) -> i64 replaces get(p) {\n  return p[0]\n}\nfn main() {}");
+    assert!(e.contains("cannot check that `get2` does what it replaces: the compiler cannot make up values of type *i64"), "{e}");
+    let e = err(&format!("{POW}fn a(x: i64) -> i64 replaces pow(x, 2) replaces pow(x, 3) {{\n  return x\n}}\nfn main() {{}}"));
+    assert!(e.contains("a function replaces one pattern"), "{e}");
+    // The word is only special after a signature.
+    assert_eq!(run("fn main() { let replaces = 2\n print(replaces) }"), "2\n");
+}

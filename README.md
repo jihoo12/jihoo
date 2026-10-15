@@ -121,7 +121,9 @@ associated types and supertraits, and the standard traits `Ord`, `Hash` and
 modules with private items and fields; contracts (`requires`, `ensures`),
 checked at run time and tried while compiling with made-up inputs, the
 smallest that breaks one becoming a compile error; `nocopy` functions, which
-natively must copy no list, string or closure, with whatever they call; compile-time evaluation (`const`,
+natively must copy no list, string or closure, with whatever they call;
+rewrite rules (`replaces`), which the compiler checks against what they
+replace before it uses them; compile-time evaluation (`const`,
 `comptime`) and macros, both run on the VM, with functions on code, `meta` to
 look inside code and `type_of` to ask its type.
 
