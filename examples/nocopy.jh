@@ -1,0 +1,50 @@
+// Copy-free functions: `nocopy` says that natively the function, and every
+// function it calls, copies no list, string or closure. The compiler checks
+// it after deciding where values move; a copy is a compile error that says
+// where it is and why. Add `print(len(xs))` at the end of `odd_squares` and
+// the build stops: `xs` would then be used after the iterator took it, so it
+// would have to be copied.
+//   jihoo run examples/nocopy.jh
+//   jihoo build --cost examples/nocopy.jh    // the copies `main` makes, and why
+
+import iters
+import lists
+
+struct Shelf {
+    name: str
+    items: [i64]
+}
+
+// Changes the list it is handed, in place.
+fn grow(xs: [i64], n: i64) -> [i64] nocopy {
+    for i in 0..n {
+        push(xs, i * i)
+    }
+    return xs
+}
+
+// Moves a field out of the struct and back.
+fn restock(s: Shelf, n: i64) -> Shelf nocopy {
+    s.items = grow(s.items, n)
+    return s
+}
+
+// An iterator chain: the closures are made here, so the compiler follows them.
+fn odd_squares(xs: [i64]) -> i64 nocopy {
+    let sq = iters.map(iters.of(xs), fn(x: i64) -> i64 { return x * x })
+    return iters.sum(iters.filter(sq, fn(x: i64) -> bool { return x % 2 == 1 }))
+}
+
+fn sorted(xs: [i64]) -> [i64] nocopy {
+    return lists.sort(xs)
+}
+
+fn main() {
+    let s = Shelf { name: "primes", items: [] }
+    s = restock(s, 4)
+    print(s.items)                         // [0, 1, 4, 9]
+    print(sorted([5, 3, 9]))               // [3, 5, 9]
+    let xs: [i64] = [1, 2, 3, 4, 5]
+    print(odd_squares(xs))                 // 35: copies `xs`, which `main` prints next
+    print(len(xs))
+}

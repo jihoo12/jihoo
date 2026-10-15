@@ -58,6 +58,22 @@ of the call of `g` that broke it, and anything else is a trap. Errors that say
 the code cannot run on the VM (pointers, `syscall`) make it give up on the
 function. The failing input is shrunk while the failure stays the same.
 
+## Copy-free functions
+
+`crates/jihoo-sema/src/nocopy.rs` checks `nocopy` functions
+([Copy-free functions](../language/nocopy.md)) in native programs, right after
+the ownership pass. It starts from the function's consuming version when there
+is one (the caller is taken to hand its arguments over), and walks the calls
+the pass chose, breadth first. The first `clone` that copies memory
+(`jihoo_ir::cost::in_function`, the list `--cost` prints) is an error at the
+copy or at the call that leads to it. A call of a function value is followed
+when the register can only hold one known function. When no parameter of the
+root can hold a function value, every function named by a `funcref` or
+`closure` in the walk is treated as called. Otherwise such a call is an error.
+Sema writes source positions (`loc`) for programs with a `nocopy` function so
+that errors can point at the copy, and removes them again unless `--cost` asked
+for them.
+
 ## Generics
 
 `crates/jihoo-sema/src/generic.rs` makes one instance of a generic function per

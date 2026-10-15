@@ -120,7 +120,8 @@ associated types and supertraits, and the standard traits `Ord`, `Hash` and
 `Show`, which `meta.derive!` writes, and `Iterator`, which `for` walks;
 modules with private items and fields; contracts (`requires`, `ensures`),
 checked at run time and tried while compiling with made-up inputs, the
-smallest that breaks one becoming a compile error; compile-time evaluation (`const`,
+smallest that breaks one becoming a compile error; `nocopy` functions, which
+natively must copy no list, string or closure, with whatever they call; compile-time evaluation (`const`,
 `comptime`) and macros, both run on the VM, with functions on code, `meta` to
 look inside code and `type_of` to ask its type.
 

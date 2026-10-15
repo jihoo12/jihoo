@@ -22,6 +22,7 @@ item       = "import" path ("as" NAME)?
            | path "!" "(" exprs ")"                       ; an item macro
 params     = (("comptime")? NAME ":" type ("+" path)*),*   ; `+ path`: more traits
 contract   = ("requires" | "ensures") expr                 ; `ensures` may read `result`
+           | "nocopy"                                      ; natively, copies nothing
 path       = NAME ("." NAME)*
 ```
 
@@ -121,4 +122,5 @@ return  select  struct  true      while
 ```
 
 `requires`, `ensures` and `result` are only special in a function's
-[contract](../language/contracts.md); elsewhere they are names.
+[contract](../language/contracts.md), and `nocopy` only where it marks a
+[copy-free function](../language/nocopy.md); elsewhere they are names.

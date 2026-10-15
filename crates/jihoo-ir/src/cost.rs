@@ -22,6 +22,8 @@ pub struct Copy {
     pub ty: String,
     /// Why, in words.
     pub why: String,
+    /// Whether it copies a parameter on entry, because the caller keeps it.
+    pub on_entry: bool,
 }
 
 /// The copies of a module after the ownership pass, in source order, each
@@ -30,7 +32,7 @@ pub struct Copy {
 /// version they avoid makes.
 pub fn copies(m: &Module) -> Vec<Copy> {
     let used = reachable(m);
-    let mut out: Vec<Copy> = m.funcs.iter().filter(|f| used.contains(f.name.as_str())).flat_map(function).collect();
+    let mut out: Vec<Copy> = m.funcs.iter().filter(|f| used.contains(f.name.as_str())).flat_map(in_function).collect();
     out.sort();
     out.dedup_by(|a, b| a.loc == b.loc && a.ty == b.ty && a.why == b.why);
     out
@@ -70,24 +72,36 @@ fn copies_memory(t: &Type) -> bool {
     !matches!(t, Type::Ref(_) | Type::Cell(_) | Type::Chan(_))
 }
 
-fn function(f: &Function) -> Vec<Copy> {
-    let first_loc = f.blocks.iter().flat_map(|b| &b.insts).find_map(loc);
+/// The copies function `f` makes itself, in its order.
+pub fn in_function(f: &Function) -> Vec<Copy> {
     let mut out = Vec::new();
-    for b in &f.blocks {
+    for (bi, b) in f.blocks.iter().enumerate() {
         for (i, inst) in b.insts.iter().enumerate() {
             let Inst::Clone { dst, src } = *inst else { continue };
             let ty = f.reg_type(dst);
             if !copies_memory(ty) {
                 continue;
             }
-            // The position written before the copy in its block, or else the
-            // next one, or else the function's.
-            let here = b.insts[..i].iter().rev().find_map(loc).or_else(|| b.insts[i..].iter().find_map(loc)).or(first_loc);
+            let here = loc_at(f, bi, i);
             let why = reason(f, &b.insts, i, dst, src, &b.term);
-            out.push(Copy { loc: here, func: f.name.clone(), ty: ty.jir(), why });
+            let on_entry = dst == src && src.0 < f.params.len() as u32;
+            out.push(Copy { loc: here, func: f.name.clone(), ty: ty.jir(), why, on_entry });
         }
     }
     out
+}
+
+/// The source position of instruction `i` of block `block`: the one written
+/// before it in its block, or else the next one, or else the function's.
+pub fn loc_at(f: &Function, block: usize, i: usize) -> Option<(u32, u32, u32)> {
+    let insts = &f.blocks[block].insts;
+    let i = i.min(insts.len());
+    insts[..i]
+        .iter()
+        .rev()
+        .find_map(loc)
+        .or_else(|| insts[i..].iter().find_map(loc))
+        .or_else(|| f.blocks.iter().flat_map(|b| &b.insts).find_map(loc))
 }
 
 fn loc(inst: &Inst) -> Option<(u32, u32, u32)> {
@@ -165,8 +179,14 @@ fn reason(f: &Function, insts: &[Inst], i: usize, dst: Reg, src: Reg, term: &Ter
             _ => "used",
         },
     };
+    // A parameter the function owns, as its consuming version does all it
+    // copies on entry, or after copying it on entry, is copied because the
+    // function uses it again, not for the caller.
+    let owned = src.0 < params
+        && (f.name.ends_with(".own")
+            || f.blocks.iter().flat_map(|b| &b.insts).any(|inst| matches!(*inst, Inst::Clone { dst: d, src: s } if d == src && s == src)));
     let after = match () {
-        _ if src.0 < params => "the caller still owns it",
+        _ if src.0 < params && !owned => "the caller still owns it",
         _ if part => "the value it was read from still holds it",
         _ => "it is still used afterwards",
     };

@@ -24,6 +24,7 @@ same on GitHub.
 - [Tuples](language/tuples.md)
 - [Arrays](language/arrays.md)
 - [Lists](language/lists.md)
+- [Copy-free functions](language/nocopy.md)
 - [Paths](language/paths.md)
 - [Enums](language/enums.md)
 - [Pattern matching](language/patterns.md)

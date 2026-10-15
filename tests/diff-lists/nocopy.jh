@@ -1,0 +1,68 @@
+// `nocopy` functions: natively they copy nothing, the VM shares and copies
+// on write, and both print the same. They lean on consuming versions that
+// hand a list (or a part of a struct) on through functions that only pass it
+// along.
+
+struct It {
+    xs: [i64]
+    at: i64
+}
+
+struct Mapped {
+    inner: It
+    f: fn(i64) -> i64
+}
+
+fn step(it: It) -> (It, i64) {
+    let x = it.xs[it.at]
+    it.at = it.at + 1
+    return (it, x)
+}
+
+// Hands `m.inner` on while `m.f` is still used: the part moves out alone.
+fn next(m: Mapped) -> (Mapped, i64) {
+    let inner = m.inner
+    let f = m.f
+    let (rest, x) = step(inner)
+    let y = f(x)
+    return (Mapped { inner: rest, f: f }, y)
+}
+
+fn sum_mapped(xs: [i64]) -> i64 nocopy {
+    let n = len(xs)
+    let m = Mapped { inner: It { xs: xs, at: 0 }, f: fn(x: i64) -> i64 { return x * 3 } }
+    let s = 0
+    for i in 0..n {
+        let (rest, y) = next(m)
+        m = rest
+        s += y
+    }
+    return s
+}
+
+fn keep(xs: [i64]) -> It {
+    return It { xs: xs, at: 0 }
+}
+
+// Only passes `xs` on: a caller handing it over reaches `keep` without a copy.
+fn wrap(xs: [i64]) -> It nocopy {
+    return keep(xs)
+}
+
+fn grow(xs: [i64], n: i64) -> [i64] nocopy {
+    for i in 0..n {
+        push(xs, i * i)
+    }
+    return xs
+}
+
+fn entry() -> i64 {
+    let xs: [i64] = [1, 2, 3, 4]
+    out(sum_mapped(xs))
+    out(len(xs))                     // still here: that call copied, in `entry`
+    let it = wrap(grow([], 5))
+    out(len(it.xs) * 100 + it.xs[4])
+    let ys = grow(xs, 3)
+    out(len(ys))
+    return sum_mapped(ys) % 256
+}

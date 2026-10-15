@@ -26,6 +26,7 @@ mod hygiene;
 mod infer;
 mod loops;
 mod macros;
+mod nocopy;
 mod paths;
 mod patterns;
 mod place;
@@ -126,7 +127,9 @@ pub fn analyze_modules_with(mods: &[Module], opts: Options) -> Result<ir::Module
     let mods = &expanded[..];
 
     let (mut env, name_errors) = Env::new(profile, mods);
-    env.locs = opts.locs;
+    // `nocopy` errors say where the copy is, from the same positions.
+    let nocopy = mods.iter().flat_map(|m| &m.program.funcs).any(|f| f.nocopy.is_some());
+    env.locs = opts.locs || (nocopy && profile == Profile::Native);
     let env = env;
     errors.extend(name_errors);
     if !errors.is_empty() {
@@ -313,7 +316,7 @@ pub fn analyze_modules_with(mods: &[Module], opts: Options) -> Result<ir::Module
     let externs = externs.into_iter().map(|(_, e)| e).collect();
 
     if errors.is_empty() {
-        let files = match opts.locs {
+        let files = match env.locs {
             true => vec![String::new(); mods.iter().map(|m| m.file as usize + 1).max().unwrap_or(0)],
             false => vec![],
         };
@@ -321,6 +324,17 @@ pub fn analyze_modules_with(mods: &[Module], opts: Options) -> Result<ir::Module
         // Native lists have no GC: decide where values move, are copied and are freed.
         if profile == Profile::Native {
             ir::ownership::insert(&mut m);
+            let errors = env.check_nocopy(&m);
+            if !errors.is_empty() {
+                return Err(errors);
+            }
+        }
+        // Positions made only for `nocopy`'s errors are not asked for.
+        if env.locs && !opts.locs {
+            for b in m.funcs.iter_mut().flat_map(|f| &mut f.blocks) {
+                b.insts.retain(|i| !matches!(i, Inst::Loc { .. }));
+            }
+            m.files.clear();
         }
         Ok(m)
     } else {

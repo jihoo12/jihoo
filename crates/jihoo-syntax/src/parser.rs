@@ -471,30 +471,39 @@ impl Parser {
         }
         self.expect(&Tok::RParen, "`)`")?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
-        let contracts = self.contracts()?;
-        if let (true, Some(c)) = (is_extern, contracts.first()) {
-            return Err(Error::new(c.pos, "a C function cannot have a contract; wrap it in a jihoo function that does"));
+        let (contracts, nocopy) = self.contracts()?;
+        let first = contracts.first().map(|c| c.pos).into_iter().chain(nocopy).min_by_key(|p| (p.line, p.col));
+        if let (true, Some(pos)) = (is_extern, first) {
+            return Err(Error::new(pos, "a C function cannot have a contract; wrap it in a jihoo function that does"));
         }
-        if let (true, false, Some(c)) = (body_optional, *self.peek() == Tok::LBrace, contracts.first()) {
-            return Err(Error::new(c.pos, "a trait function without a body cannot have a contract yet; put it on each impl"));
+        if let (true, false, Some(pos)) = (body_optional, *self.peek() == Tok::LBrace, first) {
+            return Err(Error::new(pos, "a trait function without a body cannot have a contract yet; put it on each impl"));
         }
         if is_extern || (body_optional && *self.peek() != Tok::LBrace) {
             let body = Block { stmts: vec![], end: pos };
-            return Ok((FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, contracts, body }, false));
+            return Ok((FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, contracts, nocopy, body }, false));
         }
         let body = self.block()?;
-        Ok((FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, contracts, body }, true))
+        Ok((FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, contracts, nocopy, body }, true))
     }
 
-    /// `requires cond` and `ensures cond` clauses after a signature. The words
-    /// are only special here, so they stay free as names everywhere else.
-    fn contracts(&mut self) -> PResult<Vec<Contract>> {
+    /// `requires cond`, `ensures cond` and `nocopy` after a signature. The
+    /// words are only special here, so they stay free as names everywhere else.
+    fn contracts(&mut self) -> PResult<(Vec<Contract>, Option<Pos>)> {
         let mut out = Vec::new();
+        let mut nocopy = None;
         loop {
             let kind = match self.peek() {
                 Tok::Ident(w) if w == "requires" => ContractKind::Requires,
                 Tok::Ident(w) if w == "ensures" => ContractKind::Ensures,
-                _ => return Ok(out),
+                Tok::Ident(w) if w == "nocopy" => {
+                    let pos = self.bump().pos;
+                    if nocopy.replace(pos).is_some() {
+                        return Err(Error::new(pos, "`nocopy` is written twice"));
+                    }
+                    continue;
+                }
+                _ => return Ok((out, nocopy)),
             };
             let pos = self.bump().pos;
             let start = self.cur().start;

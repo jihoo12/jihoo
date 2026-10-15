@@ -108,8 +108,10 @@ pub fn max(comptime T: Ord, xs: [T]) -> Option(T) {
 // of `less`.
 pub fn sort_by(comptime T: type, xs: [T], less: fn(T, T) -> bool) -> [T] {
     // Bottom-up merge sort: merge runs of width 1, 2, 4, ... from `src` into `dst`.
-    let src = xs
+    // `len` first: `xs` is then not used after it moves into `src`, so a list
+    // handed over is sorted without a copy.
     let n = len(xs)
+    let src = xs
     let width = 1
     while width < n {
         let dst: [T] = []

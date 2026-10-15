@@ -133,6 +133,16 @@
     makes an `ensures` false, breaks a callee's `requires` or traps is a
     compile error that shows the call. JIR is unchanged: a false clause
     calls a function named after it that traps.
+37. Copy-free functions ([Copy-free functions](../language/nocopy.md)):
+    `nocopy` after a signature makes a copy that the function or anything it
+    calls makes natively a compile error, which says where, why and through
+    which calls. Function values made inside are followed. On the way,
+    the ownership pass learned to hand a list on through functions that only
+    pass it along (they get consuming versions too), to move out a part
+    handed on while the rest is still used, and to take two parts of one
+    value. With `lists.sort_by` reading its length first, iterator chains
+    and `lists.sort` copy nothing over a list handed to them; the examples
+    and list tests copy 132 times instead of 153.
 
 ## Next
 

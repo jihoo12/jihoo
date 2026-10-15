@@ -274,6 +274,36 @@ fn cost_lists_copies() {
     std::fs::remove_dir_all(&work).unwrap();
 }
 
+/// `nocopy` holds for the library's iterator adapters over a list the
+/// function was handed, and names the library function that copies when it
+/// does not hold; positions the check needed do not end up in the JIR.
+#[test]
+fn nocopy_with_the_library() {
+    let work = common::work_dir("nocopy");
+    let path = work.join("nocopy.jh");
+    let src = "import iters\nimport lists\n\n\
+               fn odd_squares(xs: [i64]) -> i64 nocopy {\n    \
+               let sq = iters.map(iters.of(xs), fn(x: i64) -> i64 { return x * x })\n    \
+               return iters.sum(iters.filter(sq, fn(x: i64) -> bool { return x % 2 == 1 }))\n}\n\n\
+               fn main() {\n    print(odd_squares([1, 2, 3]))\n}\n";
+    std::fs::write(&path, src).unwrap();
+    let out = Command::new(JIHOO).arg("emit-ir").arg(&path).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("loc "), "positions left in the JIR");
+
+    // Sorting a list handed over copies nothing either; reversing a list of
+    // strings copies each one, which the old list still holds.
+    let src = src.replace("print(odd_squares([1, 2, 3]))", "print(odd_squares([1, 2, 3]))\n    print(sorted([2, 1]))\n    print(rev([\"a\"]))")
+        + "\nfn sorted(xs: [i64]) -> [i64] nocopy {\n    return lists.sort(xs)\n}\n\
+           \nfn rev(xs: [str]) -> [str] nocopy {\n    return lists.reverse(xs)\n}\n";
+    std::fs::write(&path, src).unwrap();
+    let out = Command::new(JIHOO).arg("emit-ir").arg(&path).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).replace(&format!("{}/", work.display()), "");
+    assert!(err.contains("nocopy.jh:20:26: `rev` is `nocopy`, but this call of `reverse` copies str (in `reverse`"), "{err}");
+    assert!(!err.contains("sorted"), "{err}");
+    std::fs::remove_dir_all(&work).unwrap();
+}
+
 /// Errors in an imported module name that module's file.
 #[test]
 fn errors_in_imported_modules_name_their_file() {

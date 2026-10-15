@@ -161,6 +161,9 @@ pub struct FnDecl {
     pub ret: Option<TypeExpr>,
     /// `requires` and `ensures` clauses, in the order written.
     pub contracts: Vec<Contract>,
+    /// Where `nocopy` is, if the function promises that natively, it and
+    /// everything it calls copy no list, string or closure.
+    pub nocopy: Option<Pos>,
     pub body: Block,
 }
 
@@ -869,6 +872,9 @@ pub fn set_program_pos(p: &mut Program, pos: Pos) {
         }
         if let Some(t) = &mut f.ret {
             set_type_pos(t, pos);
+        }
+        if let Some(p) = &mut f.nocopy {
+            *p = pos;
         }
         f.contracts.iter_mut().for_each(|c| {
             c.pos = pos;

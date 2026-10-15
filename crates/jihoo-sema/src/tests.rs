@@ -2369,3 +2369,89 @@ fn contracts_the_compiler_cannot_try() {
     });
     m.unwrap();
 }
+
+// ---- nocopy ----
+
+#[test]
+fn nocopy_functions_copy_nothing() {
+    let native = |src: &str| check(&format!("#![native]\n{src}"));
+    // Changing a list handed over, moving a field out and back, building a
+    // list in a tail call: none copies.
+    let src = "struct Bag { name: str, xs: [i64] }\n\
+               fn grow(xs: [i64], x: i64) -> [i64] nocopy {\n  push(xs, x)\n  return xs\n}\n\
+               fn add(b: Bag, x: i64) -> Bag nocopy {\n  b.xs = grow(b.xs, x)\n  return b\n}\n\
+               fn total(xs: [i64]) -> i64 nocopy {\n  let s = 0\n  for x in xs { s += x }\n  return s\n}\n\
+               fn build(n: i64, acc: [i64]) -> [i64] nocopy {\n  if n == 0 { return acc }\n  push(acc, n)\n  return build(n - 1, acc)\n}\n\
+               fn main() {\n  let b = Bag { name: \"b\", xs: [] }\n  b = add(b, 3)\n  print(total(b.xs) + len(build(10, [])))\n}";
+    native(src).unwrap();
+    // The same program on the VM, where `nocopy` is not checked, runs alike.
+    assert_eq!(run(src), "13\n");
+
+    // A copy of its own, with why.
+    let e = native("fn twice(xs: [i64]) -> [i64] nocopy {\n  let ys = xs\n  push(ys, 1)\n  push(ys, len(xs))\n  return ys\n}\nfn main() { print(twice([1])) }").unwrap_err();
+    assert_eq!(e, "3:12: `twice` is `nocopy`, but it copies [i64] here: parameter 1 is assigned and copied, since it is still used afterwards");
+    // A copy in a function it calls, through others, at the call.
+    let e = native(
+        "fn keep(xs: [i64]) -> [i64] {\n  let ys = xs\n  push(ys, len(xs))\n  return ys\n}\n\
+         fn middle(xs: [i64]) -> [i64] {\n  return keep(xs)\n}\n\
+         fn top(xs: [i64]) -> [i64] nocopy {\n  let n = len(xs)\n  return middle(xs)\n}\nfn main() { print(top([1])) }",
+    )
+    .unwrap_err();
+    assert!(e.starts_with("12:17: `top` is `nocopy`, but this call of `middle` copies [i64] (in `keep`, line 3, through `middle` -> `keep`)"), "{e}");
+    // A function value from the caller may copy anything.
+    let e = native("fn apply(f: fn(i64) -> i64, x: i64) -> i64 nocopy {\n  return f(x)\n}\nfn main() { print(apply(fn(x: i64) -> i64 { return x }, 1)) }").unwrap_err();
+    assert!(e.contains("`apply` is `nocopy`, but it calls a function value, whose copies the compiler cannot see"), "{e}");
+    // One made inside is followed, even through a struct, and so is a closure
+    // passed as a `comptime` parameter.
+    native(
+        "struct Step { f: fn(i64) -> i64 }\nfn run(s: Step, x: i64) -> i64 { return s.f(x) }\n\
+         fn twice(x: i64) -> i64 nocopy {\n  let s = Step { f: fn(y: i64) -> i64 { return y * 2 } }\n  return run(s, x)\n}\n\
+         fn each(comptime f: fn(i64) -> i64, xs: [i64]) -> i64 nocopy {\n  let s = 0\n  for x in xs { s += f(x) }\n  return s\n}\n\
+         fn main() { print(twice(2) + each(fn(x: i64) -> i64 { return x }, [1])) }",
+    )
+    .unwrap();
+    let e = native("struct Step { f: fn(i64) -> [i64] }\nfn copying(n: i64) -> [i64] { let a: [i64] = [n]\n let b = a\n push(b, 1)\n return a + b }\n\
+                    fn via(n: i64) -> i64 nocopy {\n  let s = Step { f: copying }\n  return len(s.f(n))\n}\nfn main() { print(via(1)) }")
+    .unwrap_err();
+    assert!(e.contains("`via` is `nocopy`, but this call of `copying` copies [i64]"), "{e}");
+
+    let e = err("fn f(xs: [i64]) -> i64 nocopy nocopy {\n  return 0\n}\nfn main() {}");
+    assert!(e.contains("`nocopy` is written twice"), "{e}");
+    let e = err("#![native]\nextern fn labs(x: i64) -> i64 nocopy\nfn main() {}");
+    assert!(e.contains("a C function cannot have a contract"), "{e}");
+    // Contracts and `nocopy` together, in any order; `nocopy` is a name elsewhere.
+    native("fn f(xs: [i64]) -> i64\n  requires len(xs) < 100\n  nocopy\n  ensures result >= 0\n{\n  return len(xs)\n}\nfn main() { let nocopy = f([])\n print(nocopy) }").unwrap();
+}
+
+#[test]
+fn handed_on_parameters_copy_nothing() {
+    // `middle` only passes `xs` on to `keep`, which keeps it: the copy is
+    // made once, by `middle` on entry, and a caller that hands its list
+    // over to `middle` reaches `keep` without one.
+    let m = check(
+        "#![native]\nstruct Box { xs: [i64] }\nfn keep(xs: [i64]) -> Box { return Box { xs: xs } }\n\
+         fn middle(xs: [i64]) -> Box nocopy { return keep(xs) }\n\
+         fn main() { let a: [i64] = [1]\n let b = middle(a)\n print(len(b.xs)) }",
+    )
+    .unwrap();
+    assert!(jihoo_ir::cost::copies(&m).is_empty(), "{m}");
+    // A part handed on, while the rest is still used, moves out on its own:
+    // an adapter that keeps a closure next to the iterator it wraps.
+    let m = check(
+        "#![native]\nstruct It { xs: [i64], at: i64 }\nstruct Map { inner: It, f: fn(i64) -> i64 }\n\
+         fn step(it: It) -> (It, i64) { let x = it.xs[it.at]\n it.at = it.at + 1\n return (it, x) }\n\
+         fn next(m: Map) -> (Map, i64) {\n  let inner = m.inner\n  let f = m.f\n  let (rest, x) = step(inner)\n  let y = f(x)\n  return (Map { inner: rest, f: f }, y)\n}\n\
+         fn first(xs: [i64]) -> i64 nocopy {\n  let m = Map { inner: It { xs: xs, at: 0 }, f: fn(x: i64) -> i64 { return x + 1 } }\n  let (m2, y) = next(m)\n  return y\n}\n\
+         fn main() { print(first([4, 5])) }",
+    )
+    .unwrap();
+    assert!(jihoo_ir::cost::copies(&m).is_empty(), "{m}");
+    // Calling `f` after putting it into the new value does use it again.
+    let e = check(
+        "#![native]\nstruct Map { xs: [i64], f: fn(i64) -> i64 }\n\
+         fn next(m: Map) -> (Map, i64) nocopy {\n  let f = m.f\n  return (Map { xs: m.xs, f: f }, f(1))\n}\n\
+         fn main() { let (m, y) = next(Map { xs: [], f: fn(x: i64) -> i64 { return x } })\n print(y) }",
+    )
+    .unwrap_err();
+    assert!(e.contains("copies fn(i64) -> i64 here: a value is put into a new value and copied, since it is still used afterwards"), "{e}");
+}

@@ -106,6 +106,10 @@ over), and why. A copy of a `ref` or a cell is not listed: it counts one more
 holder. Functions the program never calls are left out, as is the copying
 version of a function whose callers all hand their arguments over.
 
+To keep a function free of copies, declare it [`nocopy`](../language/nocopy.md):
+a copy it or anything it calls makes is then a compile error, with the same
+reasons.
+
 ## Environment
 
 | variable | meaning | default |

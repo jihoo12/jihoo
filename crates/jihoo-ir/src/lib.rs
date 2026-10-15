@@ -602,6 +602,17 @@ impl Terminator {
 }
 
 impl Inst {
+    /// The register the instruction writes, if any.
+    pub fn dst(&self) -> Option<Reg> {
+        use Inst::*;
+        match self {
+            Store { .. } | AtomicStore { .. } | Send { .. } | Spawn { .. } | Push { .. } | CellSet { .. } | Print { .. }
+            | Drop { .. } | Trap | Fence | Loc { .. } => None,
+            // Every other instruction lists its destination first.
+            _ => self.clone().regs_mut().first().map(|r| **r),
+        }
+    }
+
     /// Every register the instruction reads or writes, for passes that renumber
     /// registers.
     pub fn regs_mut(&mut self) -> Vec<&mut Reg> {

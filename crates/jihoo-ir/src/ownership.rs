@@ -87,6 +87,25 @@ pub fn insert(m: &mut Module) {
             cloning.insert(f.name.clone(), c);
         }
     }
+    // A parameter handed at its last use to a callee that clones it is one
+    // the function had better clone itself: the copy is made once either way,
+    // and its consuming version then hands the caller's value on, so a chain
+    // of functions that only pass a list along copies nothing.
+    loop {
+        let mut changed = false;
+        for f in &m.funcs {
+            let more = handed_on(f, &mut owning, &cloning);
+            if !more.is_empty() {
+                let c = cloning.entry(f.name.clone()).or_default();
+                c.extend(more);
+                c.sort_unstable();
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
     for f in &mut m.funcs {
         field_takes(f, &mut owning, &cloning);
     }
@@ -346,6 +365,59 @@ fn cloned_params(f: &Function, owning: &mut Owning) -> Vec<usize> {
                 }))
         })
         .collect()
+}
+
+/// The parameters of `f` that it does not clone yet (by `cloning`) but hands,
+/// or a part of which it hands, at their last use to a callee that clones
+/// them, or to a tail call, whose callee takes its parameters over.
+fn handed_on(f: &Function, owning: &mut Owning, cloning: &HashMap<String, Vec<usize>>) -> Vec<usize> {
+    let tracked: HashSet<Reg> = (0..f.regs.len() as u32).map(Reg).filter(|&r| owning.owns(f.reg_type(r))).collect();
+    let already = cloning.get(&f.name).map_or(&[][..], Vec::as_slice);
+    let candidates: Vec<usize> = (0..f.params.len()).filter(|&i| !already.contains(&i) && tracked.contains(&Reg(i as u32))).collect();
+    if candidates.is_empty() {
+        return vec![];
+    }
+    let roots = views(f, &tracked, &HashSet::new());
+    let live_in = liveness(f, &tracked, &roots);
+    if candidates.iter().all(|&i| !live_in[0].contains(&Reg(i as u32))) {
+        return vec![];
+    }
+    let mut out = Vec::new();
+    for (b, block) in f.blocks.iter().enumerate() {
+        // Live registers after each instruction, from the end of the block.
+        let mut live = live_out(f, b, &live_in);
+        let handed = |args: &[Reg], takes: &[usize], live: &HashSet<Reg>, out: &mut Vec<usize>| {
+            for &i in &candidates {
+                let p = Reg(i as u32);
+                // The parameter, or a part of it read as a view.
+                let at: Vec<usize> = args.iter().enumerate().filter(|(_, a)| **a == p || roots.get(a) == Some(&p)).map(|(j, _)| j).collect();
+                let [j] = at[..] else { continue };
+                // What is handed on is not used again: the parameter, or the
+                // view (whose part a consuming version takes out of it, while
+                // the rest of the parameter may still be used).
+                let dead_after = if args[j] == p { !live.contains(&p) } else { !live.contains(&args[j]) };
+                if takes.contains(&j) && dead_after && live_in[0].contains(&p) && !out.contains(&i) {
+                    out.push(i);
+                }
+            }
+        };
+        if let Terminator::TailCall { func, args } = &block.term {
+            let takes: Vec<usize> = (0..args.len()).collect();
+            if f.name != *func {
+                handed(args, &takes, &live, &mut out);
+            }
+        }
+        step_term(&block.term, &mut live, &tracked, &roots);
+        for inst in block.insts.iter().rev() {
+            if let Inst::Call { func, args, .. } = inst {
+                if let Some(takes) = cloning.get(func) {
+                    handed(args, takes, &live, &mut out);
+                }
+            }
+            step_back(inst, &mut live, &tracked, &roots);
+        }
+    }
+    out
 }
 
 /// Whether `inst` consumes `r`; a copy that stays a view (a key of `roots`)
@@ -714,8 +786,35 @@ fn field_takes(f: &mut Function, owning: &mut Owning, cloning: &HashMap<String, 
     }
     let params = f.params.len() as u32;
     let roots = views(f, &tracked, &HashSet::new());
-    let copied_params = cloned_params(f, owning);
+    // Including the parameters it hands on to callees that clone them.
+    let copied_params = cloning.get(&f.name).cloned().unwrap_or_default();
     let live_in = liveness(f, &tracked, &roots);
+    // How many instructions write each register, to follow `let x = s.f`.
+    let mut writes: HashMap<Reg, usize> = HashMap::new();
+    for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+        for d in defined(inst) {
+            *writes.entry(d).or_default() += 1;
+        }
+    }
+    // The part of which value each register views, when it is a part read
+    // (or only ever a copy of one).
+    let mut parts_of: HashMap<Reg, (Reg, Vec<PathStep>)> = HashMap::new();
+    for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+        if let Some((d, s, q)) = part_path(inst) {
+            if writes.get(&d) == Some(&1) {
+                parts_of.insert(d, (s, q));
+            }
+        }
+    }
+    for _ in 0..4 {
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            if let Inst::Copy { dst: d, src: s } = *inst {
+                if let Some(p) = parts_of.get(&s).cloned().filter(|_| writes.get(&d) == Some(&1)) {
+                    parts_of.entry(d).or_insert(p);
+                }
+            }
+        }
+    }
     let mut found = Vec::new();
     for (b, block) in f.blocks.iter().enumerate() {
         let mut live = live_out(f, b, &live_in);
@@ -736,13 +835,29 @@ fn field_takes(f: &mut Function, owning: &mut Owning, cloning: &HashMap<String, 
             }
             // Worth it only where the part would be copied: it cannot stay a
             // view, or it is consumed, or handed to a function that copies it.
+            // The part read, and the registers that only ever hold a copy of it.
+            let mut part = HashSet::from([dst]);
+            for _ in 0..4 {
+                for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+                    if let Inst::Copy { dst: d, src: s } = *inst {
+                        if part.contains(&s) && writes.get(&d) == Some(&1) && roots.get(&d) == Some(&src) {
+                            part.insert(d);
+                        }
+                    }
+                }
+            }
             let copied = !roots.contains_key(&dst)
                 || f.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
-                    consumes(inst, dst, &roots)
+                    part.iter().any(|&r| consumes(inst, r, &roots))
                         || matches!(inst, Inst::Call { func, args, .. }
-                            if cloning.get(func.as_str()).is_some_and(|ps| ps.iter().any(|&p| args[p] == dst)))
+                            if cloning.get(func.as_str()).is_some_and(|ps| ps.iter().any(|&p| part.contains(&args[p]))))
                 });
-            let viewed = after[i].iter().any(|v| *v != dst && roots.get(v) == Some(&src));
+            // Another view of the value, of a part that may overlap this one.
+            let viewed = after[i].iter().any(|v| {
+                !part.contains(v)
+                    && roots.get(v) == Some(&src)
+                    && !parts_of.get(v).is_some_and(|(s, q)| *s == src && overlap(&path, q) == Overlap::Disjoint)
+            });
             if copied && !viewed && part_unread(f, b, i, src, &path) {
                 found.push((b, i, dst, src, path));
             }
@@ -1061,7 +1176,9 @@ fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
     if tracked.is_empty() {
         return;
     }
-    let cloned = cloned_params(f, owning);
+    // What `insert` worked out, including the parameters handed on to a
+    // callee that clones them; a consuming or tail version is `given` them.
+    let cloned = cx.cloning.get(&f.name).cloned().unwrap_or_default();
     entry_without_predecessors(f);
     // Parameters handed over, or copied on entry, are the function's own.
     let owned_params: HashSet<Reg> =
