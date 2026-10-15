@@ -193,6 +193,15 @@ It needs no borrow checker because values never share memory: pointers may
 not reach owning values (checked in `place.rs`), and references into values
 are [paths](../language/paths.md) (`paths.rs`), which hold indices.
 
+The pass writes down what it decided (which parameters a function takes
+over, which registers are views, which part reads move a part out), and
+`crates/jihoo-ir/src/owncheck.rs` checks it on every native program,
+independently of how the pass reasoned: every value moved or freed exactly
+once, nothing used after, nothing leaked, views used only while their value
+lives unchanged ([Design: native memory](memory.md#3-ownership-the-compiler-checks-done)).
+A mistake in the pass is then an internal compiler error instead of memory
+corruption in the program.
+
 ## Other modules
 
 | file | what |

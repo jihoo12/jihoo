@@ -55,6 +55,7 @@ fn breach_fn(name: String, params: Vec<Type>) -> jihoo_ir::Function {
         params,
         ret: Type::Unit,
         blocks: vec![jihoo_ir::Block { insts: vec![Inst::Trap], term: Terminator::Unreachable }],
+        ownership: None,
     }
 }
 

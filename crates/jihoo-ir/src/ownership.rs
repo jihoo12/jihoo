@@ -73,7 +73,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::{Block, BlockId, Function, Inst, Module, PathStep, Reg, Terminator, Type};
+use crate::{Block, BlockId, Function, Inst, Module, Ownership, PathStep, Reg, Terminator, Type};
 
 /// Inserts `clone` and `drop` into every function of a native module.
 pub fn insert(m: &mut Module) {
@@ -439,8 +439,8 @@ pub struct Owning {
     members: HashMap<String, Vec<Type>>,
     memo: HashMap<String, bool>,
     /// The fields of each struct, and the values of each variant of each enum.
-    fields: HashMap<String, Vec<Type>>,
-    variants: HashMap<String, Vec<Vec<Type>>>,
+    pub(crate) fields: HashMap<String, Vec<Type>>,
+    pub(crate) variants: HashMap<String, Vec<Vec<Type>>>,
 }
 
 impl Owning {
@@ -481,7 +481,7 @@ impl Owning {
     }
 }
 
-fn path_regs(path: &[PathStep]) -> impl Iterator<Item = Reg> + '_ {
+pub(crate) fn path_regs(path: &[PathStep]) -> impl Iterator<Item = Reg> + '_ {
     path.iter().filter_map(|s| match s {
         PathStep::Elem(r) => Some(*r),
         PathStep::Field(_) => None,
@@ -490,7 +490,7 @@ fn path_regs(path: &[PathStep]) -> impl Iterator<Item = Reg> + '_ {
 
 /// The operands an instruction consumes (takes ownership of), as places that
 /// can be replaced by a clone.
-fn consumed(inst: &mut Inst) -> Vec<&mut Reg> {
+pub(crate) fn consumed(inst: &mut Inst) -> Vec<&mut Reg> {
     use Inst::*;
     match inst {
         Copy { dst, src } if dst == src => vec![],
@@ -516,7 +516,7 @@ fn consumed(inst: &mut Inst) -> Vec<&mut Reg> {
 }
 
 /// The operands an instruction reads without taking them.
-fn borrowed(inst: &Inst) -> Vec<Reg> {
+pub(crate) fn borrowed(inst: &Inst) -> Vec<Reg> {
     use Inst::*;
     match inst {
         Const { .. } | FConst { .. } | Unit { .. } | Str { .. } | FuncRef { .. } | ReadLine { .. } | Args { .. } | Trap | Fence | Loc { .. } => {
@@ -580,7 +580,7 @@ fn borrowed(inst: &Inst) -> Vec<Reg> {
 
 /// The registers an instruction writes. An instruction that changes a value in
 /// place (`push`, `setpath %r, %r`) both borrows and writes it.
-fn defined(inst: &Inst) -> Vec<Reg> {
+pub(crate) fn defined(inst: &Inst) -> Vec<Reg> {
     use Inst::*;
     match inst {
         Store { .. } | AtomicStore { .. } | Send { .. } | Spawn { .. } | Print { .. } | Trap | Fence | Drop { .. } | Loc { .. } => {
@@ -605,7 +605,7 @@ fn defined(inst: &Inst) -> Vec<Reg> {
 }
 
 /// Whether the instruction changes `r` in place, keeping what it owns.
-fn changes(inst: &Inst, r: Reg) -> bool {
+pub(crate) fn changes(inst: &Inst, r: Reg) -> bool {
     use Inst::*;
     match inst {
         Push { root, .. } | Pop { root, .. } | Take { src: root, .. } => *root == r,
@@ -806,7 +806,7 @@ fn views(f: &Function, tracked: &HashSet<Reg>, moves: &HashSet<(usize, Reg, Reg)
 /// The part of `r` that `inst` changes in place, keeping the rest: a field,
 /// an element or a path of them that it writes, takes, or pushes onto or pops
 /// from.
-fn changed_part(inst: &Inst, r: Reg) -> Option<Vec<PathStep>> {
+pub(crate) fn changed_part(inst: &Inst, r: Reg) -> Option<Vec<PathStep>> {
     match inst {
         Inst::SetField { dst, src, index, value } if *dst == r && *src == r && *value != r => {
             Some(vec![PathStep::Field(*index)])
@@ -921,7 +921,7 @@ fn field_takes(f: &mut Function, owning: &mut Owning, cloning: &HashMap<String, 
 
 /// `inst` as a read of a part that a `take` could move out: its result, what
 /// it reads from, and the part's path.
-fn part_path(inst: &Inst) -> Option<(Reg, Reg, Vec<PathStep>)> {
+pub(crate) fn part_path(inst: &Inst) -> Option<(Reg, Reg, Vec<PathStep>)> {
     match inst {
         Inst::Field { dst, src, index } => Some((*dst, *src, vec![PathStep::Field(*index)])),
         Inst::Elem { dst, src, index } => Some((*dst, *src, vec![PathStep::Elem(*index)])),
@@ -932,7 +932,7 @@ fn part_path(inst: &Inst) -> Option<(Reg, Reg, Vec<PathStep>)> {
 
 /// How the part of a value at path `q` stands to the part at `p`.
 #[derive(PartialEq)]
-enum Overlap {
+pub(crate) enum Overlap {
     /// No part of one is part of the other.
     Disjoint,
     Same,
@@ -944,7 +944,7 @@ enum Overlap {
     Unknown,
 }
 
-fn overlap(p: &[PathStep], q: &[PathStep]) -> Overlap {
+pub(crate) fn overlap(p: &[PathStep], q: &[PathStep]) -> Overlap {
     for (a, b) in p.iter().zip(q) {
         match (a, b) {
             (PathStep::Field(x), PathStep::Field(y)) if x != y => return Overlap::Disjoint,
@@ -1233,6 +1233,8 @@ fn takes(f: &Function, tracked: &HashSet<Reg>, owning: &mut Owning, owned_params
 /// Inserts clones and drops into `f`. The parameters at `given` are handed
 /// over by the caller (in a consuming version); the others are borrowed.
 fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
+    // What is decided here, for `check_ownership` (`owncheck.rs`).
+    f.ownership = Some(Ownership { own: given.iter().map(|&i| i as u32).collect(), ..Default::default() });
     let owning = &mut *cx.owning;
     let mut tracked: HashSet<Reg> = (0..f.regs.len() as u32).map(Reg).filter(|&r| owning.owns(f.reg_type(r))).collect();
     if tracked.is_empty() {
@@ -1322,6 +1324,10 @@ fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
     });
     let borrowed_params: HashSet<Reg> =
         borrowed_params.into_iter().chain(roots.keys().copied()).chain(loaded.collect::<Vec<_>>()).collect();
+    let mut decided = Ownership { own: given.iter().map(|&i| i as u32).collect(), ..Default::default() };
+    decided.views = roots.keys().copied().collect();
+    decided.views.sort_by_key(|r| r.0);
+    decided.moves = taken.moves.iter().map(|&(_, d, _)| d).collect();
 
     let owned: HashSet<Reg> = tracked.difference(&borrowed_params).copied().collect();
     let live_in = liveness(f, &tracked, &roots);
@@ -1446,6 +1452,7 @@ fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
                         for (part, ty) in parts {
                             let t = Reg(f.regs.len() as u32);
                             f.regs.push(ty.clone());
+                            decided.moves.push(t);
                             insts.push(part.read(t, src));
                             insts.push(Inst::Drop { src: t });
                         }
@@ -1527,6 +1534,7 @@ fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
         }
     }
     f.blocks[0].insts.splice(0..0, unread);
+    f.ownership = Some(decided);
 }
 
 /// How many edges lead to each block.

@@ -1,8 +1,12 @@
 # Design: native memory
 
-Status: a proposal, with a prototype of its first step on the branch
-`memory-rc-prototype` and the measurements below. Nothing here changes the
-language: values keep their meaning, and hosted programs do not change.
+Status: step 3, the [ownership checker](#3-ownership-the-compiler-checks-done),
+is done. Steps 1 and 2 are prototyped on the branch `memory-rc-prototype`,
+with the [measurements](#the-prototype) below: counted buffers make the
+programs that needed copies 25 to 100 times faster, and with
+[known-unique flags](#2-uniqueness-checks-that-fold-away-prototyped) nothing
+else got slower. Nothing here changes the language: values keep their
+meaning, and hosted programs do not change.
 
 ## Why
 
@@ -113,48 +117,79 @@ Counts are atomic, since values move between threads (`go`, channels, `ref`s
 shared by threads). Reading the count to check uniqueness is a plain load on
 x86_64 and an `ldar` on aarch64.
 
-### 2. Uniqueness checks the compiler can hoist
+### 2. Uniqueness checks that fold away (prototyped)
 
-A write checks the count of each list on its path. In a tight loop that is
-the one cost left (the `inplace` row below: 0.06 s before, 0.13 s with the
-checks). After the first write the lists on the path are unique, and they stay
-so until something can give them another holder. In JIR that can only be:
+A write checks the count of each list on its path. In a tight loop that was
+the one cost left: the `inplace` benchmark, a grid written element by
+element, took twice as long with counted buffers. Two things fixed it.
 
-- a `clone`, `repeat` or `splat` of the value, or of a view into it;
-- a call it, or a view into it, is lent to (the callee may keep a copy);
-- writing a list on the path whole (`g[i] = row` puts in a buffer that may
-  be shared), or writing a register the path indexes with.
+**Known-unique flags.** For each list on the path of a write, a function
+keeps a flag: raised when the check passed, lowered by anything that could
+give the buffer another holder. In JIR that can only be:
 
-Writes at or below a path do not end its uniqueness: a unique buffer stays
-unique when it is written. So "the lists on path P of `%r` are unique" is an
-available-expressions fact that the ownership pass can compute forward over
-the CFG, and a write needs no check for the levels the fact covers. Two
-changes to JIR carry it:
+- a `clone`, `repeat`, `splat`, `slice` or list `+` (which count what they
+  copy), a call (the callee may keep a copy of what it is lent), or any
+  other instruction not known to be harmless;
+- writing the register anew, or a register the path indexes with;
+- replacing a list on the path whole (`g[i] = row` puts in a buffer that may
+  be shared), or taking or popping it out.
 
-- `unique %r, (path)`: makes the lists along the path unique where the path
-  exists, and does nothing (no bounds trap) where it does not, so that it can
-  be placed before a loop that may not run.
-- a flag on each write saying which levels on its path are known unique.
+Writes below a list do not lower its flag: a unique buffer stays unique when
+it is written. A write checks the count only when the flag is down.
 
-For `for i { for j { g[i][j] = ... } }` the pass puts `unique %g, (elem %i)`
-before the inner loop; the fact then holds on the inner loop's entry and on
-its back edge, and the writes inside check nothing. This is what Swift's
-optimizer does for arrays, but on JIR the facts are simpler to get: there are
-no references into values, so nothing else can make `g[i]` shared while the
-loop runs.
+The flags are runtime values, not the result of an analysis: they are
+allocas, which LLVM turns into SSA values, so where paths join they need no
+reasoning, and where they are known (after the first round of a loop) LLVM
+folds the test away. They are correct by construction as long as every
+event above lowers them; `tests/diff-lists/shared_writes.jh` shares buffers
+between writes in each of those ways, and fails if calls and clones stop
+lowering them.
 
-### 3. Ownership the backend can check
+**Headers that stay in registers.** The slow path took the header's
+address, which made every header escape, so LLVM reloaded it from memory
+around every write and could not vectorize. It now takes and returns the
+data pointer.
 
-To make the pass's mistakes compile errors instead of memory errors, JIR
-would say what the pass decided instead of leaving it implicit in liveness:
-which part reads are views and which move a part out, and which parameters a
-function takes over. Then a small checker, run on every native module before
-the backend (and always in the tests), verifies that each owned value is
-moved or dropped exactly once on every path, that nothing is used after it
-is moved, and that no view is used after its root changes. This is
-translation validation: the pass may grow clever, and the checker stays
-simple. A debug mode can also count views at run time and check, at every
-write, that no view of the buffer is alive.
+With both, `inplace` takes as long as without counting. The alternative,
+an explicit `unique %r, (path)` in JIR that the ownership pass hoists out of
+loops (as Swift's optimizer hoists its array checks), would also work, but
+it needs an analysis in the pass and a JIR change, and the flags reach the
+same speed without either.
+
+### 3. Ownership the compiler checks (done)
+
+The ownership pass now writes down what it decided (JIR 21): for each
+function, the parameters it takes over (`own`), the registers that are views
+(`views`), and the part reads that move their part out (`moves`). Everything
+else follows from what each instruction consumes, borrows, defines or
+changes in place. `crates/jihoo-ir/src/owncheck.rs` then follows every
+owning register along every path, independently of how the pass reasoned,
+and requires that:
+
+- each value is moved or dropped exactly once, and not used after;
+- no value is left at a `ret` or a `tailcall` (no leak), and a value taken
+  apart had all its owning parts moved out;
+- only the function's own values are dropped, moved or changed in place,
+  never a borrowed parameter or a view;
+- a view is used only while the value it shares memory with is alive and
+  unchanged, except in place at a part disjoint from the view's;
+- a value is in the same state on every way into a block.
+
+It runs on every native program, after the pass and before `nocopy` and the
+backend; a failure is an internal compiler error that names the function,
+the block and the instruction. It costs about 0.01 s on `examples/json.jh`.
+
+It catches the pass's mistakes where they are made. With the leak that
+`v = items[k]` had (fixed with the JSON example) put back into the pass, the
+checker rejects both programs that do that, at the instruction that loses
+the value; valgrind had found it only by running one. Leaving out the clones
+of lists that are used again makes 9 of the 28 list tests fail to compile
+("%24 is a view, but this moves it"), and leaving out the drops on edges
+between blocks makes 22 of them fail ("still the function's own here: a
+leak").
+
+So the pass can keep learning to avoid copies, and a mistake in it shows
+up as a compile error, not as memory corruption in a program.
 
 ### 4. Reuse
 
@@ -176,34 +211,41 @@ That is a language change and is not needed for the steps above.
 The branch `memory-rc-prototype` implements step 1 in the LLVM backend only
 (`backend-llvm/src/codegen.cpp`): counted buffers, O(1) clones, uniqueness
 checked inline before every write, and the slow path that copies one level.
-It passes every test, the backend tests, the differential tests under
-valgrind, and 7,000 random programs of the fuzzer (4,000 before checks were
-inline, 3,000 after), 1,100 more of them under valgrind. The benchmarks and
-the script that runs them are in `bench/memory/` on the branch.
+Each step of it passed every test, the backend tests, the differential tests
+under valgrind and 3,000 to 4,000 random programs of the fuzzer, 500 more of
+them under valgrind. The benchmarks and the script that runs them
+(`run.sh`) are in `bench/memory/` on the branch.
 
-Best of three runs, x86_64, `-O2`; `main` is the current backend.
+Best of three runs, x86_64, `-O2`.
 
-| program | `main` | counted, atomic | counted, not atomic | memory, `main` → counted |
-|---------|--------|-----------------|---------------------|--------------------------|
-| `snapshot` | 0.50 s | 0.02 s | < 0.01 s | 643 MB → 14 MB |
-| `shared_tags` | 0.13 s | < 0.01 s | < 0.01 s | 112 MB → 2.7 MB |
-| `tree_edit` | 0.25 s | < 0.01 s | < 0.01 s | 252 MB → 3.3 MB |
-| `json` (0.9 MB) | 0.02 s | 0.02 s | 0.02 s | 15 MB → 10 MB |
-| `words` (300,000 words, `maps`) | 0.11 s | 0.09 s | 0.11 s | 25 MB |
-| `pushpop` (5 x 5M pushes and pops) | 0.19 s | 0.18 s | 0.18 s | 41 MB |
-| `trees` (200 trees of 22,000 nodes, built and summed) | 0.16 s | 0.18 s | 0.18 s | 2.5 MB |
-| `inplace` (2000 x 2000 grid, 10 passes of writes) | 0.07 s | 0.13 s | 0.09 s | 33 MB |
+| program | before | counted | memory, before → counted |
+|---------|--------|---------|--------------------------|
+| `snapshot` | 0.51 s | 0.02 s | 643 MB → 14 MB |
+| `shared_tags` | 0.14 s | < 0.01 s | 112 MB → 2.7 MB |
+| `tree_edit` | 0.24 s | < 0.01 s | 252 MB → 3.3 MB |
+| `words` (300,000 words, `maps`) | 0.11 s | 0.11 s | 25 MB |
+| `pushpop` (5 x 5M pushes and pops) | 0.18 s | 0.18 s | 41 MB |
+| `trees` (200 trees of 22,000 nodes, built and summed) | 0.17 s | 0.17 s | 2.5 MB |
+| `inplace` (2000 x 2000 grid, 10 passes of writes) | 0.06 s | 0.05 s | 33 MB |
 
-Programs that copied nothing before cost about what they did (`pushpop`,
-`words`, `json`; `trees` 12% more, for the count in each new buffer): their
-values were moved, not counted, and stay so. The programs that needed copies
-become 25 to more than 100 times faster and use 20 to 75 times less memory,
-now faster than the VM, as a native program should be. The loss is
-`inplace`, a loop that writes a grid element by element: twice as slow with
-atomic counts, 30% slower without. That is the check before each write,
-which step 2 removes. Checking the count inline rather than in a call
-already took `inplace` from 0.21 s to 0.13 s; how the count is read (acquire,
-relaxed or plain) made no measurable difference.
+`before` is the backend on `main`; `counted` is the branch, with atomic
+counts, the flags of step 2, and one more change: the last holder of a
+buffer frees it without an atomic write, since a count of 1 means no other
+thread holds it to count itself in (as Lean 4 does). The programs that
+needed copies become 25 to more than 100 times faster and use 20 to 75
+times less memory, now faster than the VM, as a native program should be.
+The others take the same time.
+
+How the prototype got there is worth keeping. With the count checked in a
+call before each write, `inplace` took 0.21 s; checked inline, 0.13 s (how
+the count is read, acquire, relaxed or plain, made no difference);
+non-atomic counts, 0.09 s; with the flags and headers kept in registers,
+0.05 s. `trees`, which frees many small lists, took 0.18 s until the last
+holder stopped doing an atomic write.
+
+Eight threads copying, changing and dropping copies of one grid held in a
+`ref` (`tests/threads/shared_buffers.jh` on the branch) gave the right
+result in 200 runs at `-O0` and `-O2`, and ran clean under valgrind.
 
 The cost in memory is 8 bytes for each list or string buffer.
 
@@ -222,12 +264,11 @@ The cost in memory is 8 bytes for each list or string buffer.
 ## Plan
 
 1. Counted buffers in the backend, as prototyped, with `--cost` reporting
-   writes that may copy. JIR does not change.
-2. `unique` in JIR and hoisting in the ownership pass, until `inplace` is as
-   fast as before.
-3. Explicit ownership in JIR and the checker, run in the tests and, if cheap
-   enough, always.
+   the writes that may copy a shared buffer. JIR does not change.
+2. The known-unique flags, as prototyped (done with step 1).
+3. ~~Explicit ownership in JIR and the checker.~~ Done.
 4. Reuse of unique buffers.
 5. `inout` parameters, if programs still want them.
 
-Steps 1 and 2 are the speed, 3 the safety; each is useful alone.
+The checker makes step 1 safer to take: the counts change what a copy costs,
+not where the pass puts copies and frees, and that is what it checks.

@@ -1,7 +1,7 @@
 ; A program's arguments are C's `main`'s, which freestanding modules do not
 ; have (nor `str`, which `args` gives).
 ; expect: error `args` needs the C library's `main`; it is only available in native modules
-jir 20
+jir 21
 profile freestanding
 
 fn @_start() -> i64 {

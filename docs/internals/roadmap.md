@@ -177,6 +177,13 @@
     goes to the consuming version, and the caller copies the others. Before,
     `m = maps.set(m, w, n)` with a word `w` still in a list copied the whole
     map; counting 300,000 words took 129 s natively, now 0.13 s.
+43. The ownership pass is checked ([design](memory.md)): it writes down what
+    it decided (JIR 21: `own`, `views`, `moves`), and a checker follows every
+    value that owns memory along every path of every native function, so a
+    mistake in the pass (a leak, a double free, a use after a move, a view
+    outliving its value) is an internal compiler error, not memory
+    corruption. With the `v = items[k]` leak put back into the pass, it
+    rejects the programs that hit it, at the instruction.
 
 ## Next
 
@@ -201,8 +208,8 @@
   telling apart runtime contract failures from other traps natively.
 - **Memory** ([design](memory.md)): counted list and string buffers, so that
   a copy the ownership pass cannot avoid costs O(1) instead of the whole
-  value; uniqueness checks hoisted out of loops; ownership made explicit in
-  JIR and checked. Also taking an enum's payload out of a value that is used again
+  value, with uniqueness checks that fold away (both prototyped on the branch
+  `memory-rc-prototype`); reuse of unique buffers. Also taking an enum's payload out of a value that is used again
   (`take` covers fields and elements; payloads move only out of values
   that are only taken apart).
 

@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 20)
+# JIR — jihoo IR text format (version 21)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -50,6 +50,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 18 | `file` headers and `loc`, source positions |
 | 19 | `take` moves a part at a path (`take %s, (field 0, elem %i)`), not only a field |
 | 20 | `args`, `readfile`, `writefile`, `appendfile` and `parsefloat` |
+| 21 | `own`, `views` and `moves` lines: what the ownership pass decided |
 
 ## Example
 
@@ -229,7 +230,8 @@ bb0:
 
 - The `regs` line, right after the header, gives the type of every register
   `%0 .. %(n-1)`. It must start with the parameter types: arguments arrive in
-  `%0 .. %(params-1)`.
+  `%0 .. %(params-1)`. In native modules, `own`, `views` and `moves` lines may
+  follow ([Ownership](#ownership-native-lists)).
 - Blocks are numbered `bb0, bb1, ...` in order. `bb0` is the entry block.
 - Every block ends with exactly one terminator.
 
@@ -483,6 +485,33 @@ In a native module:
   written frees nothing.
 
 The VM ignores both: on it, `clone` is `copy` and `drop` does nothing.
+
+The pass also writes down what it decided, after a function's `regs` line,
+so that the frontend can check it (`crates/jihoo-ir/src/owncheck.rs`):
+
+```
+  own 0 2
+  views %5 %7
+  moves %12
+```
+
+- `own`: the parameters, by position, that the caller hands over (in a
+  consuming or tail version); the others are borrowed.
+- `views`: the registers that are views (of a part read, or a `copy` of a
+  value still used): never dropped or moved, used only while what they share
+  memory with lives unchanged.
+- `moves`: the registers written by `field` or `payload` reads that move the
+  part out of a value taken apart. Such a value is not dropped; its owning
+  parts must all be moved out (the pass reads the ones it does not need and
+  drops them).
+
+The check follows every owning register along every path: each value is
+moved or dropped exactly once and not used after, none is left at a `ret`
+or `tailcall`, only the function's own values are dropped, moved or changed
+in place, a view is not used after its value changes (except in place at a
+disjoint part), and a value is in the same state on every way into a block.
+A failure is an internal error of the compiler. The backend reads past
+these lines.
 
 ### Memory (native and freestanding only)
 

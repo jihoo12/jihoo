@@ -87,6 +87,13 @@ undefined, and with it the very mistake of the ownership pass that valgrind
 is there to show. At `-O2`, a missing `drop` and a value handed over to two
 parameters at once both went unnoticed.
 
+Valgrind sees the mistakes a program happens to run into. The ownership
+checker (`crates/jihoo-ir/src/owncheck.rs`) sees them in every path of every
+native function the tests and the fuzzer compile, whether it runs or not:
+it is on in every build, so each fuzzer seed checks the pass too. Its own
+tests break it on purpose (hand-written JIR with double frees, leaks, uses
+after a move, views outliving their value, states that differ at a join).
+
 A program that does not finish within `JIHOO_TEST_TIMEOUT` seconds (120 by
 default), built or run, fails too, so a miscompiled loop that never ends
 shows as a failure instead of a test run that never ends.

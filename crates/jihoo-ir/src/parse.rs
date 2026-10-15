@@ -783,7 +783,7 @@ fn fn_header(l: &mut Line) -> Result<Function> {
     };
     l.punct("{")?;
     l.end()?;
-    Ok(Function { name, export, params, ret, regs: vec![], blocks: vec![] })
+    Ok(Function { name, export, params, ret, regs: vec![], blocks: vec![], ownership: None })
 }
 
 /// Reads a module in the JIR text format of this version.
@@ -901,6 +901,22 @@ pub fn parse(text: &str) -> Result<Module> {
             }
             need_regs = false;
             continue;
+        }
+        // What the ownership pass decided, before the blocks.
+        if let [Tok::Word(w), ..] = &l.toks[..] {
+            if matches!(w.as_str(), "own" | "views" | "moves") && f.blocks.is_empty() {
+                let w = w.clone();
+                l.keyword(&w)?;
+                let o = f.ownership.get_or_insert_with(Default::default);
+                while !l.done() {
+                    match w.as_str() {
+                        "own" => o.own.push(l.index()?),
+                        "views" => o.views.push(l.reg()?),
+                        _ => o.moves.push(l.reg()?),
+                    }
+                }
+                continue;
+            }
         }
         match &l.toks[..] {
             [Tok::Punct("}")] => {

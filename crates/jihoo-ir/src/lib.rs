@@ -9,6 +9,7 @@
 
 pub mod cost;
 pub mod layout;
+mod owncheck;
 pub mod ownership;
 mod parse;
 mod print;
@@ -18,6 +19,7 @@ mod verify;
 pub use parse::{parse, ParseError};
 pub use types::{FloatTy, IntTy, Type};
 pub use verify::verify;
+pub use owncheck::check_ownership;
 
 /// Version of the JIR text format, written in the `jir N` header. The LLVM
 /// backend reads exactly one version (`jir::kVersion` in
@@ -25,7 +27,7 @@ pub use verify::verify;
 /// module instead of compiling it with other rules. Bump it whenever the
 /// format or the meaning of anything in it changes (see "Versions" in
 /// `docs/jir.md`); the `version` tests check that both sides and the spec agree.
-pub const JIR_VERSION: u32 = 20;
+pub const JIR_VERSION: u32 = 21;
 
 /// Language profile, selected with `#![native]` or `#![freestanding]` at the
 /// top of a source file.
@@ -191,6 +193,24 @@ pub struct Function {
     pub regs: Vec<Type>,
     /// `blocks[0]` is the entry block.
     pub blocks: Vec<Block>,
+    /// Native only, after the ownership pass: what it decided, for
+    /// [`check_ownership`] to check.
+    pub ownership: Option<Ownership>,
+}
+
+/// What the ownership pass decided about a function: which parameters it
+/// takes over, which registers are views, and which part reads move their
+/// part out. Everything else follows from the instructions.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Ownership {
+    /// The parameters the caller hands over (by position); the others are
+    /// borrowed.
+    pub own: Vec<u32>,
+    /// Registers that share the memory of the value they were read or copied
+    /// from: never freed, and only used while that value is.
+    pub views: Vec<Reg>,
+    /// Registers written by part reads that move the part out of the value.
+    pub moves: Vec<Reg>,
 }
 
 impl Function {

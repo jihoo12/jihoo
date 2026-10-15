@@ -329,6 +329,11 @@ pub fn analyze_modules_with(mods: &[Module], opts: Options) -> Result<ir::Module
         // Native lists have no GC: decide where values move, are copied and are freed.
         if profile == Profile::Native {
             ir::ownership::insert(&mut m);
+            // Check what it decided, so that a mistake in it is a compile
+            // error and not a leak or a use after free in the program.
+            if let Err(e) = ir::check_ownership(&m) {
+                return Err(vec![Error::new(Pos::default(), format!("internal error: the ownership pass made {e}"))]);
+            }
             let errors = env.check_nocopy(&m);
             if !errors.is_empty() {
                 return Err(errors);
@@ -709,7 +714,7 @@ impl<'a> FnCx<'a> {
             })
             .collect();
 
-        Ok(ir::Function { name: name.to_string(), export: None, params: self.sig.params.clone(), ret, regs: self.regs, blocks })
+        Ok(ir::Function { name: name.to_string(), export: None, params: self.sig.params.clone(), ret, regs: self.regs, blocks, ownership: None })
     }
 
     /// Blocks reachable from the entry, in breadth-first order (entry first).

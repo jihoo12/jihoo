@@ -685,6 +685,9 @@ Module parse(const std::string &text) {
           !std::equal(fn->params.begin(), fn->params.end(), fn->regs.begin()))
         fail(no, "register types must start with the parameter types");
       need_regs = false;
+    } else if (first.kind == TokKind::Word && !block &&
+               (first.text == "own" || first.text == "views" || first.text == "moves")) {
+      // What the ownership pass decided: for the frontend's checker only.
     } else if (first.kind == TokKind::Punct && first.text == "}") {
       if (block) fail(no, "block bb" + std::to_string(fn->blocks.size() - 1) + " has no terminator");
       if (fn->blocks.empty()) fail(no, "function has no blocks");

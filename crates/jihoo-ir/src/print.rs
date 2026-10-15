@@ -82,6 +82,19 @@ impl Display for Function {
             write!(f, " {}", t.jir())?;
         }
         writeln!(f)?;
+        if let Some(o) = &self.ownership {
+            write!(f, "  own")?;
+            for p in &o.own {
+                write!(f, " {p}")?;
+            }
+            writeln!(f)?;
+            if !o.views.is_empty() {
+                writeln!(f, "  views {}", o.views.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(" "))?;
+            }
+            if !o.moves.is_empty() {
+                writeln!(f, "  moves {}", o.moves.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(" "))?;
+            }
+        }
         for (i, b) in self.blocks.iter().enumerate() {
             writeln!(f, "{}:", BlockId(i as u32))?;
             for inst in &b.insts {
