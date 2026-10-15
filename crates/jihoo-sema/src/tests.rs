@@ -2553,3 +2553,219 @@ fn rule_errors() {
     // The word is only special after a signature.
     assert_eq!(run("fn main() { let replaces = 2\n print(replaces) }"), "2\n");
 }
+
+// ---- rules and effects ----
+
+/// A generic `map`, and a rule that fuses two of them: `g, g, g, f, f, f`
+/// becomes `g, f, g, f, g, f`.
+const MAP_MAP: &str = "fn map(comptime T: type, comptime U: type, xs: [T], f: fn(T) -> U) -> [U] {\n  let out: [U] = []\n  for x in xs { push(out, f(x)) }\n  return out\n}\n\
+                       fn map_map(comptime T: type, comptime U: type, comptime V: type, xs: [T], g: fn(T) -> U, f: fn(U) -> V) -> [V]\n  replaces map(map(xs, g), f)\n{\n  let out: [V] = []\n  for x in xs { push(out, f(g(x))) }\n  return out\n}\n";
+
+/// Whether `main` calls rule `rule` (or an instance of it).
+fn applies(m: &ir::Module, rule: &str) -> bool {
+    let main = m.func("main").unwrap().to_string();
+    main.contains(&format!("call @{rule}(")) || main.contains(&format!("call @{rule}."))
+}
+
+/// Runs a hosted program that fails at run time: what it printed first.
+fn printed_before_error(src: &str) -> String {
+    let m = check(src).unwrap_or_else(|e| panic!("{e}"));
+    let mut out = Vec::new();
+    jihoo_vm::run(&m, &mut out).expect_err("expected a runtime error");
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn rules_fuse_inert_functions() {
+    // Functions with no effect that cannot fail: the order and number of
+    // calls cannot be seen, so the rule applies, generic at every type.
+    let src = format!(
+        "{MAP_MAP}fn inc(x: i64) -> i64 {{ return x + 1 }}\n\
+         fn main() {{\n  let k = 10\n  let xs: [i64] = [1, 2, 3]\n  let ss: [str] = [\"a\", \"b\"]\n\
+           print(map(map(xs, fn(x: i64) -> i64 {{ return x * 2 }}), fn(x: i64) -> i64 {{ return x + k }}))\n\
+           print(map(map(xs, inc), fn(x: i64) -> bool {{ return x > 2 }}))\n\
+           print(map(map(ss, fn(s: str) -> str {{ return s + s }}), fn(s: str) -> str {{ return s + \"!\" }}))\n}}"
+    );
+    assert_eq!(run(&src), "[12, 14, 16]\n[false, true, true]\n[aa!, bb!]\n");
+    let m = check(&src).unwrap();
+    let main = m.func("main").unwrap().to_string();
+    assert_eq!(main.matches("call @map_map.").count(), 3, "{main}");
+    assert!(!main.contains("call @map."), "{main}");
+}
+
+#[test]
+fn rules_keep_functions_that_print() {
+    // Fused, `g` and `f` would print `g1 f2 g2 f3`; as written they print
+    // `g1 g2 f2 f3`, and the call stays as written.
+    let src = format!(
+        "{MAP_MAP}fn main() {{\n  let xs: [i64] = [1, 2]\n\
+           let ys = map(map(xs, fn(x: i64) -> i64 {{ print(\"g\")\n print(x)\n return x + 1 }}), fn(x: i64) -> i64 {{ print(\"f\")\n print(x)\n return x }})\n\
+           print(ys)\n}}"
+    );
+    assert_eq!(run(&src), "g\n1\ng\n2\nf\n2\nf\n3\n[2, 3]\n");
+    assert!(!applies(&check(&src).unwrap(), "map_map"));
+    // Through any number of calls: `loud` prints by calling `say`.
+    let src = format!(
+        "{MAP_MAP}fn say(x: i64) {{ print(x) }}\nfn loud(x: i64) -> i64 {{ say(x)\n return x }}\n\
+         fn main() {{ let xs: [i64] = [1, 2]\n print(map(map(xs, loud), loud)) }}"
+    );
+    assert_eq!(run(&src), "1\n2\n1\n2\n[1, 2]\n");
+    assert!(!applies(&check(&src).unwrap(), "map_map"));
+}
+
+#[test]
+fn rules_keep_functions_that_change_cells() {
+    // The closures share a counter: `g` numbers the elements, `f` sees how
+    // many `g` numbered before it. Fused, `f` would see 1, 2, 3.
+    let src = format!(
+        "{MAP_MAP}fn main() {{\n  let n = cell(0)\n  let xs: [i64] = [5, 6, 7]\n\
+           let ys = map(map(xs, fn(x: i64) -> i64 {{ *n = *n + 1\n return x }}), fn(x: i64) -> i64 {{ return x * 10 + *n }})\n\
+           print(ys)\n}}"
+    );
+    assert_eq!(run(&src), "[53, 63, 73]\n");
+    assert!(!applies(&check(&src).unwrap(), "map_map"));
+}
+
+#[test]
+fn rules_keep_function_values_they_cannot_see() {
+    // A parameter, a local, a function value a call returns, and a closure
+    // that calls one: what they call is not known where the rule would apply.
+    let src = format!(
+        "{MAP_MAP}fn id(x: i64) -> i64 {{ return x }}\nfn pick() -> fn(i64) -> i64 {{ return id }}\n\
+         fn both(xs: [i64], g: fn(i64) -> i64) -> [i64] {{ return map(map(xs, g), id) }}\n\
+         fn main() {{\n  let xs: [i64] = [1, 2]\n  let h = id\n\
+           print(both(xs, id))\n  print(map(map(xs, h), id))\n  print(map(map(xs, pick()), id))\n\
+           print(map(map(xs, fn(x: i64) -> i64 {{ return h(x) }}), id))\n}}"
+    );
+    assert_eq!(run(&src), "[1, 2]\n[1, 2]\n[1, 2]\n[1, 2]\n");
+    let m = check(&src).unwrap();
+    assert!(!applies(&m, "map_map"), "{m}");
+    assert!(!m.func("both").unwrap().to_string().contains("call @map_map"), "{m}");
+}
+
+#[test]
+fn rules_keep_functions_that_may_trap() {
+    // `g` traps on 0 after `f` ... as written, all of `g` runs first, so
+    // the program stops before `f` prints anything; fused, `f` would print
+    // for the first element.
+    let src = format!(
+        "{MAP_MAP}fn main() {{\n  let xs: [i64] = [1, 0]\n\
+           let ys = map(map(xs, fn(x: i64) -> i64 {{ return 100 / x }}), fn(x: i64) -> i64 {{ print(x)\n return x }})\n\
+           print(ys)\n}}"
+    );
+    assert_eq!(printed_before_error(&src), "");
+    assert!(!applies(&check(&src).unwrap(), "map_map"));
+    // Elements, too, are bounds-checked; a loop may not end.
+    let src = format!(
+        "{MAP_MAP}fn main() {{\n  let t: [i64] = [9]\n  let xs: [i64] = [0, 1]\n\
+           print(map(map(xs, fn(i: i64) -> i64 {{ return t[i] }}), fn(x: i64) -> i64 {{ return x }}))\n}}"
+    );
+    assert!(!applies(&check(&src).unwrap(), "map_map"));
+    let src = format!(
+        "{MAP_MAP}fn main() {{\n  let xs: [i64] = [3]\n\
+           print(map(map(xs, fn(n: i64) -> i64 {{ let s = 0\n for i in 0..n {{ s = s + i }}\n return s }}), fn(x: i64) -> i64 {{ return x }}))\n}}"
+    );
+    assert_eq!(run(&src), "[3]\n");
+    assert!(!applies(&check(&src).unwrap(), "map_map"));
+    // Float division cannot trap.
+    let src = format!(
+        "{MAP_MAP}fn main() {{\n  let xs: [f64] = [1.0, 0.0]\n\
+           print(map(map(xs, fn(x: f64) -> f64 {{ return 1.0 / x }}), fn(x: f64) -> bool {{ return x > 0.5 }}))\n}}"
+    );
+    assert_eq!(run(&src), "[true, true]\n");
+    assert!(applies(&check(&src).unwrap(), "map_map"));
+}
+
+#[test]
+fn rules_keep_effects_of_parts_in_order() {
+    // `loud` is the pattern's own call: as written it prints between the
+    // parts, the rule only after both. A part after it must be inert.
+    let lib = "fn sub(a: i64, b: i64) -> i64 { return a - b }\nfn loud(a: i64) -> i64 { print(0 - a)\n return 0 - a }\n\
+               fn flip(a: i64, b: i64) -> i64 replaces sub(loud(a), b) {\n  print(0 - a)\n  return 0 - a - b\n}\n\
+               fn say(x: i64) -> i64 { print(x)\n return x }\n";
+    let src = format!("{lib}fn main() {{ print(sub(loud(say(1)), say(2))) }}");
+    assert_eq!(run(&src), "1\n-1\n2\n-3\n");
+    assert!(!applies(&check(&src).unwrap(), "flip"));
+    // A literal, or a part that does nothing, may move past it.
+    let src = format!("{lib}fn main() {{ let b = 2\n print(sub(loud(say(1)), 5))\n print(sub(loud(say(1)), b * 3)) }}");
+    assert_eq!(run(&src), "1\n-1\n-6\n1\n-1\n-7\n");
+    let main = check(&src).unwrap().func("main").unwrap().to_string();
+    assert_eq!(main.matches("call @flip(").count(), 2, "{main}");
+    // One that may trap is not inert either: as written, `10 / 0` traps
+    // before `say(2)` prints.
+    let lib = "fn sub(a: i64, b: i64) -> i64 { return a - b }\nfn tenth(a: i64) -> i64 { return 10 / a }\n\
+               fn sub_tenth(a: i64, b: i64) -> i64 replaces sub(tenth(a), b) {\n  return 10 / a - b\n}\n\
+               fn say(x: i64) -> i64 { print(x)\n return x }\n";
+    let src = format!("{lib}fn main() {{ print(sub(tenth(say(0)), say(2))) }}");
+    assert_eq!(printed_before_error(&src), "0\n");
+    assert!(!applies(&check(&src).unwrap(), "sub_tenth"));
+    assert!(applies(&check(&format!("{lib}fn main() {{ print(sub(tenth(say(2)), 4)) }}")).unwrap(), "sub_tenth"));
+    // A part the call as written may skip (right of `&&`) must be inert:
+    // here it traps when `x` is 0, which `x != 0` guards.
+    let lib = "fn count(b: bool) -> i64 { if b { return 1 }\n return 0 }\n\
+               fn both(a: bool, b: bool) -> i64 replaces count(a && b) {\n  if a && b { return 1 }\n  return 0\n}\n";
+    let src = format!("{lib}fn main() {{ let x = 0\n print(count(x != 0 && 100 / x > 1)) }}");
+    assert_eq!(run(&src), "0\n");
+    assert!(!applies(&check(&src).unwrap(), "both"));
+    let src = format!("{lib}fn main() {{ let x = 0\n print(count(x != 0 && x > 1)) }}");
+    assert_eq!(run(&src), "0\n");
+    assert!(applies(&check(&src).unwrap(), "both"));
+}
+
+#[test]
+fn rules_evaluate_parts_once() {
+    // An applied rule evaluates each part once, effects and all; `square`
+    // uses `x` twice.
+    let src = format!(
+        "{POW}fn square(x: i64) -> i64 replaces pow(x, 2) {{\n  return x * x\n}}\n\
+         fn say(x: i64) -> i64 {{ print(x)\n return x }}\nfn main() {{ print(pow(say(3), 2)) }}"
+    );
+    assert_eq!(run(&src), "3\n9\n");
+    assert!(applies(&check(&src).unwrap(), "square"));
+    // A part that prints, ahead of a function that does not.
+    let src = format!(
+        "{MAP_MAP}fn say(x: i64) -> [i64] {{ print(x)\n let out: [i64] = [x]\n return out }}\n\
+         fn main() {{ print(map(map(say(4), fn(x: i64) -> i64 {{ return x + 1 }}), fn(x: i64) -> i64 {{ return x * 2 }})) }}"
+    );
+    assert_eq!(run(&src), "4\n[10]\n");
+    assert!(applies(&check(&src).unwrap(), "map_map"));
+}
+
+#[test]
+fn rules_and_effects_across_modules() {
+    // The rule, `map` and the functions are in other modules; whether a
+    // function is inert is followed into them.
+    let files = |main: &'static str| {
+        [
+            ("main.jh", main),
+            (
+                "lists2.jh",
+                "pub fn map(comptime T: type, comptime U: type, xs: [T], f: fn(T) -> U) -> [U] {\n  let out: [U] = []\n  for x in xs { push(out, f(x)) }\n  return out\n}\n",
+            ),
+            (
+                "fuse.jh",
+                "import lists2\npub fn map_map(comptime T: type, comptime U: type, comptime V: type, xs: [T], g: fn(T) -> U, f: fn(U) -> V) -> [V]\n  replaces lists2.map(lists2.map(xs, g), f)\n{\n  let out: [V] = []\n  for x in xs { push(out, f(g(x))) }\n  return out\n}\n",
+            ),
+            ("fns.jh", "pub fn inc(x: i64) -> i64 { return x + 1 }\npub fn noisy(x: i64) -> i64 { print(x)\n return x }\n"),
+        ]
+    };
+    let runs = |m: &ir::Module| {
+        let mut out = Vec::new();
+        jihoo_vm::run(m, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    };
+    let m = check_files(&files("import lists2\nimport fuse\nimport fns\nfn main() { let xs: [i64] = [1, 2]\n print(lists2.map(lists2.map(xs, fns.inc), fns.inc)) }")).unwrap();
+    assert_eq!(runs(&m), "[3, 4]\n");
+    assert!(applies(&m, "fuse.map_map"), "{m}");
+    let m = check_files(&files("import lists2\nimport fuse\nimport fns\nfn main() { let xs: [i64] = [1, 2]\n print(lists2.map(lists2.map(xs, fns.noisy), fns.inc)) }")).unwrap();
+    assert_eq!(runs(&m), "1\n2\n[2, 3]\n");
+    assert!(!applies(&m, "fuse.map_map"), "{m}");
+}
+
+#[test]
+fn rules_that_read_input_are_refused() {
+    // The checks run both sides with no input.
+    let e = err("fn get(n: i64) -> i64 { if n > 0 { return len(read_line()) }\n return n }\n\
+                 fn get2(n: i64) -> i64 replaces get(n) {\n  if n > 0 { return len(read_line()) }\n  return n\n}\nfn main() {}");
+    assert!(e.contains("cannot check that `get2` does what it replaces: it reads standard input"), "{e}");
+}

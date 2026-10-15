@@ -1,0 +1,55 @@
+// Rewrite rules move the pattern's own calls after its parts. Where that
+// could be seen (a call that may trap before a part that prints, or a part
+// that `&&` may skip and that may trap), the call is compiled as written.
+
+fn sub(a: i64, b: i64) -> i64 {
+    return a - b
+}
+
+// May trap (for 0), so it may not move past a part that prints.
+fn tenth(a: i64) -> i64 {
+    return 10 / a
+}
+
+fn sub_tenth(a: i64, b: i64) -> i64 replaces sub(tenth(a), b) {
+    return 10 / a - b
+}
+
+fn neg(a: i64) -> i64 {
+    return 0 - a
+}
+
+// `neg` is inert, so any part may move past it.
+fn flip(a: i64, b: i64) -> i64 replaces sub(neg(a), b) {
+    return 0 - a - b
+}
+
+fn say(x: i64) -> i64 {
+    out(x)
+    return x
+}
+
+fn count(b: bool) -> i64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+fn both(a: bool, b: bool) -> i64 replaces count(a && b) {
+    if a && b {
+        return 1
+    }
+    return 0
+}
+
+fn entry() -> i64 {
+    out(sub(tenth(say(5)), say(2)))     // 5 2 0: kept
+    out(sub(tenth(say(2)), 4))          // 2 1: applied
+    out(sub(neg(say(5)), say(6)))       // 5 6 -11: applied
+    let x = 0
+    out(count(x != 0 && 100 / x > 1))   // 0: kept, the division would trap
+    out(count(x == 0 && say(8) > 1))    // 8 1: kept, `say` prints
+    out(count(x == 0 && x < 1))         // 1: applied
+    return 0
+}

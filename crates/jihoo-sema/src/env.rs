@@ -126,6 +126,10 @@ pub(crate) struct Env<'p> {
     /// The rules by the key of the function their pattern calls, once asked
     /// for (`rules.rs`).
     pub(crate) rule_index: std::cell::OnceCell<HashMap<String, Vec<String>>>,
+    /// What each function can do besides compute its result, once asked
+    /// for, and the functions whose answer is being worked out (`effects.rs`).
+    pub(crate) effects: RefCell<HashMap<String, crate::effects::Effects>>,
+    pub(crate) effects_open: RefCell<HashSet<String>>,
     const_decls: HashMap<String, (usize, &'p ConstDecl)>,
     /// Traits by key, like the declarations above.
     pub(crate) trait_decls: HashMap<String, (usize, &'p TraitDecl)>,
@@ -204,6 +208,8 @@ impl<'p> Env<'p> {
             struct_decls: HashMap::new(),
             fn_decls: HashMap::new(),
             rule_index: std::cell::OnceCell::new(),
+            effects: RefCell::new(HashMap::new()),
+            effects_open: RefCell::new(HashSet::new()),
             const_decls: HashMap::new(),
             trait_decls: HashMap::new(),
             impls: Vec::new(),
@@ -1135,6 +1141,14 @@ impl<'p> Env<'p> {
     /// The functions made from anonymous functions that are part of the program.
     pub fn lambdas(&self) -> Vec<ir::Function> {
         self.lambdas.borrow().iter().filter(|(_, keep)| *keep).map(|(f, _)| (**f).clone()).collect()
+    }
+
+    /// Whether `function` can give the JIR of `name`: a lifted anonymous
+    /// function, an instance, or a plain function of the program.
+    pub(crate) fn has_ir_function(&self, name: &str) -> bool {
+        self.lambdas.borrow().iter().any(|(f, _)| f.name == name)
+            || self.instance_keys.borrow().contains_key(name)
+            || self.fn_decls.get(name).is_some_and(|(_, d)| !d.is_extern && !d.is_macro && self.generic(name).is_none())
     }
 
     /// The JIR of function `name` (a plain function, an instance, or a lifted

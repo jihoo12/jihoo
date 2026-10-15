@@ -71,12 +71,40 @@ they fit, the call goes to the rule (an instance, for a generic one).
 Otherwise the snapshot is restored and the call compiled as written. Rules
 are off in a rule's body and in the pattern helper.
 
+A rule also moves code, which the checks below cannot see: the functions a
+call passes are called as the rule calls them, and the pattern's own calls
+and operators run after all the parts instead of between them. So
+`apply_rule` walks the pattern in evaluation order (`pattern_steps`) and,
+for each part, looks at the JIR it just lowered, from a `Mark` of each
+block's length. Using `crates/jihoo-sema/src/effects.rs`, it
+gives up (and rolls back) unless:
+
+- a part evaluated after one of the pattern's calls or operators is
+  *inert*, or every such call or operator before it is. An operator is inert
+  on numbers and bools, except integer `/` and `%`; a call is inert when its
+  function (not generic) is;
+- a part right of `&&` or `||` is inert;
+- a function value a part gives was made by that part's code, a `funcref`
+  (possibly a hoisted one) or `closure` of a function that is inert;
+- no other part's type holds a function value.
+
+`Env::effects_of` summarizes a JIR function, through everything it calls, as
+a set: prints, reads input, uses shared state (cells, pointers, atomics,
+channels, tasks), runs unknown code (function values, C functions,
+`syscall`, `asm`, compile-time-only instructions, functions still being
+compiled), and may fail (integer division, bounds checks, `trap`, `pop`,
+any jump back to an earlier block, recursion). Inert is the empty set.
+Summaries are memoized, except those that met a function still being
+compiled or summarized, which assume the worst of it. Closures capture by
+value, so a closure's captured values are read-only in its body.
+
 Once the program is lowered, each rule (plus each generic rule at `i64` for
 its type parameters) gets a helper `f.pattern` that evaluates the pattern.
 Both run on the VM with inputs from `refute.rs`'s generator, plus functions
-written for parameters of function type (`f.arg.N`). Results are compared as
-constants (any NaN equals any other), along with what each side prints;
-traps only match traps.
+written for parameters of function type (`f.arg.N`), which are all inert.
+Results are compared as constants (any NaN equals any other), along with
+what each side prints; traps only match traps. A rule or pattern that
+reads standard input is refused, since both run with none.
 
 ## Copy-free functions
 

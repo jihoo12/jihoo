@@ -17,6 +17,7 @@ mod atomics;
 mod closures;
 mod comptime;
 mod contracts;
+mod effects;
 mod enums;
 mod equality;
 mod env;

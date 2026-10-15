@@ -151,6 +151,14 @@
     with and functions it writes for parameters of function type, and
     refuses a rule that gives a different value, prints differently or
     traps differently. Generic rules are also checked at `i64`.
+39. Rewrite rules keep effects: the checks only try functions without
+    effects, so a rule now applies only where moving code cannot be seen.
+    The functions a call passes must be inert (no effect, and certain to
+    return: no print, cell, pointer, unknown call, integer division,
+    bounds check, loop or recursion, through every call), and so must any
+    part evaluated after one of the pattern's own calls that is not, and
+    any part right of `&&` or `||`. Elsewhere the call is compiled as
+    written. `map_map` still fuses `map`s of inert functions.
 
 ## Next
 

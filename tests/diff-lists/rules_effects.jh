@@ -1,0 +1,56 @@
+// Rewrite rules and functions with effects: `map_map` applies only where
+// the functions it is given are inert, so every program here prints in the
+// order it is written, whether or not the rule applies.
+import lists
+
+fn map_map(comptime T: type, comptime U: type, comptime V: type, xs: [T], g: fn(T) -> U, f: fn(U) -> V) -> [V]
+    replaces lists.map(lists.map(xs, g), f)
+{
+    let out: [V] = []
+    for x in xs {
+        push(out, f(g(x)))
+    }
+    return out
+}
+
+fn inc(x: i64) -> i64 {
+    return x + 1
+}
+
+// Prints, through another function.
+fn shout(x: i64) -> i64 {
+    out(x)
+    return x
+}
+
+fn noisy(x: i64) -> i64 {
+    return shout(x * 100)
+}
+
+fn given(xs: [i64], g: fn(i64) -> i64) -> [i64] {
+    return lists.map(lists.map(xs, g), inc)
+}
+
+fn sum(xs: [i64]) -> i64 {
+    let s = 0
+    for x in xs {
+        s = s + x
+    }
+    return s
+}
+
+fn entry() -> i64 {
+    let xs: [i64] = [1, 2, 3]
+    let k = 7
+    // Inert: fused.
+    out(sum(lists.map(lists.map(xs, inc), fn(x: i64) -> i64 { return x * k })))
+    // `g` prints: 100 200 300, then `f`'s 2 3 4; fused, they would interleave.
+    out(sum(lists.map(lists.map(xs, noisy), fn(x: i64) -> i64 { return shout(x / 100 + 1) })))
+    // `f` prints, `g` does not, but may trap: kept as written.
+    out(sum(lists.map(lists.map(xs, fn(x: i64) -> i64 { return 60 / x }), shout)))
+    // A function value from a parameter: not known, kept.
+    out(sum(given(xs, noisy)))
+    // A part that prints, evaluated once, ahead of inert functions: fused.
+    out(sum(lists.map(lists.map(given(xs, noisy), inc), inc)))
+    return 0
+}

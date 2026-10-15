@@ -2,7 +2,10 @@
 // pattern does, and every call that matches the pattern calls it instead.
 // The compiler checks that claim first: it runs both on the VM with inputs it
 // makes up (and small functions, for parameters that take functions) and
-// refuses a rule that gives anything different. Change `power(x, 2)` below to
+// refuses a rule that gives anything different. It applies a rule only where
+// that cannot change what the program prints or where it traps: `map_map`
+// calls `g` and `f` in another order, so it fuses functions with no effects
+// and leaves a `map` of one that prints as it is. Change `power(x, 2)` below to
 // `power(x, 3)` and the build stops:
 //
 //   `square` does not do what it replaces: with x = -1, `power(x, 3)` gives -1,
@@ -46,4 +49,8 @@ fn main() {
     let tens = lists.map(lists.map(xs, fn(x: i64) -> i64 { return x + 1 }),
                          fn(x: i64) -> str { return to_str(x * 10) })
     print(tens)                          // [20, 30, 40], in one pass
+    let loud = lists.map(lists.map(xs, fn(x: i64) -> i64 { print(x)
+                                                         return x }),
+                         fn(x: i64) -> i64 { return x * 2 })
+    print(loud)                          // 1 2 3 first: kept as two `map`s
 }

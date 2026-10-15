@@ -22,24 +22,33 @@
 //! parameters, as a call would), the rule does not apply, and the call is
 //! compiled as written. Rules do not apply inside rules.
 //!
+//! Nor does it apply where moving code could be seen (`effects.rs`): the
+//! rule may call the functions it is given in another order, or another
+//! number of times, and runs the pattern's own calls and operators after all
+//! of the parts. So the functions must be inert and visible at the call,
+//! and so must the parts that would move past code that is not inert, or
+//! that `&&` and `||` may skip.
+//!
 //! A rule is a claim that the function computes what the pattern does, and
 //! the compiler checks it before the program can run (`check_rules`): it runs
 //! both on the VM, with the inputs contracts are tried with (`refute.rs`) and,
 //! for a parameter of function type, with small functions it writes (`x`,
-//! `x + 1`, `x * 2`, constants, ...). Both must give the same value, or both
-//! trap. A rule that does not is a compile error that shows the smallest input
-//! where they differ; one whose parameters or result the compiler cannot make
-//! up or compare, or whose code cannot run while compiling, is refused.
+//! `x + 1`, `x * 2`, constants, ...), which are inert. Both must give the same
+//! value, or both trap. A rule that does not is a compile error that shows the
+//! smallest input where they differ; one whose parameters or result the
+//! compiler cannot make up or compare, whose code cannot run while compiling,
+//! or that reads input, is refused.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use jihoo_ir::{BinOp, Function, Reg, Terminator, Type};
+use jihoo_ir::{BinOp, Function, Inst, Reg, Terminator, Type};
 use jihoo_syntax::ast::{Contract, Expr, ExprKind, FnDecl, Param};
 use jihoo_syntax::{Error, Pos};
 use jihoo_vm::{Program, Value, Vm};
 
 use crate::comptime::{arg, ConstValue};
+use crate::effects::Effects;
 use crate::env::{Env, Sig};
 use crate::generic::Bindings;
 use crate::infer::Found;
@@ -71,6 +80,24 @@ impl<'p> Env<'p> {
         });
         index.get(key).map_or(&[], Vec::as_slice)
     }
+}
+
+/// Where code lowered after some point starts (`FnCx::mark`).
+struct Mark {
+    /// How many instructions each block had.
+    lens: Vec<usize>,
+    hoisted: usize,
+    /// The block being written then.
+    cur: usize,
+}
+
+/// One step of what a call that matches a pattern evaluates, in order.
+enum Step<'e> {
+    /// The part that parameter `name` stands for; `guarded` right of `&&`
+    /// or `||`, where the call as written may not evaluate it.
+    Part(&'e str, bool),
+    /// A call or operator of the pattern itself, which the rule takes over.
+    Op(&'e Expr),
 }
 
 /// What `try_rules` puts back when a rule turns out not to apply.
@@ -182,25 +209,65 @@ impl FnCx<'_> {
     }
 
     /// Calls rule `rule` with the matched `parts`, lowered in order, if their
-    /// types fit its parameters.
+    /// types fit its parameters and moving the code the rule moves is safe
+    /// here (`effects.rs`):
+    ///
+    /// - a part that the call as written evaluates after one of the
+    ///   pattern's own calls or operators, which the rule runs later, must
+    ///   be inert, unless that call or operator is;
+    /// - a part right of `&&` or `||`, which the call as written may not
+    ///   evaluate at all, must be inert;
+    /// - a function a part gives must be one the compiler can see (written
+    ///   there, or named), and inert: the rule may call it in another order,
+    ///   or another number of times;
+    /// - no part may hold function values inside other values.
+    ///
+    /// Otherwise the call is compiled as written.
     fn apply_rule(&mut self, pos: Pos, rule: &str, decl: &FnDecl, module: usize, parts: &[(String, &Expr)]) -> Result<Option<Reg>, Error> {
         let runtime: Vec<&Param> = decl.params.iter().filter(|p| !p.comptime).collect();
         let type_params: Vec<&str> = decl.params.iter().filter(|p| p.comptime).map(|p| p.name.as_str()).collect();
         let generic = !type_params.is_empty();
         let mut found = Found { module, callee: &decl.name, params: type_params, types: HashMap::new(), strict: true };
         let mut regs: HashMap<&str, Reg> = HashMap::new();
-        for (name, e) in parts {
-            let p = runtime.iter().find(|p| p.name == *name).unwrap();
+        let names: Vec<&str> = runtime.iter().map(|p| p.name.as_str()).collect();
+        let mut steps = Vec::new();
+        pattern_steps(&decl.replaces.as_ref().unwrap().cond, &names, false, &mut steps);
+        // The call itself comes last, after every part in both versions.
+        steps.pop();
+        // Whether an operation of the pattern ran before this point in the
+        // call as written, that the rule runs after all of the parts.
+        let mut moved = false;
+        for step in steps {
+            let (name, guarded) = match step {
+                Step::Op(op) => {
+                    moved = moved || !self.op_inert(module, op, &regs);
+                    continue;
+                }
+                Step::Part(name, guarded) => (name, guarded),
+            };
+            let (_, e) = parts.iter().find(|(n, _)| n == name).unwrap();
+            let p = runtime.iter().find(|p| p.name == name).unwrap();
             let want = match found.unknown_in(&p.ty) {
                 None => self.env.resolve(&p.ty, &Rc::new(found.bindings())).ok(),
                 Some(_) => None,
             };
+            let mark = self.mark();
             let r = self.expr(e, want.as_ref())?;
             let got = self.ty(r).clone();
             if !self.env.unify(&mut found, &p.ty, &got, e.pos)? {
                 return Ok(None);
             }
-            regs.insert(name.as_str(), r);
+            if (moved || guarded) && !self.effects_since(&mark).inert() {
+                return Ok(None);
+            }
+            if matches!(got, Type::Fn(..)) {
+                if !self.fn_value_effects(&mark, r).inert() {
+                    return Ok(None);
+                }
+            } else if self.holds_fn(&got, &mut HashSet::new()) {
+                return Ok(None);
+            }
+            regs.insert(name, r);
         }
         if found.params.iter().any(|t| !found.types.contains_key(t)) {
             return Ok(None);
@@ -215,6 +282,102 @@ impl FnCx<'_> {
             return Ok(None);
         }
         Ok(Some(self.emit_to(sig.ret.clone(), |dst| jihoo_ir::Inst::Call { dst, func, args })))
+    }
+
+    /// Whether operation `op` of a pattern written in `module`, a call or an
+    /// operator, is inert. The parts it reads are in `regs` already.
+    fn op_inert(&self, module: usize, op: &Expr, regs: &HashMap<&str, Reg>) -> bool {
+        match &op.kind {
+            // A generic function's instance is not known yet: assumed to do
+            // anything.
+            ExprKind::Call(name, _) => match self.env.key(module, name) {
+                Some(key) if self.env.generic(&key).is_none() => self.env.effects_of(&key).inert(),
+                _ => false,
+            },
+            // On numbers and bools, operators other than integer division
+            // cannot fail; on anything else they may call code (`Ord`).
+            ExprKind::Unary(_, x) => self.scalar_operand(module, x, regs),
+            ExprKind::Binary(o, a, b) => {
+                !matches!(o, jihoo_syntax::ast::BinOp::Div | jihoo_syntax::ast::BinOp::Rem)
+                    && self.scalar_operand(module, a, regs)
+                    && self.scalar_operand(module, b, regs)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `e`, an operand in a pattern, is a number or a bool: a
+    /// literal, a part of that type, or an inert operator on such operands.
+    fn scalar_operand(&self, module: usize, e: &Expr, regs: &HashMap<&str, Reg>) -> bool {
+        match &e.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+            ExprKind::Var(v) => regs.get(v.as_str()).is_some_and(|r| matches!(self.ty(*r), Type::Int(_) | Type::Float(_) | Type::Bool)),
+            ExprKind::Unary(..) | ExprKind::Binary(..) => self.op_inert(module, e, regs),
+            _ => false,
+        }
+    }
+
+    /// Where the code lowered from here on starts.
+    fn mark(&self) -> Mark {
+        Mark { lens: self.blocks.iter().map(|b| b.insts.len()).collect(), hoisted: self.hoisted, cur: self.cur.0 as usize }
+    }
+
+    /// What the code lowered since `mark` may do.
+    fn effects_since(&self, mark: &Mark) -> Effects {
+        let mut fin = true;
+        let regs = |r: Reg| self.ty(r).clone();
+        let mut e = self.env.insts_effects(self.insts_since(mark), &regs, &mut fin);
+        for (i, b) in self.blocks.iter().enumerate().filter(|(i, _)| *i == mark.cur || *i >= mark.lens.len()) {
+            if let Some(term) = &b.term {
+                e |= self.env.term_effects(i, term, &mut fin);
+            }
+        }
+        e
+    }
+
+    fn insts_since<'s>(&'s self, mark: &'s Mark) -> impl Iterator<Item = &'s Inst> + 's {
+        self.blocks.iter().enumerate().flat_map(move |(i, b)| {
+            // Constants hoisted to the front of the entry block meanwhile are
+            // inert; what was added at its end is the new code.
+            let from = match mark.lens.get(i) {
+                Some(&n) if i == 0 => n + (self.hoisted - mark.hoisted),
+                Some(&n) => n,
+                None => 0,
+            };
+            &b.insts[from.min(b.insts.len())..]
+        })
+    }
+
+    /// What calling function value `r`, made by the code lowered since `mark`,
+    /// may do: the function it names, or anything if it was not made there.
+    /// A named function is a hoisted constant, whose register is never
+    /// written again.
+    fn fn_value_effects(&self, mark: &Mark, r: Reg) -> Effects {
+        let hoisted = self.blocks[0].insts[..self.hoisted].iter();
+        let made = hoisted.chain(self.insts_since(mark)).find_map(|i| match i {
+            Inst::FuncRef { dst, func } | Inst::Closure { dst, func, .. } if *dst == r => Some(func),
+            _ => None,
+        });
+        match made {
+            // Captured values are copies, read-only inside the closure.
+            Some(func) => self.env.effects_of(func),
+            None => Effects::UNKNOWN,
+        }
+    }
+
+    /// Whether a value of `t` may hold a function value inside it; a pointer
+    /// may point at anything.
+    fn holds_fn(&self, t: &Type, seen: &mut HashSet<String>) -> bool {
+        match t {
+            Type::Fn(..) | Type::Ptr(_) => true,
+            Type::List(e) | Type::Array(e, _) | Type::Ref(e) | Type::Cell(e) | Type::Chan(e) => self.holds_fn(e, seen),
+            Type::Struct(n) | Type::Enum(n) if !seen.insert(n.clone()) => false,
+            Type::Struct(n) => self.env.struct_fields(Pos::default(), n).map_or(true, |fs| fs.iter().any(|(_, t)| self.holds_fn(t, seen))),
+            Type::Enum(n) => {
+                self.env.enum_variants(Pos::default(), n).map_or(true, |vs| vs.iter().flat_map(|(_, ts)| ts).any(|t| self.holds_fn(t, seen)))
+            }
+            _ => false,
+        }
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -237,6 +400,30 @@ impl FnCx<'_> {
         self.const_regs = s.const_regs;
         self.scopes = s.scopes;
         self.last_loc = s.last_loc;
+    }
+}
+
+/// The steps of pattern `e` with variables `params`, in the order a call
+/// that matches it runs them: operands, then the operation.
+fn pattern_steps<'e>(e: &'e Expr, params: &[&str], guarded: bool, out: &mut Vec<Step<'e>>) {
+    match &e.kind {
+        ExprKind::Var(v) if params.contains(&v.as_str()) => out.push(Step::Part(v, guarded)),
+        ExprKind::Unary(_, x) => {
+            pattern_steps(x, params, guarded, out);
+            out.push(Step::Op(e));
+        }
+        ExprKind::Binary(op, a, b) => {
+            let short = matches!(op, jihoo_syntax::ast::BinOp::And | jihoo_syntax::ast::BinOp::Or);
+            pattern_steps(a, params, guarded, out);
+            pattern_steps(b, params, guarded || short, out);
+            out.push(Step::Op(e));
+        }
+        ExprKind::Call(_, args) => {
+            args.iter().for_each(|a| pattern_steps(a, params, guarded, out));
+            out.push(Step::Op(e));
+        }
+        // Literals, and names of constants and functions.
+        _ => {}
     }
 }
 
@@ -344,6 +531,11 @@ impl<'p> Env<'p> {
             }
         }
         let pattern = self.pattern_fn(f, decl, rule, bindings)?;
+        // Both sides run with no input; what they would read at run time is
+        // not tried.
+        if (self.effects_of(&f.name) | self.body_effects(&pattern)).has(Effects::READS_INPUT) {
+            return Err(refuse("it reads standard input, which the checks cannot give it".into()));
+        }
         let pattern_name = pattern.name.clone();
         made.push(pattern);
         let cannot = |e: Error| refuse(e.msg.trim_start_matches("cannot evaluate this at compile time: ").to_string());
