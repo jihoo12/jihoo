@@ -990,6 +990,20 @@ fn go_starts_native_threads() {
     assert_eq!(run_compiled("go", &src), Some(15));
 }
 
+/// Threads that copy, change and drop copies of one list at the same time
+/// (`tests/threads/shared_buffers.jh`).
+#[test]
+fn threads_share_list_buffers() {
+    if std::env::var_os("JIHOO_LLC").is_none() {
+        eprintln!("JIHOO_LLC is not set: skipping");
+        return;
+    }
+    let src = std::fs::read_to_string(repo_root().join("tests/threads/shared_buffers.jh")).unwrap();
+    for _ in 0..5 {
+        assert_eq!(run_compiled("shared_buffers", &src), Some(3));
+    }
+}
+
 /// `channel.wait_ms` gives up on a Select after a while
 /// (`tests/threads/timeout.jh`).
 #[test]

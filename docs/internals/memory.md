@@ -1,12 +1,11 @@
 # Design: native memory
 
-Status: step 3, the [ownership checker](#3-ownership-the-compiler-checks-done),
-is done. Steps 1 and 2 are prototyped on the branch `memory-rc-prototype`,
-with the [measurements](#the-prototype) below: counted buffers make the
-programs that needed copies 25 to 100 times faster, and with
-[known-unique flags](#2-uniqueness-checks-that-fold-away-prototyped) nothing
-else got slower. Nothing here changes the language: values keep their
-meaning, and hosted programs do not change.
+Status: steps 1 to 3 are done: [counted buffers](#1-counted-buffers-done),
+[uniqueness checks that fold away](#2-uniqueness-checks-that-fold-away-done)
+and [the ownership checker](#3-ownership-the-compiler-checks-done). Programs
+that needed copies are 25 to 100 times faster, and nothing else got slower
+([measurements](#measurements)). Steps 4 and 5 are left. Nothing here changes
+the language: values keep their meaning, and hosted programs do not change.
 
 ## Why
 
@@ -91,7 +90,7 @@ gives up, they count, and jihoo copies everything.
 
 Keep the ownership pass, and make the copy it falls back to cheap.
 
-### 1. Counted buffers (prototyped)
+### 1. Counted buffers (done)
 
 A list's or string's heap buffer starts with a count of the values that hold
 it; the header (`{ data, len, cap }`) points just past the count, so nothing
@@ -117,7 +116,7 @@ Counts are atomic, since values move between threads (`go`, channels, `ref`s
 shared by threads). Reading the count to check uniqueness is a plain load on
 x86_64 and an `ldar` on aarch64.
 
-### 2. Uniqueness checks that fold away (prototyped)
+### 2. Uniqueness checks that fold away (done)
 
 A write checks the count of each list on its path. In a tight loop that was
 the one cost left: the `inplace` benchmark, a grid written element by
@@ -206,15 +205,16 @@ place without returning it (`skip_space(&inp)` instead of `inp =
 skip_space(inp)`), which makes the common case explicit rather than inferred.
 That is a language change and is not needed for the steps above.
 
-## The prototype
+## Measurements
 
-The branch `memory-rc-prototype` implements step 1 in the LLVM backend only
-(`backend-llvm/src/codegen.cpp`): counted buffers, O(1) clones, uniqueness
-checked inline before every write, and the slow path that copies one level.
-Each step of it passed every test, the backend tests, the differential tests
+Steps 1 and 2 are in the LLVM backend only (`backend-llvm/src/codegen.cpp`):
+counted buffers, O(1) clones, uniqueness checked inline before every write
+with the known-unique flags, and the slow path that copies one level. They
+were built on the branch `memory-rc-prototype`, one change at a time.
+Each step passed every test, the backend tests, the differential tests
 under valgrind and 3,000 to 4,000 random programs of the fuzzer, 500 more of
 them under valgrind. The benchmarks and the script that runs them
-(`run.sh`) are in `bench/memory/` on the branch.
+(`run.sh`) are in `bench/memory/`.
 
 Best of three runs, x86_64, `-O2`.
 
@@ -228,15 +228,15 @@ Best of three runs, x86_64, `-O2`.
 | `trees` (200 trees of 22,000 nodes, built and summed) | 0.17 s | 0.17 s | 2.5 MB |
 | `inplace` (2000 x 2000 grid, 10 passes of writes) | 0.06 s | 0.05 s | 33 MB |
 
-`before` is the backend on `main`; `counted` is the branch, with atomic
-counts, the flags of step 2, and one more change: the last holder of a
+`before` is the backend before step 1; `counted` is the backend now, with
+atomic counts, the flags of step 2, and one more change: the last holder of a
 buffer frees it without an atomic write, since a count of 1 means no other
 thread holds it to count itself in (as Lean 4 does). The programs that
 needed copies become 25 to more than 100 times faster and use 20 to 75
 times less memory, now faster than the VM, as a native program should be.
 The others take the same time.
 
-How the prototype got there is worth keeping. With the count checked in a
+How it got there is worth keeping. With the count checked in a
 call before each write, `inplace` took 0.21 s; checked inline, 0.13 s (how
 the count is read, acquire, relaxed or plain, made no difference);
 non-atomic counts, 0.09 s; with the flags and headers kept in registers,
@@ -244,31 +244,28 @@ non-atomic counts, 0.09 s; with the flags and headers kept in registers,
 holder stopped doing an atomic write.
 
 Eight threads copying, changing and dropping copies of one grid held in a
-`ref` (`tests/threads/shared_buffers.jh` on the branch) gave the right
+`ref` (`tests/threads/shared_buffers.jh`) gave the right
 result in 200 runs at `-O0` and `-O2`, and ran clean under valgrind.
 
 The cost in memory is 8 bytes for each list or string buffer.
 
 ## What changes for users
 
-- `jihoo build --cost` would list the places that count instead of copy,
-  which are cheap, and should rather list the writes that may copy a shared
-  buffer, which are the ones that cost.
-- `nocopy` keeps its meaning, "no copy of a list, a string or a closure",
-  checked the same way; a copy is now O(1), so it guards against counting and
-  against one-level copies at writes.
+- `jihoo build --cost` lists the same places as before, the copies the
+  program's meaning needs; each now costs O(1), plus, at the first write
+  to a list whose memory is still shared, a copy of that list's elements.
+- `nocopy` keeps its meaning, "no copy of a list, a string or a closure":
+  a function that makes no copies shares nothing, so no write in it copies
+  memory it shared. (A value its caller shared may still be copied at the
+  function's first write to it: the caller's copy, paid late.)
 - Nothing changes for hosted programs, freestanding programs (which have no
-  lists) or C: lists do not cross into C, and strings literals stay
+  lists) or C: lists do not cross into C, and string literals stay
   constants.
 
 ## Plan
 
-1. Counted buffers in the backend, as prototyped, with `--cost` reporting
-   the writes that may copy a shared buffer. JIR does not change.
-2. The known-unique flags, as prototyped (done with step 1).
+1. ~~Counted buffers in the backend.~~ Done.
+2. ~~Uniqueness checks that fold away.~~ Done.
 3. ~~Explicit ownership in JIR and the checker.~~ Done.
 4. Reuse of unique buffers.
 5. `inout` parameters, if programs still want them.
-
-The checker makes step 1 safer to take: the counts change what a copy costs,
-not where the pass puts copies and frees, and that is what it checks.

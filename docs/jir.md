@@ -450,7 +450,7 @@ instructions, which the frontend's ownership pass inserts
 
 | syntax              | operands | result | meaning |
 |---------------------|----------|--------|---------|
-| `%d = clone %a`     | any `T`  | `T`    | a deep copy: new memory for every list in `%a`; `%d` may be `%a` |
+| `%d = clone %a`     | any `T`  | `T`    | a copy: the lists and strings in `%a` are shared, counted once more (a closure's captured values are copied, sharing theirs); `%d` may be `%a` |
 | `drop %a`           | any `T`  |        | frees the memory `%a` owns; `%a` must not be used again before it is written |
 
 In a native module:
@@ -485,6 +485,16 @@ In a native module:
   written frees nothing.
 
 The VM ignores both: on it, `clone` is `copy` and `drop` does nothing.
+
+Natively, the heap memory of a list or a string starts with a count of its
+holders (an `i64`, 8 bytes before where the header points). `clone` counts
+one more; `drop` one fewer, and the last holder frees the elements and the
+memory. Strings never change in place, so their copies share their bytes for
+good. Every instruction that writes into a list's memory (`push`, `pop`,
+`setelem`, and `setpath`, `take` and `cellset` through elements) first makes
+each list on its path unique: memory counted more than once is copied (the
+elements, each counted once more), and the copy is the value's own. So a
+write never shows through another copy, as on the VM. Counts are atomic.
 
 The pass also writes down what it decided, after a function's `regs` line,
 so that the frontend can check it (`crates/jihoo-ir/src/owncheck.rs`):

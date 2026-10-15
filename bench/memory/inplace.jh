@@ -1,0 +1,13 @@
+// In-place updates of a unique 2000x2000 grid, 20 passes.
+fn main() -> i64 {
+    let row: [f64] = [1.0; 2000]
+    let g: [[f64]] = [row; 2000]
+    for pass in 0..10 {
+        for i in 0..2000 {
+            for j in 0..2000 {
+                g[i][j] = g[i][j] * 0.5 + (i + j + pass) as f64
+            }
+        }
+    }
+    return (g[3][4] as i64) % 256
+}

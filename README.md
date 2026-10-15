@@ -133,7 +133,7 @@ look inside code and `type_of` to ask its type.
   for shared state, closures, tasks with channels and `select`; the program's
   arguments (`args()`), whole files (`read_file`, `write_file`) and floats in
   text (`parse_f64`); the `strings`, `lists`, `maps`, `iters` and `files`
-  libraries. Natively these are freed by the compiler and
+  libraries. Natively these are freed by the compiler (copies share memory, counted, until one is written) and
   tasks are threads, which share no cells; on the VM a GC frees them and tasks
   take turns on one thread.
 - **native and freestanding:** pointers, `syscall` and inline asm, for x86_64

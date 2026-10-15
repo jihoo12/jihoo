@@ -102,8 +102,12 @@ shelf.jh:53:17: copies [i64] in @report: a part read out of a value is copied, s
 
 Each line is one copy in the program: where, of what type, in which function
 (as JIR names it, so `@f.own` is the version of `f` that takes its arguments
-over), and why. A copy of a `ref` or a cell is not listed: it counts one more
-holder. Functions the program never calls are left out, as is the copying
+over), and why. A copy of a list or a string takes the same time whatever
+its size: it shares the memory and counts one more holder. What it can cost
+later is one list's elements, copied at the first write to it while the
+memory is shared ([Lists in native programs](../language/lists.md#lists-in-native-programs)).
+A copy of a `ref` or a cell is not listed: it shares a box that never needs
+copying. Functions the program never calls are left out, as is the copying
 version of a function whose callers all hand their arguments over.
 
 To keep a function free of copies, declare it [`nocopy`](../language/nocopy.md):

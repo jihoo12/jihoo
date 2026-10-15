@@ -42,6 +42,27 @@ is also an external C function of its own name (see below).
   intrinsics become calls), since there is no libc to provide them; an
   exported function of one of those names takes its place.
 
+## Lists and strings
+
+A list or a string is a header `{ ptr data, i64 len, i64 cap }`, held by
+value, over memory from `malloc` that starts with a count of its holders
+(8 bytes before `data`). A string with `cap` 0 is a literal's constant
+bytes, never counted or freed. The glue functions the backend makes per type
+(`jihoo.clone.T`, `jihoo.drop.T`) count and free: a clone of a list or a
+string is O(1), and one of a struct, an enum or an array clones its owning
+parts. The last holder frees without an atomic write (a count of 1 means no
+other thread holds the memory to count itself in).
+
+Before a write into a list's memory, the backend makes the list unique: it
+reads the count, and only memory held more than once goes to
+`jihoo.unique.[T]`, which copies the elements (counting each once more) and
+gives the copy. A function keeps a flag for each list on the path of each of
+its writes, raised once the list is known unique and lowered by anything
+that could give it another holder (a clone, a call, writing the register or
+an index anew, replacing the list whole); a write with its flag up checks
+nothing. The flags are allocas, which LLVM promotes, so in a loop the check
+runs once ([Design: native memory](memory.md#2-uniqueness-checks-that-fold-away-done)).
+
 ## Calling convention
 
 Between the program's own functions, aggregates (structs, enums and arrays)

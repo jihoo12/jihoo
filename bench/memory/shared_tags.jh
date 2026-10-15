@@ -1,0 +1,20 @@
+// Many records holding the same list of strings.
+struct Item {
+    id: i64
+    tags: [str]
+}
+fn main() -> i64 {
+    let tags: [str] = []
+    for i in 0..100 {
+        push(tags, "tag number " + to_str(i))
+    }
+    let items: [Item] = []
+    for i in 0..20000 {
+        push(items, Item { id: i, tags: tags })
+    }
+    let n = 0
+    for it in items {
+        n += len(it.tags)
+    }
+    return n % 256
+}

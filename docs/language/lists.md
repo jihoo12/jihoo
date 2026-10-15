@@ -96,13 +96,19 @@ copies the text so far each time.
 
 ## Lists in native programs
 
-Natively there is no GC. Since no two variables ever share a list, the
-compiler can tell from the program alone where each list is last used, and
-frees it there; nothing is counted or collected while the program runs.
+Natively there is no GC. Since a list is a value, the compiler can tell from
+the program alone where each list is last used, and frees it there; nothing
+is collected while the program runs.
 
 - Assigning or passing a list that is not used again afterwards moves it: no
   copy. A copy is made only where the original is still used, as the
   meaning of the program requires.
+- A copy shares the elements: it counts one more holder of the list's
+  memory, whatever its size. The first write to a list whose memory is
+  shared copies that list (its elements, which are counted once more in turn,
+  so a list of lists copies one level), and later writes do not. So keeping
+  old versions of a value, or putting one list in many records, costs what
+  it does on the VM, not a copy of everything each time.
 - Reading a part, as `len(g.nodes[i].edges)`, copies nothing, also while
   another part of the same value changes (`let t = s.text` as `s.at += 1`).
 - A value matched and not used again gives its parts away: in `match
@@ -115,7 +121,7 @@ frees it there; nothing is counted or collected while the program runs.
   `b.items = f(b.items)` move the part out and back.
 - A thread started with `go f(xs)` gets its own list, and frees it.
 
-`jihoo build --cost` lists every place a program copies a list, and why
+`jihoo build --cost` lists every place a program copies (shares) a list, and why
 ([Command line](../reference/command-line.md#copies)), and a function declared
 [`nocopy`](nocopy.md) is checked to copy nothing at all.
 

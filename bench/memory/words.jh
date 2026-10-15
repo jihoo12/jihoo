@@ -1,0 +1,23 @@
+// Count words of generated text with a map, then sort the counts.
+import maps
+import strings
+import lists
+fn main() -> i64 {
+    let parts: [str] = []
+    let seed = 7
+    for i in 0..300000 {
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        push(parts, "w" + to_str(seed % 5000))
+    }
+    let text = strings.join(parts, " ")
+    let counts = maps.new(str, i64)
+    for w in strings.fields(text) {
+        match maps.get(counts, w) {
+            Some(n) => counts = maps.set(counts, w, n + 1)
+            None => counts = maps.set(counts, w, 1)
+        }
+    }
+    let keys = maps.keys(counts)
+    lists.sort(keys)
+    return (len(keys) + len(text)) % 256
+}

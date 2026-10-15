@@ -1,0 +1,95 @@
+// Writes mixed with sharing, in loops: natively the buffers are counted and
+// a write checks that its buffer is unique only until it is known to be, so
+// every way a buffer can become shared again between two writes must be
+// noticed. Each case must print the same as on the VM, where copies share
+// until written.
+
+struct Box {
+    rows: [[i64]]
+    tag: str
+}
+
+fn total(g: [[i64]]) -> i64 {
+    let s = 0
+    for r in g {
+        for x in r {
+            s += x
+        }
+    }
+    return s
+}
+
+// Keeps what it is lent: the caller's buffer is shared after the call.
+fn keep(r: [i64]) -> [i64] {
+    return r
+}
+
+fn entry() -> i64 {
+    let row: [i64] = [0; 4]
+    let g: [[i64]] = [row; 3]          // three rows sharing one buffer
+
+    // A row saved in the middle of a loop of writes.
+    let saved: [[i64]] = []
+    for i in 0..3 {
+        for j in 0..4 {
+            g[i][j] = i * 10 + j
+            if j == 1 {
+                push(saved, g[i])
+            }
+        }
+    }
+    out(total(g))
+    out(total(saved))
+
+    // A row lent to a function that keeps it, between writes.
+    let kept: [[i64]] = []
+    for j in 0..4 {
+        g[1][j] = 100 + j
+        push(kept, keep(g[1]))
+    }
+    out(total(g))
+    out(total(kept))
+
+    // The whole grid copied between writes, and the index changed.
+    let versions: [[[i64]]] = []
+    let i = 0
+    for k in 0..6 {
+        g[i][k % 4] = k
+        push(versions, g)
+        i = (i + 1) % 3
+    }
+    for v in versions {
+        out(total(v))
+    }
+
+    // A row replaced whole by a shared one, then written.
+    let other: [i64] = [7; 4]
+    for k in 0..3 {
+        g[k] = other
+        g[k][0] = k
+    }
+    out(total(g))
+    out(other[0])
+
+    // Pops and pushes on a row shared with another list.
+    let copy = g[2]
+    for k in 0..3 {
+        push(g[2], k)
+        let x = pop(g[2])
+        g[2][1] = x
+    }
+    out(total(g))
+    out(copy[1])
+
+    // A struct holding the grid, changed field by field.
+    let b = Box { rows: g, tag: "t" }
+    let before = b
+    for k in 0..3 {
+        b.rows[k][3] = -k
+        b.tag = b.tag + "!"
+    }
+    out(total(b.rows))
+    out(total(before.rows))
+    out(len(b.tag) + len(before.tag))
+    return 0
+}

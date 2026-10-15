@@ -1,0 +1,59 @@
+#![native]
+// Lists shared between threads: natively their buffers are counted, so
+// threads that copy, change and drop copies of one grid at the same time
+// count its buffers concurrently, and each must still see its own values.
+// Exits with 3 if both checks hold (crates/jihoo-cli/tests/differential.rs).
+import sync
+
+struct Shared {
+    total: i64
+    done: sync.Group
+}
+
+fn sum(g: [[i64]]) -> i64 {
+    let s = 0
+    for row in g {
+        for x in row {
+            s += x
+        }
+    }
+    return s
+}
+
+// Copies the shared grid each round, changes a row of the copy, and drops
+// it; also keeps the row it was handed, and changes that.
+fn work(s: *Shared, grid: ref [[i64]], mine: [i64], k: i64) {
+    let local = 0
+    for round in 0..3000 {
+        let g = *grid
+        g[k % 4][round % 8] = k
+        local += sum(g) - sum(*grid)
+        mine[round % 8] = round
+    }
+    atomic_add(&s.total, local + mine[0])
+    sync.group_done(&s.done)
+}
+
+fn main() -> i64 {
+    let ok = 0
+    let row: [i64] = [1; 8]
+    let rows: [[i64]] = [row; 4]
+    let grid = ref rows
+    let s = Shared { total: 0, done: sync.group_new() }
+    sync.group_add(&s.done, 8)
+    for k in 0..8 {
+        // `row` is still used after: each thread gets a copy of it.
+        go work(&s, grid, row, k)
+    }
+    sync.group_wait(&s.done)
+    // In each round the copy differs from the grid by k - 1 at one place;
+    // `mine[0]` is the last round that was a multiple of 8.
+    let want = 0
+    for k in 0..8 {
+        want += 3000 * (k - 1) + 2992
+    }
+    if atomic_load(&s.total) == want { ok += 1 }
+    // The grid and the row are unchanged.
+    if sum(*grid) == 32 && row[0] == 1 { ok += 2 }
+    return ok
+}

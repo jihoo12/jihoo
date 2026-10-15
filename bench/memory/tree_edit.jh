@@ -1,0 +1,46 @@
+// A persistent-style edit: keep the old document, change one leaf.
+enum Node {
+    Leaf(i64)
+    Kids([Node])
+}
+fn build(depth: i64) -> Node {
+    if depth == 0 {
+        return Node.Leaf(1)
+    }
+    let kids: [Node] = []
+    for i in 0..8 {
+        push(kids, build(depth - 1))
+    }
+    return Node.Kids(kids)
+}
+fn sum(n: Node) -> i64 {
+    match n {
+        Leaf(x) => return x
+        Kids(ks) => {
+            let s = 0
+            for k in ks {
+                s += sum(k)
+            }
+            return s
+        }
+    }
+}
+fn bump_first(n: Node) -> Node {
+    match n {
+        Leaf(x) => return Node.Leaf(x + 1)
+        Kids(ks) => {
+            ks[0] = bump_first(ks[0])
+            return Node.Kids(ks)
+        }
+    }
+}
+fn main() -> i64 {
+    let doc = build(5)
+    let versions: [Node] = []
+    for i in 0..200 {
+        let next = bump_first(doc)
+        push(versions, doc)
+        doc = next
+    }
+    return (sum(doc) + len(versions)) % 256
+}

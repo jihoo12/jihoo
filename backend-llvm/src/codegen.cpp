@@ -37,6 +37,7 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InlineAsm.h>
 #include <llvm/IR/Intrinsics.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/raw_ostream.h>
@@ -468,6 +469,114 @@ class Glue {
     return m_.getOrInsertFunction("free", FunctionType::get(Type::getVoidTy(ctx_), {ptr()}, false));
   }
 
+  // The heap buffer of a list or a `str` starts with a reference count (an
+  // i64), and the header points just past it: copies of a value share its
+  // buffer, and a buffer is copied (one level) only when it is written while
+  // shared. Counts are atomic, since values go to other threads.
+  static constexpr int64_t kPrefix = 8;
+
+  // New buffer for `bytes` bytes, counted once; gives the data's address.
+  Value *buf_alloc(IRBuilder<> &b, Value *bytes) {
+    Value *raw = b.CreateCall(malloc_fn(), {b.CreateAdd(bytes, b.getInt64(kPrefix))});
+    check(b, b.CreateIsNotNull(raw));
+    b.CreateStore(b.getInt64(1), raw);
+    return b.CreateConstGEP1_64(b.getInt8Ty(), raw, kPrefix);
+  }
+  Value *rc_addr(IRBuilder<> &b, Value *data) { return b.CreateConstGEP1_64(b.getInt8Ty(), data, -kPrefix); }
+  // The buffer of a unique (or no) value, resized; null data is no buffer.
+  Value *buf_realloc(IRBuilder<> &b, Value *data, Value *bytes) {
+    Value *raw = b.CreateSelect(b.CreateIsNull(data), ConstantPointerNull::get(PointerType::get(ctx_, 0)), rc_addr(b, data));
+    Value *moved = b.CreateCall(realloc_fn(), {raw, b.CreateAdd(bytes, b.getInt64(kPrefix))});
+    check(b, b.CreateIsNotNull(moved));
+    b.CreateStore(b.getInt64(1), moved);
+    return b.CreateConstGEP1_64(b.getInt8Ty(), moved, kPrefix);
+  }
+  void rc_inc(IRBuilder<> &b, Value *data) {
+    b.CreateAtomicRMW(AtomicRMWInst::Add, rc_addr(b, data), b.getInt64(1), Align(8), AtomicOrdering::Monotonic);
+  }
+  // Counts one holder fewer; whether it was the last.
+  Value *rc_dec_last(IRBuilder<> &b, Value *data) {
+    // A count of 1 is ours alone: no other thread can count itself in, so
+    // the last holder frees without an atomic write (as Lean 4 does).
+    Value *c = rc_addr(b, data);
+    Function *fn = b.GetInsertBlock()->getParent();
+    BasicBlock *from = b.GetInsertBlock();
+    auto *shared = BasicBlock::Create(ctx_, "rc.shared", fn), *done = BasicBlock::Create(ctx_, "rc.done", fn);
+    Value *now = load_count(b, c);
+    b.CreateCondBr(b.CreateICmpEQ(now, b.getInt64(1)), done, shared);
+    b.SetInsertPoint(shared);
+    Value *old = b.CreateAtomicRMW(AtomicRMWInst::Sub, c, b.getInt64(1), Align(8), AtomicOrdering::AcquireRelease);
+    b.CreateBr(done);
+    b.SetInsertPoint(done);
+    PHINode *p = b.CreatePHI(b.getInt64Ty(), 2);
+    p->addIncoming(now, from);
+    p->addIncoming(old, shared);
+    return b.CreateICmpEQ(p, b.getInt64(1));
+  }
+
+  // Reads the count at `c`. Acquire: a count of 1 then also means that what
+  // other holders did with the buffer before letting go happened before.
+  Value *load_count(IRBuilder<> &b, Value *c) {
+    LoadInst *count = b.CreateLoad(b.getInt64Ty(), c);
+    count->setAtomic(AtomicOrdering::Acquire);
+    count->setAlignment(Align(8));
+    return count;
+  }
+
+  // Makes the list at `h` unique where it is about to be written: the count
+  // is checked inline, and only a shared buffer calls `unique`.
+  void ensure_unique(IRBuilder<> &b, const jir::Type &list, Value *h) {
+    Function *fn = b.GetInsertBlock()->getParent();
+    Value *data = b.CreateLoad(ptr(), b.CreateStructGEP(header(), h, 0));
+    auto *some = BasicBlock::Create(ctx_, "uniq.some", fn), *slow = BasicBlock::Create(ctx_, "uniq.slow", fn);
+    auto *done = BasicBlock::Create(ctx_, "uniq.done", fn);
+    b.CreateCondBr(b.CreateIsNull(data), done, some);
+    b.SetInsertPoint(some);
+    Value *count = load_count(b, rc_addr(b, data));
+    b.CreateCondBr(b.CreateICmpEQ(count, b.getInt64(1)), done, slow, MDBuilder(ctx_).createBranchWeights(1000, 1));
+    b.SetInsertPoint(slow);
+    Value *len = b.CreateLoad(b.getInt64Ty(), b.CreateStructGEP(header(), h, 1));
+    b.CreateStore(b.CreateCall(unique(list), {data, len}), b.CreateStructGEP(header(), h, 0));
+    b.CreateStore(len, b.CreateStructGEP(header(), h, 2));
+    b.CreateBr(done);
+    b.SetInsertPoint(done);
+  }
+
+  // `ptr jihoo.unique.[T](ptr data, i64 len)`: a buffer of the list's own
+  // to write, for a buffer that is shared: a copy, with its elements counted
+  // once more (so a list of lists copies one level, not all of them). It
+  // takes and gives the header's parts, not its address, so that the
+  // header can stay in registers.
+  Function *unique(const jir::Type &list) {
+    std::string name = "jihoo.unique." + list.str();
+    if (Function *f = m_.getFunction(name)) return f;
+    auto *fn = Function::Create(FunctionType::get(ptr(), {ptr(), Type::getInt64Ty(ctx_)}, false),
+                                GlobalValue::InternalLinkage, name, m_);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->addFnAttr(Attribute::Cold);
+    IRBuilder<> b(BasicBlock::Create(ctx_, "entry", fn));
+    Value *data = fn->getArg(0), *len = fn->getArg(1);
+    const jir::Type &elem = *list.pointee;
+    Value *bytes = b.CreateMul(len, b.getInt64(size(elem)));
+    Value *copy = buf_alloc(b, bytes);
+    Type *ety = types_.lower(elem);
+    if (owns(elem)) {
+      loop(b, len, [&](Value *i) {
+        b.CreateCall(clone(elem), {b.CreateGEP(ety, copy, {i}), b.CreateGEP(ety, data, {i})});
+      });
+    } else {
+      b.CreateMemCpy(copy, Align(8), data, Align(8), bytes);
+    }
+    // Let go of the old buffer (another holder may have let go meanwhile).
+    Value *old = b.CreateAlloca(header());
+    b.CreateStore(data, b.CreateStructGEP(header(), old, 0));
+    b.CreateStore(len, b.CreateStructGEP(header(), old, 1));
+    b.CreateStore(len, b.CreateStructGEP(header(), old, 2));
+    b.CreateCall(drop(list), {old});
+    b.CreateRet(copy);
+    return fn;
+  }
+
   // `void jihoo.drop.T(T *v)`: frees what the value at `v` owns.
   Function *drop(const jir::Type &t) {
     return get(drops_, "jihoo.drop." + t.str(), {ptr()}, [&](IRBuilder<> &b, Function *fn) {
@@ -675,7 +784,11 @@ class Glue {
       Value *cap = b.CreateLoad(b.getInt64Ty(), b.CreateStructGEP(header(), v, 2));
       b.CreateCondBr(b.CreateICmpNE(cap, b.getInt64(0)), heap, done);
       b.SetInsertPoint(heap);
-      b.CreateCall(free_fn(), {b.CreateLoad(ptr(), b.CreateStructGEP(header(), v, 0))});
+      Value *data = b.CreateLoad(ptr(), b.CreateStructGEP(header(), v, 0));
+      auto *last = BasicBlock::Create(ctx_, "last", fn);
+      b.CreateCondBr(rc_dec_last(b, data), last, done);
+      b.SetInsertPoint(last);
+      b.CreateCall(free_fn(), {rc_addr(b, data)});
       b.CreateBr(done);
       b.SetInsertPoint(done);
       return;
@@ -684,14 +797,24 @@ class Glue {
       parts(b, t, v, nullptr, [&](Value *d, Value *, const jir::Type &pt) { b.CreateCall(drop(pt), {d}); });
       return;
     }
+    // The last holder frees the elements and the buffer; a part taken out
+    // left no buffer.
     const jir::Type &elem = *t.pointee;
     Value *data = b.CreateLoad(ptr(), b.CreateStructGEP(header(), v, 0));
+    auto *held = BasicBlock::Create(ctx_, "held", fn), *last = BasicBlock::Create(ctx_, "last", fn);
+    auto *done = BasicBlock::Create(ctx_, "done", fn);
+    b.CreateCondBr(b.CreateIsNull(data), done, held);
+    b.SetInsertPoint(held);
+    b.CreateCondBr(rc_dec_last(b, data), last, done);
+    b.SetInsertPoint(last);
     if (owns(elem)) {
       Value *len = b.CreateLoad(b.getInt64Ty(), b.CreateStructGEP(header(), v, 1));
       Type *ety = types_.lower(elem);
       loop(b, len, [&](Value *i) { b.CreateCall(drop(elem), {b.CreateGEP(ety, data, {i})}); });
     }
-    b.CreateCall(free_fn(), {data});
+    b.CreateCall(free_fn(), {rc_addr(b, data)});
+    b.CreateBr(done);
+    b.SetInsertPoint(done);
   }
 
   void clone_body(IRBuilder<> &b, Function *fn, const jir::Type &t, Value *dst, Value *src) {
@@ -751,19 +874,13 @@ class Glue {
       Value *cap = b.CreateLoad(b.getInt64Ty(), b.CreateStructGEP(header(), src, 2));
       auto *heap = BasicBlock::Create(ctx_, "heap", fn);
       auto *done = BasicBlock::Create(ctx_, "done", fn);
-      BasicBlock *from = b.GetInsertBlock();
+      // Strings never change in place, so copies share the bytes for good.
       b.CreateCondBr(b.CreateICmpNE(cap, b.getInt64(0)), heap, done);
       b.SetInsertPoint(heap);
-      Value *copy = b.CreateCall(malloc_fn(), {len});
-      check(b, b.CreateOr(b.CreateIsNotNull(copy), b.CreateICmpEQ(len, b.getInt64(0))));
-      b.CreateMemCpy(copy, Align(1), data, Align(1), len);
-      BasicBlock *copied = b.GetInsertBlock();
+      rc_inc(b, data);
       b.CreateBr(done);
       b.SetInsertPoint(done);
-      PHINode *p = b.CreatePHI(ptr(), 2);
-      p->addIncoming(data, from);
-      p->addIncoming(copy, copied);
-      b.CreateStore(p, b.CreateStructGEP(header(), dst, 0));
+      b.CreateStore(data, b.CreateStructGEP(header(), dst, 0));
       b.CreateStore(len, b.CreateStructGEP(header(), dst, 1));
       b.CreateStore(cap, b.CreateStructGEP(header(), dst, 2));
       return;
@@ -776,26 +893,20 @@ class Glue {
       parts(b, t, dst, src, [&](Value *d, Value *s, const jir::Type &pt) { b.CreateCall(clone(pt), {d, s}); });
       return;
     }
-    // Read the source header before writing `dst`, which may be the same place.
-    const jir::Type &elem = *t.pointee;
+    // A copy shares the buffer, counted once more; whichever is written
+    // first while it is shared copies it then (`unique`).
     Value *data = b.CreateLoad(ptr(), b.CreateStructGEP(header(), src, 0));
     Value *len = b.CreateLoad(b.getInt64Ty(), b.CreateStructGEP(header(), src, 1));
-    auto chk = [&](Value *ok) { check(b, ok); };
-    Value *bytes = byte_count(b, elem, len, chk);
-    Value *copy = b.CreateCall(malloc_fn(), {bytes});
-    check(b, b.CreateOr(b.CreateIsNotNull(copy), b.CreateICmpEQ(bytes, b.getInt64(0))));
-    Type *ety = types_.lower(elem);
-    if (owns(elem)) {
-      loop(b, len, [&](Value *i) {
-        b.CreateCall(clone(elem), {b.CreateGEP(ety, copy, {i}), b.CreateGEP(ety, data, {i})});
-      });
-    } else {
-      Align a = dl.getABITypeAlign(ety);
-      b.CreateMemCpy(copy, a, data, a, bytes);
-    }
-    b.CreateStore(copy, b.CreateStructGEP(header(), dst, 0));
+    Value *cap = b.CreateLoad(b.getInt64Ty(), b.CreateStructGEP(header(), src, 2));
+    auto *held = BasicBlock::Create(ctx_, "held", fn), *done = BasicBlock::Create(ctx_, "done", fn);
+    b.CreateCondBr(b.CreateIsNull(data), done, held);
+    b.SetInsertPoint(held);
+    rc_inc(b, data);
+    b.CreateBr(done);
+    b.SetInsertPoint(done);
+    b.CreateStore(data, b.CreateStructGEP(header(), dst, 0));
     b.CreateStore(len, b.CreateStructGEP(header(), dst, 1));
-    b.CreateStore(len, b.CreateStructGEP(header(), dst, 2));
+    b.CreateStore(cap, b.CreateStructGEP(header(), dst, 2));
   }
 };
 
@@ -891,11 +1002,16 @@ class FnGen {
       else
         b_.CreateStore(a, slots_[p]);
     }
+    make_flags();
     b_.CreateBr(blocks_[0]);
 
     for (size_t i = 0; i < f_.blocks.size(); i++) {
       b_.SetInsertPoint(blocks_[i]);
-      for (const auto &inst : f_.blocks[i].insts) emit(inst);
+      for (const auto &inst : f_.blocks[i].insts) {
+        before(inst);
+        emit(inst);
+        after(inst);
+      }
       term(f_.blocks[i].term);
     }
   }
@@ -919,6 +1035,155 @@ class FnGen {
   std::vector<BasicBlock *> blocks_;
   BasicBlock *trap_ = nullptr;  // shared target of failed bounds and division checks
   Value *sret_ = nullptr;       // where an aggregate result goes
+
+  // "Known unique" flags: for a register and a path to a list in it that the
+  // function writes through, whether that list's buffer was made unique and
+  // nothing could have shared it since. A write checks the count only when its
+  // flag is down. The flags are runtime values (allocas, which become SSA
+  // values), so joins need no analysis; every event that could add a holder to
+  // a buffer lowers them. Where they are known, LLVM folds them away, so a
+  // loop of writes checks once.
+  struct Known {
+    uint32_t root;
+    std::vector<jir::PathStep> prefix;
+    AllocaInst *flag;
+  };
+  std::vector<Known> known_;
+
+  static bool same_step(const jir::PathStep &a, const jir::PathStep &b) { return a.elem == b.elem && a.value == b.value; }
+  // Whether `p` starts with `q`.
+  static bool extends(const std::vector<jir::PathStep> &p, const std::vector<jir::PathStep> &q) {
+    if (p.size() < q.size()) return false;
+    for (size_t i = 0; i < q.size(); i++)
+      if (!same_step(p[i], q[i])) return false;
+    return true;
+  }
+  AllocaInst *known_flag(uint32_t root, const std::vector<jir::PathStep> &prefix) {
+    for (auto &k : known_)
+      if (k.root == root && k.prefix.size() == prefix.size() && extends(k.prefix, prefix)) return k.flag;
+    return nullptr;
+  }
+  void lower_flags(const std::function<bool(const Known &)> &which) {
+    for (auto &k : known_)
+      if (which(k)) b_.CreateStore(b_.getFalse(), k.flag);
+  }
+
+  // The flags this function needs: one per list on the path of each write.
+  void make_flags() {
+    auto add = [&](uint32_t root, const std::vector<jir::PathStep> &path, bool include_end) {
+      if (root >= f_.regs.size() || f_.regs[root].kind == jir::Type::Cell) return;
+      const jir::Type *cur = &f_.regs[root];
+      std::vector<jir::PathStep> prefix;
+      for (size_t i = 0; i <= path.size(); i++) {
+        if (i == path.size() && !include_end) break;
+        if (cur->kind == jir::Type::List && !known_flag(root, prefix)) {
+          AllocaInst *flag = b_.CreateAlloca(b_.getInt1Ty());
+          b_.CreateStore(b_.getFalse(), flag);
+          known_.push_back({root, prefix, flag});
+        }
+        if (i == path.size()) break;
+        const jir::PathStep &st = path[i];
+        if (st.elem) {
+          if (cur->kind != jir::Type::List && cur->kind != jir::Type::Array) return;
+          cur = cur->pointee.get();
+        } else {
+          if (cur->kind != jir::Type::Struct) return;
+          cur = &types_.field(*cur, st.value);
+        }
+        prefix.push_back(st);
+      }
+    };
+    for (const auto &b : f_.blocks)
+      for (const auto &inst : b.insts) switch (inst.op) {
+          case jir::Op::SetPath: add(inst.dst, inst.path, false); break;
+          case jir::Op::Take: add(inst.args.at(0), inst.path, false); break;
+          case jir::Op::Push: case jir::Op::Pop: add(inst.args.at(0), inst.path, true); break;
+          case jir::Op::SetElem: add(inst.dst, {}, true); break;
+          default: break;
+        }
+  }
+
+  // Makes the list at `addr` (the one at `prefix` in `root`, if `root` is a
+  // register) unique to be written, checking its count only if not known.
+  void unique_at(int64_t root, const std::vector<jir::PathStep> &prefix, const jir::Type &list, Value *addr) {
+    AllocaInst *flag = root >= 0 ? known_flag(uint32_t(root), prefix) : nullptr;
+    if (!flag) {
+      glue_.ensure_unique(b_, list, addr);
+      return;
+    }
+    auto *check = BasicBlock::Create(ctx_, "known.check", fn_), *done = BasicBlock::Create(ctx_, "known.done", fn_);
+    b_.CreateCondBr(b_.CreateLoad(b_.getInt1Ty(), flag), done, check);
+    b_.SetInsertPoint(check);
+    glue_.ensure_unique(b_, list, addr);
+    // A copy made here counted the elements once more: lists inside are shared.
+    lower_flags([&](const Known &k) { return k.root == uint64_t(root) && k.prefix.size() > prefix.size() && extends(k.prefix, prefix); });
+    b_.CreateStore(b_.getTrue(), flag);
+    b_.CreateBr(done);
+    b_.SetInsertPoint(done);
+  }
+
+  // Before `inst`: lowers the flags of what it could share or replace.
+  void before(const jir::Inst &inst) {
+    if (known_.empty()) return;
+    using jir::Op;
+    bool harmless = false;
+    switch (inst.op) {
+      case Op::Const: case Op::FConst: case Op::Unit: case Op::Str: case Op::Copy: case Op::Neg: case Op::Not:
+      case Op::Sub: case Op::Mul: case Op::Div: case Op::Rem: case Op::Eq: case Op::Ne: case Op::Lt: case Op::Le:
+      case Op::Gt: case Op::Ge: case Op::And: case Op::Or: case Op::Xor: case Op::Shl: case Op::Shr: case Op::Copysign:
+      case Op::Sqrt: case Op::Floor: case Op::Ceil: case Op::Trunc: case Op::Round: case Op::Abs: case Op::Bitcast:
+      case Op::Cast: case Op::Struct: case Op::Field: case Op::Take: case Op::SetField: case Op::Load: case Op::Store:
+      case Op::Addr: case Op::FieldPtr: case Op::Array: case Op::Elem: case Op::SetElem: case Op::ElemPtr:
+      case Op::Variant: case Op::Tag: case Op::Payload: case Op::GetPath: case Op::SetPath: case Op::Print:
+      case Op::Trap: case Op::Len: case Op::Push: case Op::Pop: case Op::Drop: case Op::StrByte: case Op::FromBytes:
+      case Op::ToStr: case Op::ReadLine: case Op::Args: case Op::ReadFile: case Op::WriteFile: case Op::ParseFloat:
+      case Op::Deref:
+        harmless = true;
+        break;
+      // `+` on lists copies their elements, counting them once more.
+      case Op::Add: harmless = type(inst.args.at(0)).kind != jir::Type::List; break;
+      default: break;
+    }
+    if (!harmless) {
+      lower_flags([](const Known &) { return true; });
+      return;
+    }
+    // A register written anew holds another value; one a path indexes with
+    // means another element.
+    bool in_place = (inst.op == Op::SetPath || inst.op == Op::SetElem || inst.op == Op::SetField) &&
+                    !inst.args.empty() && inst.dst == inst.args[0];
+    bool defines = !(inst.op == Op::Store || inst.op == Op::Print || inst.op == Op::Trap || inst.op == Op::Push ||
+                     inst.op == Op::Drop);
+    if (defines && !in_place) {
+      uint32_t d = inst.dst;
+      lower_flags([&](const Known &k) {
+        if (k.root == d) return true;
+        for (const auto &st : k.prefix)
+          if (st.elem && st.value == d) return true;
+        return false;
+      });
+    }
+  }
+
+  // After `inst`, a write: lowers the flags of the lists it replaced.
+  void after(const jir::Inst &inst) {
+    if (known_.empty()) return;
+    using jir::Op;
+    std::vector<jir::PathStep> w;
+    uint32_t root;
+    bool strictly = false;
+    switch (inst.op) {
+      case Op::SetPath: root = inst.dst; w = inst.path; break;
+      case Op::Take: root = inst.args.at(0); w = inst.path; break;
+      case Op::SetElem: root = inst.dst; w = {{true, inst.args.at(1)}}; break;
+      case Op::SetField: root = inst.dst; w = {{false, uint32_t(inst.imm)}}; break;
+      case Op::Push: case Op::Pop: root = inst.args.at(0); w = inst.path; strictly = true; break;
+      default: return;
+    }
+    lower_flags([&](const Known &k) {
+      return k.root == root && extends(k.prefix, w) && (!strictly || k.prefix.size() > w.size());
+    });
+  }
 
   bool agg(uint32_t r) { return Types::is_agg(type(r)); }
 
@@ -1213,15 +1478,19 @@ class FnGen {
 
   // Address and JIR type of the part at `path` inside the aggregate of type `t`
   // at `base`. Elements are bounds-checked.
+  // To `write` there, each list on the way is made the value's own first.
   std::pair<Value *, const jir::Type *> path_addr(const jir::Type &t, Value *base,
-                                                  const std::vector<jir::PathStep> &path) {
+                                                  const std::vector<jir::PathStep> &path, bool write = false,
+                                                  int64_t root = -1) {
     const jir::Type *cur = &t;
     Value *addr = base;
+    std::vector<jir::PathStep> prefix;
     for (const auto &step : path) {
       if (step.elem) {
         if (cur->kind != jir::Type::Array && cur->kind != jir::Type::List)
           fail(f_.name, cur->str() + " is not an array or list");
         if (type(step.value) != jir::Type::integer(64, true)) fail(f_.name, "path index must be i64");
+        if (write && cur->kind == jir::Type::List) unique_at(root, prefix, *cur, addr);
         addr = cur->kind == jir::Type::List ? list_elem_addr(*cur, addr, load(step.value))
                                              : elem_addr(*cur, addr, load(step.value));
         cur = cur->pointee.get();
@@ -1230,6 +1499,7 @@ class FnGen {
         addr = b_.CreateStructGEP(types_.lower(*cur), addr, step.value);
         cur = &field;
       }
+      prefix.push_back(step);
     }
     return {addr, cur};
   }
@@ -1261,8 +1531,7 @@ class FnGen {
   Value *new_list(const jir::Type &elem, Value *n, Value *header) {
     auto chk = [&](Value *ok) { check(ok, "list.size"); };
     Value *bytes = glue_.byte_count(b_, elem, n, chk);
-    Value *data = b_.CreateCall(glue_.malloc_fn(), {bytes});
-    check(b_.CreateOr(b_.CreateIsNotNull(data), b_.CreateICmpEQ(bytes, b_.getInt64(0))), "list.alloc");
+    Value *data = glue_.buf_alloc(b_, bytes);
     StructType *h = glue_.header();
     b_.CreateStore(data, b_.CreateStructGEP(h, header, 0));
     b_.CreateStore(n, b_.CreateStructGEP(h, header, 1));
@@ -1311,8 +1580,7 @@ class FnGen {
   // Makes the string at `header` new memory for `n` bytes, not yet written;
   // gives its address.
   Value *new_str(Value *n, Value *header) {
-    Value *data = b_.CreateCall(glue_.malloc_fn(), {n});
-    check(b_.CreateOr(b_.CreateIsNotNull(data), b_.CreateICmpEQ(n, b_.getInt64(0))), "str.alloc");
+    Value *data = glue_.buf_alloc(b_, n);
     StructType *h = glue_.header();
     b_.CreateStore(data, b_.CreateStructGEP(h, header, 0));
     b_.CreateStore(n, b_.CreateStructGEP(h, header, 1));
@@ -1347,10 +1615,11 @@ class FnGen {
   }
 
   // The part at `path` in register `r`, or in what `r` holds if it is a cell.
-  std::pair<Value *, const jir::Type *> root_path(uint32_t r, const std::vector<jir::PathStep> &path) {
+  std::pair<Value *, const jir::Type *> root_path(uint32_t r, const std::vector<jir::PathStep> &path, bool write) {
     const jir::Type &t = type(r);
-    if (t.kind == jir::Type::Cell) return path_addr(*t.pointee, b_.CreateStructGEP(types_.box(t), load(r), 1), path);
-    return path_addr(t, slot(r), path);
+    if (t.kind == jir::Type::Cell)
+      return path_addr(*t.pointee, b_.CreateStructGEP(types_.box(t), load(r), 1), path, write);
+    return path_addr(t, slot(r), path, write, r);
   }
 
   // Address of element `index` of the array at `base`, after a bounds check.
@@ -1722,7 +1991,7 @@ class FnGen {
         const jir::Type &t = type(arg_reg(0));
         if (t.kind != jir::Type::Cell) fail(f_.name, "`cellget` and `cellset` need a cell");
         Value *value = b_.CreateStructGEP(types_.box(t), arg(0), 1);
-        auto [addr, part] = path_addr(*t.pointee, value, inst.path);
+        auto [addr, part] = path_addr(*t.pointee, value, inst.path, inst.op == Op::CellSet);
         if (inst.op == Op::CellGet) {
           if (*part != type(inst.dst)) fail(f_.name, "`cellget` result has the wrong type");
           read_mem(inst.dst, addr);  // the ownership pass clones what owns memory
@@ -1798,7 +2067,7 @@ class FnGen {
         // The part moves out; what is left is empty, as a register never
         // written is, so freeing or replacing it frees nothing.
         if (inst.dst == arg_reg(0)) fail(f_.name, "`take` into the value it takes from");
-        auto [at, t] = path_addr(type(arg_reg(0)), slot(arg_reg(0)), inst.path);
+        auto [at, t] = path_addr(type(arg_reg(0)), slot(arg_reg(0)), inst.path, true, arg_reg(0));
         if (*t != type(inst.dst)) fail(f_.name, "`take` result has the wrong type");
         read_part(inst.dst, at);
         b_.CreateStore(Constant::getNullValue(types_.lower(*t)), at);
@@ -1901,6 +2170,7 @@ class FnGen {
         if (type(inst.dst) != arr) fail(f_.name, "`setelem` result has the wrong type");
         Value *index = arg(1);
         copy_reg(inst.dst, arg_reg(0));
+        if (arr.kind == jir::Type::List) unique_at(inst.dst, {}, arr, slot(inst.dst));
         Value *at = arr.kind == jir::Type::List ? list_elem_addr(arr, slot(inst.dst), index)
                                                  : elem_addr(arr, slot(inst.dst), index);
         write_part(at, arg_reg(2));
@@ -1915,7 +2185,7 @@ class FnGen {
       case Op::SetPath: {
         if (type(inst.dst) != type(arg_reg(0))) fail(f_.name, "`setpath` result has the wrong type");
         copy_reg(inst.dst, arg_reg(0));
-        auto [addr, t] = path_addr(type(inst.dst), slot(inst.dst), inst.path);
+        auto [addr, t] = path_addr(type(inst.dst), slot(inst.dst), inst.path, true, inst.dst);
         if (*t != type(arg_reg(1))) fail(f_.name, "`setpath` value has the wrong type");
         write_part(addr, arg_reg(1));
         return;
@@ -2016,11 +2286,11 @@ class FnGen {
         FunctionCallee getline = mod_.getOrInsertFunction("getline", FunctionType::get(i64_, {ptr, ptr, ptr}, false));
         Value *n = b_.CreateCall(getline, {line, size, b_.CreateLoad(ptr, in)});
         Value *got = b_.CreateICmpSGT(n, b_.getInt64(0));
-        StructType *h = glue_.header();
-        // The buffer becomes the string's memory, so nothing is copied.
-        b_.CreateStore(b_.CreateLoad(ptr, line), b_.CreateStructGEP(h, slot(inst.dst), 0));
-        b_.CreateStore(b_.CreateSelect(got, n, b_.getInt64(0)), b_.CreateStructGEP(h, slot(inst.dst), 1));
-        b_.CreateStore(b_.getInt64(1), b_.CreateStructGEP(h, slot(inst.dst), 2));
+        // Copied into a counted buffer of the string's own.
+        Value *len = b_.CreateSelect(got, n, b_.getInt64(0));
+        Value *data = new_str(len, slot(inst.dst));
+        b_.CreateMemCpy(data, Align(1), b_.CreateLoad(ptr, line), Align(1), len);
+        b_.CreateCall(glue_.free_fn(), {b_.CreateLoad(ptr, line)});
         return;
       }
       case Op::Args: {
@@ -2111,8 +2381,9 @@ class FnGen {
         return;
       }
       case Op::Push: {
-        auto [header, t] = root_path(arg_reg(0), inst.path);
+        auto [header, t] = root_path(arg_reg(0), inst.path, true);
         if (t->kind != jir::Type::List) fail(f_.name, "`push` needs a list");
+        unique_at(type(arg_reg(0)).kind == jir::Type::Cell ? -1 : int64_t(arg_reg(0)), inst.path, *t, header);
         const jir::Type &elem = *t->pointee;
         if (elem != type(arg_reg(1))) fail(f_.name, "pushed value has the wrong type");
         StructType *h = glue_.header();
@@ -2124,8 +2395,7 @@ class FnGen {
         Value *more = b_.CreateSelect(b_.CreateICmpEQ(cap, b_.getInt64(0)), b_.getInt64(4), b_.CreateShl(cap, 1));
         auto chk = [&](Value *ok) { check(ok, "push.size"); };
         Value *bytes = glue_.byte_count(b_, elem, more, chk);
-        Value *data = b_.CreateCall(glue_.realloc_fn(), {list_field(header, 0), bytes});
-        check(b_.CreateIsNotNull(data), "push.alloc");
+        Value *data = glue_.buf_realloc(b_, list_field(header, 0), bytes);
         b_.CreateStore(data, b_.CreateStructGEP(h, header, 0));
         b_.CreateStore(more, b_.CreateStructGEP(h, header, 2));
         b_.CreateBr(put);
@@ -2135,8 +2405,9 @@ class FnGen {
         return;
       }
       case Op::Pop: {
-        auto [header, t] = root_path(arg_reg(0), inst.path);
+        auto [header, t] = root_path(arg_reg(0), inst.path, true);
         if (t->kind != jir::Type::List) fail(f_.name, "`pop` needs a list");
+        unique_at(type(arg_reg(0)).kind == jir::Type::Cell ? -1 : int64_t(arg_reg(0)), inst.path, *t, header);
         if (*t->pointee != type(inst.dst)) fail(f_.name, "`pop` result has the wrong type");
         Value *len = list_field(header, 1);
         check(b_.CreateICmpNE(len, b_.getInt64(0)), "pop.nonempty");
@@ -2734,7 +3005,8 @@ Function *read_file_fn(Module &m) {
   b.SetInsertPoint(start);
   b.CreateStore(b.getInt64(4096), cap);
   b.CreateStore(b.getInt64(0), n);
-  Value *first = call("malloc", {b.getInt64(4096)});
+  // `buf` is the whole allocation: a reference count, then the bytes.
+  Value *first = call("malloc", {b.getInt64(4096 + 8)});
   b.CreateStore(first, buf);
   b.CreateCondBr(b.CreateIsNull(first), no_mem, loop);
   b.SetInsertPoint(no_mem);
@@ -2747,7 +3019,7 @@ Function *read_file_fn(Module &m) {
   b.CreateCondBr(b.CreateICmpEQ(b.CreateLoad(i64, n), b.CreateLoad(i64, cap)), grow, read);
   b.SetInsertPoint(grow);
   Value *bigger = b.CreateMul(b.CreateLoad(i64, cap), b.getInt64(2));
-  Value *moved = call("realloc", {b.CreateLoad(ptr, buf), bigger});
+  Value *moved = call("realloc", {b.CreateLoad(ptr, buf), b.CreateAdd(bigger, b.getInt64(8))});
   b.CreateCondBr(b.CreateIsNull(moved), grow_failed, grown);
   b.SetInsertPoint(grow_failed);
   b.CreateStore(b.getInt64(kENOMEM), err);
@@ -2757,7 +3029,7 @@ Function *read_file_fn(Module &m) {
   b.CreateStore(bigger, cap);
   b.CreateBr(read);
   b.SetInsertPoint(read);
-  Value *at = b.CreateGEP(b.getInt8Ty(), b.CreateLoad(ptr, buf), b.CreateLoad(i64, n));
+  Value *at = b.CreateGEP(b.getInt8Ty(), b.CreateLoad(ptr, buf), b.CreateAdd(b.CreateLoad(i64, n), b.getInt64(8)));
   Value *got = call("read", {fd, at, b.CreateSub(b.CreateLoad(i64, cap), b.CreateLoad(i64, n))});
   b.CreateCondBr(b.CreateICmpSLT(got, b.getInt64(0)), read_failed, not_failed);
   b.SetInsertPoint(read_failed);
@@ -2776,7 +3048,8 @@ Function *read_file_fn(Module &m) {
 
   b.SetInsertPoint(done);
   call("close", {fd});
-  b.CreateStore(b.CreateLoad(ptr, buf), b.CreateStructGEP(header, out, 0));
+  b.CreateStore(b.getInt64(1), b.CreateLoad(ptr, buf));
+  b.CreateStore(b.CreateConstGEP1_64(b.getInt8Ty(), b.CreateLoad(ptr, buf), 8), b.CreateStructGEP(header, out, 0));
   b.CreateStore(b.CreateLoad(i64, n), b.CreateStructGEP(header, out, 1));
   b.CreateStore(b.CreateLoad(i64, cap), b.CreateStructGEP(header, out, 2));
   b.CreateRet(b.getInt64(0));

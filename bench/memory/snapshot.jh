@@ -1,0 +1,12 @@
+// Undo history: keep every version of a 200x200 grid while editing it.
+fn main() -> i64 {
+    let row: [i64] = [0; 200]
+    let grid: [[i64]] = [row; 200]
+    let history: [[[i64]]] = []
+    for step in 0..2000 {
+        push(history, grid)
+        grid[step % 200][(step * 7) % 200] = step
+    }
+    let back = history[1000]
+    return back[0][0] + grid[0][0] + len(history)
+}

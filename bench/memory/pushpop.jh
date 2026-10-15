@@ -1,0 +1,17 @@
+// Push 5M integers, sum them, pop them all, five times.
+fn main() -> i64 {
+    let total = 0
+    for round in 0..5 {
+        let xs: [i64] = []
+        for i in 0..5000000 {
+            push(xs, i ^ round)
+        }
+        for x in xs {
+            total += x
+        }
+        while len(xs) > 0 {
+            total -= pop(xs)
+        }
+    }
+    return total % 256
+}

@@ -1,0 +1,34 @@
+// Build and fold many small trees of lists (unique values, moved around).
+enum T {
+    Leaf(i64)
+    Node([T])
+}
+fn build(d: i64, k: i64) -> T {
+    if d == 0 {
+        return T.Leaf(k)
+    }
+    let kids: [T] = []
+    for i in 0..4 {
+        push(kids, build(d - 1, k * 4 + i))
+    }
+    return T.Node(kids)
+}
+fn sum(t: T) -> i64 {
+    match t {
+        Leaf(x) => return x
+        Node(ks) => {
+            let s = 0
+            for k in ks {
+                s += sum(k)
+            }
+            return s
+        }
+    }
+}
+fn main() -> i64 {
+    let total = 0
+    for r in 0..200 {
+        total += sum(build(7, r))
+    }
+    return total % 256
+}

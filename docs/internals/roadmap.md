@@ -184,6 +184,13 @@
     outliving its value) is an internal compiler error, not memory
     corruption. With the `v = items[k]` leak put back into the pass, it
     rejects the programs that hit it, at the instruction.
+44. Counted list and string buffers ([design](memory.md)): natively a copy
+    of a list or a string shares its memory and counts one more holder, and
+    the first write to memory held more than once copies that list, one
+    level. Flags that remember which lists a function knows to be unique let
+    LLVM fold the checks away, so loops of writes cost what they did. Keeping
+    2,000 versions of a 200 x 200 grid went from 0.51 s and 643 MB to 0.02 s
+    and 14 MB; programs that copied nothing take the same time.
 
 ## Next
 
@@ -206,10 +213,8 @@
   invariants of a module's structs, so that `pub` functions taking them can
   be tried; `old(e)` for the value of an expression at the start; and
   telling apart runtime contract failures from other traps natively.
-- **Memory** ([design](memory.md)): counted list and string buffers, so that
-  a copy the ownership pass cannot avoid costs O(1) instead of the whole
-  value, with uniqueness checks that fold away (both prototyped on the branch
-  `memory-rc-prototype`); reuse of unique buffers. Also taking an enum's payload out of a value that is used again
+- **Memory** ([design](memory.md)): reuse of unique buffers (a `map` over a
+  list handed over writing into the same memory). Also taking an enum's payload out of a value that is used again
   (`take` covers fields and elements; payloads move only out of values
   that are only taken apart).
 
