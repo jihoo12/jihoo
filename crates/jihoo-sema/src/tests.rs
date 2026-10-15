@@ -2232,3 +2232,140 @@ fn native_lists_are_owned() {
     // Fields that do not own memory can still be reached through a pointer.
     ir("struct S { n: i64, xs: [i64] }\nfn f(p: *i64) -> i64 { return *p }\nfn main() { let s = S { n: 1, xs: [] }\n print(s.n) }");
 }
+
+// ---- contracts ----
+
+/// The error a program stops with on the VM.
+fn run_err(src: &str) -> String {
+    let m = check(src).unwrap_or_else(|e| panic!("{e}"));
+    jihoo_vm::run(&m, &mut Vec::new()).expect_err("expected a runtime error").to_string()
+}
+
+#[test]
+fn contracts_are_checked_at_run_time() {
+    // `f` has a pointer, so the compiler cannot try it: only the run checks it.
+    let lib = "fn half(n: i64, p: *u8) -> i64\n  requires n % 2 == 0\n  ensures result + result == n\n{\n  return n / 2\n}\n";
+    let m = check(&format!("#![native]\n{lib}fn main() {{ print(half(4, \"\")) }}")).unwrap();
+    let text = m.to_string();
+    assert!(text.contains("call @half.requires.0()") && text.contains("call @half.ensures.1(%"), "{text}");
+    // A false clause calls a function named after it, which traps.
+    let src = "fn half(n: i64) -> i64\n  requires n % 2 == 0\n{\n  return n / 2\n}\n\
+               fn main() { print(half(4))\n let n = 3\n print(half(n)) }";
+    assert!(run_err(src).contains("@half.requires.0: trap"), "{}", run_err(src));
+    // `ensures` sees the parameters as they were called, not as the body left them.
+    let src = "fn down(n: i64) -> i64\n  ensures result == n - 1\n{\n  n = n - 1\n  return n\n}\nfn main() { print(down(5)) }";
+    assert_eq!(run(src), "4\n");
+    // Every `return` goes through the checks.
+    let src = "fn sign(x: i64) -> i64\n  ensures result >= -1 && result <= 1\n{\n  if x < 0 { return -1 }\n  if x > 0 { return 1 }\n  return 0\n}\n\
+               fn main() { print(sign(-5) + sign(7) + sign(0)) }";
+    assert_eq!(run(src), "0\n");
+}
+
+#[test]
+fn contracts_and_tail_calls() {
+    // `requires` alone keeps a call of itself a jump, checked each round.
+    let src = "fn count(n: i64, acc: i64) -> i64\n  requires n >= 0\n{\n  if n == 0 { return acc }\n  return count(n - 1, acc + 1)\n}\n\
+               fn main() { print(count(1000000, 0)) }";
+    assert_eq!(run(src), "1000000\n");
+    // `ensures` checks each result, so the calls are ordinary calls.
+    let src = "fn even(n: i64) -> bool\n  requires n >= 0\n  ensures result == (n % 2 == 0)\n{\n  if n == 0 { return true }\n  return !even(n - 1)\n}\n\
+               fn other(n: i64) -> bool\n  requires n >= 0\n  ensures result || !result\n{\n  return even(n)\n}\n\
+               fn main() { print(even(10))\n print(other(3)) }";
+    assert_eq!(run(src), "true\nfalse\n");
+    let m = check(src).unwrap();
+    assert!(m.func("other").unwrap().blocks.iter().all(|b| !matches!(b.term, ir::Terminator::TailCall { .. })), "{m}");
+}
+
+#[test]
+fn contract_errors() {
+    let e = err("fn f(x: i64)\n  ensures x > 0\n{\n}\nfn main() {}");
+    assert!(e.contains("`ensures` is about the value `f` returns, and it returns nothing"), "{e}");
+    let e = err("fn f(result: i64) -> i64\n  ensures result > 0\n{\n  return 1\n}\nfn main() {}");
+    assert!(e.contains("cannot have a parameter named `result`"), "{e}");
+    let e = err("fn f(x: i64) -> i64\n  requires x\n{\n  return x\n}\nfn main() {}");
+    assert!(e.contains("a `requires` clause must be bool, found i64"), "{e}");
+    let e = err("fn f(x: i64) -> i64\n  requires y > 0\n{\n  return x\n}\nfn main() {}");
+    assert!(e.contains("`y`"), "{e}");
+    // Clauses see the parameters, not the body's locals.
+    let e = err("fn f(x: i64) -> i64\n  ensures y == result\n{\n  let y = x\n  return y\n}\nfn main() {}");
+    assert!(e.contains("`y`"), "{e}");
+    let e = err("#![native]\nextern fn abs(x: i32) -> i32 requires x > -100\nfn main() {}");
+    assert!(e.contains("a C function cannot have a contract"), "{e}");
+    let e = err("trait Area {\n  fn area(s: Self) -> i64 ensures result >= 0\n}\nfn main() {}");
+    assert!(e.contains("a trait function without a body cannot have a contract yet"), "{e}");
+    // The words are only special after a signature.
+    assert_eq!(run("fn main() { let requires = 1\n let ensures = 2\n let result = 3\n print(requires + ensures + result) }"), "6\n");
+}
+
+#[test]
+fn compiler_breaks_contracts() {
+    // The smallest integer has no positive negation.
+    let e = err("fn abs(x: i64) -> i64\n  ensures result >= 0\n{\n  if x < 0 { return -x }\n  return x\n}\nfn main() {}");
+    assert_eq!(
+        e,
+        "2:3: contract broken: abs(-9223372036854775808) returns -9223372036854775808, so `ensures result >= 0` is false"
+    );
+    // The classic midpoint overflow.
+    let e = err("fn mid(lo: i32, hi: i32) -> i32\n  requires lo <= hi\n  ensures lo <= result && result <= hi\n{\n  return (lo + hi) / 2\n}\nfn main() {}");
+    assert!(e.contains("contract broken: mid(") && e.contains("so `ensures lo <= result && result <= hi` is false"), "{e}");
+    // An off-by-one, shrunk to the shortest string that shows it.
+    let e = err("fn rev(s: str) -> str\n  ensures len(result) == len(s)\n{\n  let out = \"\"\n  let i = len(s) - 1\n  while i > 0 {\n    out = out + s[i:i + 1]\n    i = i - 1\n  }\n  return out\n}\nfn main() {}");
+    assert!(e.contains("rev(\"a\") returns \"\""), "{e}");
+    // A trap on an input that meets `requires`.
+    let e = err("fn get(xs: [i64], i: i64) -> i64\n  requires i >= 0 && i <= len(xs)\n{\n  return xs[i]\n}\nfn main() {}");
+    assert!(e.contains("get([], 0) traps (index 0 out of bounds for length 0); it meets every `requires`"), "{e}");
+    let e = err("fn ratio(a: i64, b: i64) -> i64\n  requires a >= 0\n{\n  return a / b\n}\nfn main() {}");
+    assert!(e.contains("ratio(0, 0) traps (division by zero)"), "{e}");
+    // A call that breaks another function's `requires` is the caller's fault.
+    let e = err("fn root(n: i64) -> i64\n  requires n >= 0\n{\n  return n\n}\n\
+                 fn f(a: i64, b: i64) -> i64\n  requires a >= 0\n{\n  return root(a - b)\n}\nfn main() {}");
+    assert!(e.starts_with("6:1: contract broken: f(0, 1) calls root(-1), which breaks `root`'s `requires n >= 0`"), "{e}");
+    // A recursive function wrong only deeper down says so.
+    let e = err("fn tri(n: i64) -> i64\n  requires n >= 0 && n < 100\n  ensures result >= n\n{\n  if n <= 1 { return 0 }\n  return n + tri(n - 1)\n}\nfn main() {}");
+    assert!(e.contains("tri(1) returns 0"), "{e}");
+    // Shrinking finds where an overflow starts: the first `n` whose square
+    // does not fit, in an impl's function.
+    let e = err("trait Area {\n  fn area(s: Self) -> i64\n}\nstruct Sq { n: i64 }\nimpl Area for Sq {\n  fn area(s: Sq) -> i64\n    ensures result >= 0\n  {\n    return s.n * s.n\n  }\n}\nfn main() { print(Sq { n: 2 }.area()) }");
+    assert!(e.contains("area(Sq { n: 3037000500 }) returns -9223372036709301616"), "{e}");
+    // Structs, enums and generic instances are made up too.
+    let e = err("struct P { x: i64, y: i64 }\nfn dist(p: P) -> i64\n  ensures result >= 0\n{\n  return p.x - p.y\n}\nfn main() {}");
+    assert!(e.contains("dist(P { x: 0, y: 1 }) returns -1"), "{e}");
+    let e = err("enum Shape { Dot, Square(i64) }\nfn side(s: Shape) -> i64\n  ensures result > 0\n{\n  match s {\n    Dot => return 1\n    Square(n) => return n\n  }\n}\nfn main() {}");
+    assert!(e.contains("side(Square(0)) returns 0"), "{e}");
+    let e = err("fn first(comptime T: type, xs: [T]) -> T\n  requires len(xs) >= 0\n{\n  return xs[0]\n}\nfn main() { print(first(i64, [1])) }");
+    assert!(e.contains("first([], ) traps") || e.contains("first([]) traps"), "{e}");
+}
+
+#[test]
+fn contracts_that_hold_compile() {
+    let src = "struct Range { lo: i64, hi: i64 }\n\
+               fn width(r: Range) -> i64\n  requires r.lo <= r.hi && r.hi - r.lo >= 0\n  ensures result >= 0\n{\n  return r.hi - r.lo\n}\n\
+               fn clamp(x: i64, lo: i64, hi: i64) -> i64\n  requires lo <= hi\n  ensures lo <= result && result <= hi\n{\n  if x < lo { return lo }\n  if x > hi { return hi }\n  return x\n}\n\
+               fn mid(lo: i32, hi: i32) -> i32\n  requires 0 <= lo && lo <= hi\n  ensures lo <= result && result <= hi\n{\n  return lo + (hi - lo) / 2\n}\n\
+               fn get(xs: [i64], i: i64) -> i64\n  requires i >= 0 && i < len(xs)\n{\n  return xs[i]\n}\n\
+               fn fact(n: i64) -> i64\n  requires n >= 0 && n <= 20\n  ensures result >= 1\n{\n  if n == 0 { return 1 }\n  return n * fact(n - 1)\n}\n\
+               fn main() { print(width(Range { lo: 2, hi: 9 }) + clamp(50, 0, 10) + get([4], 0) + fact(3))\n print(mid(1, 5)) }";
+    assert_eq!(run(src), "27\n3\n");
+}
+
+#[test]
+fn contracts_the_compiler_cannot_try() {
+    // Function values and code that only runs natively are left to the run.
+    check("fn apply(f: fn(i64) -> i64, x: i64) -> i64\n  ensures result > 0\n{\n  return f(x)\n}\nfn main() {}").unwrap();
+    check("#![native]\nextern fn labs(x: i64) -> i64\nfn f(x: i64) -> i64\n  ensures result > 0\n{\n  return labs(x)\n}\nfn main() {}").unwrap();
+    // Nor does it build structs whose fields their module keeps to itself for
+    // a function others call: they only have the values the module makes,
+    // which may keep rules the compiler cannot know.
+    let m = jihoo_syntax::on_compiler_stack(|| {
+        let lib = jihoo_syntax::parse("pub struct Pos { n: i64 }\npub fn make(n: i64) -> Pos { if n < 1 { return Pos { n: 1 } }\n return Pos { n: n } }\npub fn get(p: Pos) -> i64\n  ensures result > 0\n{\n  return p.n\n}").unwrap();
+        let root = jihoo_syntax::parse("#![hosted]\nfn main() { print(p.get(p.make(0))) }").unwrap();
+        let imports = HashMap::from([("p".to_string(), 1)]);
+        let mods = [
+            Module { name: String::new(), file: 0, program: root, imports },
+            Module { name: "p".into(), file: 1, program: lib, imports: HashMap::new() },
+            jihoo_syntax::loader::prelude(2),
+        ];
+        analyze_modules(&mods).map_err(|es| es[0].to_string())
+    });
+    m.unwrap();
+}

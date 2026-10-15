@@ -137,12 +137,51 @@ impl Env<'_> {
     pub fn run_typed(
         &self,
         pos: Pos,
-        mut funcs: Vec<jihoo_ir::Function>,
+        funcs: Vec<jihoo_ir::Function>,
         entry: &str,
         args: &[ConstValue],
         ty: &Type,
         type_of: &mut dyn FnMut(&str) -> Result<String, Error>,
     ) -> Result<ConstValue, Error> {
+        let (module, program) = self.prepare(pos, funcs, entry)?;
+        let uniques = self.uniques.get();
+        let mut types = HashMap::new();
+        loop {
+            let mut vm = Vm::with_program(&module, program.clone())
+                .with_fuel(FUEL)
+                .with_uniques(uniques)
+                .with_input(jihoo_vm::Input::Closed)
+                .with_code_types(types.clone());
+            let values: Vec<Value> = args.iter().map(|a| arg(&mut vm, a)).collect();
+            let mut out = Vec::new();
+            let result = vm.call_named(entry, &values, &mut out);
+            if let (Err(_), Some(code)) = (&result, vm.wanted_type()) {
+                let code = code.to_string();
+                let t = type_of(&code)?;
+                types.insert(code, t);
+                continue;
+            }
+            self.uniques.set(vm.uniques());
+            if !out.is_empty() {
+                eprint!("{}", String::from_utf8_lossy(&out));
+            }
+            let v = result.map_err(|err| {
+                let at = if err.func.starts_with("comptime.") { String::new() } else { format!(" in `{}`", err.func) };
+                Error::new(pos, format!("compile-time evaluation failed{at}: {}", err.msg))
+            })?;
+            return self.to_const(pos, v, ty, &vm);
+        }
+    }
+
+    /// Gets function `entry` ready to run on the VM: `funcs` are functions made
+    /// for this run, and everything they call is looked up and compiled. Fails
+    /// if any of it cannot run while compiling.
+    pub(crate) fn prepare(
+        &self,
+        pos: Pos,
+        mut funcs: Vec<jihoo_ir::Function>,
+        entry: &str,
+    ) -> Result<(Rc<jihoo_ir::Module>, Rc<Program>), Error> {
         // Only what no earlier run needed: everything a function in the
         // compile-time module calls is in it already. Nothing is added unless
         // all of it can be, so that stays true when a callee has errors.
@@ -178,55 +217,11 @@ impl Env<'_> {
         }
 
         self.comptime.borrow_mut().add(funcs);
-        let (module, program) = {
-            let ct = self.comptime.borrow();
-            (ct.module.clone(), ct.program.clone())
-        };
-        fn arg(vm: &mut Vm, a: &ConstValue) -> Value {
-            match a {
-                ConstValue::Unit => Value::Unit,
-                ConstValue::Int(n) => Value::Int(*n),
-                ConstValue::Float(x) => Value::Float(*x),
-                ConstValue::Bool(b) => Value::Bool(*b),
-                ConstValue::Str(s) => vm.alloc_string(s),
-                // The rest of a macro's code arguments, as a list.
-                ConstValue::Agg(items) => {
-                    let items = items.iter().map(|x| arg(vm, x)).collect();
-                    vm.alloc_list(items)
-                }
-                ConstValue::Func(_) => unreachable!("macro arguments are code, numbers, bools or str"),
-            }
-        }
-        let uniques = self.uniques.get();
-        let mut types = HashMap::new();
-        loop {
-            let mut vm = Vm::with_program(&module, program.clone())
-                .with_fuel(FUEL)
-                .with_uniques(uniques)
-                .with_input(jihoo_vm::Input::Closed)
-                .with_code_types(types.clone());
-            let values: Vec<Value> = args.iter().map(|a| arg(&mut vm, a)).collect();
-            let mut out = Vec::new();
-            let result = vm.call_named(entry, &values, &mut out);
-            if let (Err(_), Some(code)) = (&result, vm.wanted_type()) {
-                let code = code.to_string();
-                let t = type_of(&code)?;
-                types.insert(code, t);
-                continue;
-            }
-            self.uniques.set(vm.uniques());
-            if !out.is_empty() {
-                eprint!("{}", String::from_utf8_lossy(&out));
-            }
-            let v = result.map_err(|err| {
-                let at = if err.func.starts_with("comptime.") { String::new() } else { format!(" in `{}`", err.func) };
-                Error::new(pos, format!("compile-time evaluation failed{at}: {}", err.msg))
-            })?;
-            return self.to_const(pos, v, ty, &vm);
-        }
+        let ct = self.comptime.borrow();
+        Ok((ct.module.clone(), ct.program.clone()))
     }
 
-    fn to_const(&self, pos: Pos, v: Value, ty: &Type, vm: &Vm) -> Result<ConstValue, Error> {
+    pub(crate) fn to_const(&self, pos: Pos, v: Value, ty: &Type, vm: &Vm) -> Result<ConstValue, Error> {
         let heap = vm.heap();
         Ok(match (v, ty) {
             (Value::Unit, Type::Unit) => ConstValue::Unit,
@@ -285,6 +280,24 @@ impl Env<'_> {
             }
             (v, ty) => unreachable!("VM produced {v:?} for {ty}"),
         })
+    }
+}
+
+/// `a` on `vm`'s heap, to pass as an argument: a macro's code arguments,
+/// numbers, bools and `str`, and the values contracts are tried with.
+pub(crate) fn arg(vm: &mut Vm, a: &ConstValue) -> Value {
+    match a {
+        ConstValue::Unit => Value::Unit,
+        ConstValue::Int(n) => Value::Int(*n),
+        ConstValue::Float(x) => Value::Float(*x),
+        ConstValue::Bool(b) => Value::Bool(*b),
+        ConstValue::Str(s) => vm.alloc_string(s),
+        // Structs, arrays, lists, enums and refs are all aggregates.
+        ConstValue::Agg(items) => {
+            let items = items.iter().map(|x| arg(vm, x)).collect();
+            vm.alloc_list(items)
+        }
+        ConstValue::Func(_) => unreachable!("arguments are never functions"),
     }
 }
 

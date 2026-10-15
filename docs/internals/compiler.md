@@ -35,6 +35,29 @@ copy them once, not a thousand times. A run adds nothing unless everything it
 calls compiles, so every function in that module has all its callees there. Since this runs on the VM, it works for freestanding programs
 too, but cannot use pointers, `syscall`, `asm` or C functions.
 
+## Contracts
+
+`crates/jihoo-sema/src/contracts.rs` lowers `requires` and `ensures`
+([Contracts](../language/contracts.md)): `requires` checks at the start of the
+body, after the entry block's hoisted constants, so a call of itself that
+became a jump checks them again; and one exit block that every `return` of a
+function with `ensures` jumps to, which checks those clauses against `result`
+and copies of the parameters made at the start. A false clause calls a function
+of its own, `f.requires.0` or `f.ensures.1`, whose body is `trap`, so JIR and
+the backends see nothing new, and the VM's error names the clause.
+
+`crates/jihoo-sema/src/refute.rs` then tries to break every contract, once the
+whole program is lowered without errors (earlier, a recursive function would
+still be in progress). For each function with a contract whose parameter types
+it can make up, it lowers a helper `f.pre` that evaluates the `requires`
+clauses, gets `f` and its callees ready like a compile-time run, and calls them
+on the VM with made-up inputs: special values first, then seeded random ones.
+When a call fails, the VM's call stack (`Vm::trace`) says how: an innermost
+frame `f.ensures.N` holds the value returned, `g.requires.N` sits on the frame
+of the call of `g` that broke it, and anything else is a trap. Errors that say
+the code cannot run on the VM (pointers, `syscall`) make it give up on the
+function. The failing input is shrunk while the failure stays the same.
+
 ## Generics
 
 `crates/jihoo-sema/src/generic.rs` makes one instance of a generic function per

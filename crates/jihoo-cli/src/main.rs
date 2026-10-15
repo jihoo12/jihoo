@@ -316,7 +316,7 @@ fn run_compiled(m: &Module, opts: &Opts) -> Result<ExitCode, String> {
     // Killed by a signal: say so, and exit as a shell would report it.
     let sig = status.signal().unwrap_or(0);
     let what = match sig {
-        4 | 5 => " (a trap: `trap()`, a failed bounds or overflow check, or `unreachable`)",
+        4 | 5 => " (a trap: `trap()`, a failed bounds or overflow check, a broken contract, or `unreachable`)",
         6 => " (aborted)",
         11 => " (segmentation fault)",
         _ => "",

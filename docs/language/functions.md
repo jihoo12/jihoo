@@ -24,6 +24,10 @@ Functions are module-level items, declared in any order: a function can call
 one declared further down, and functions can be mutually recursive. They are
 private to their [module](modules.md) unless declared `pub fn`.
 
+Between the signature and the body, `requires` and `ensures` clauses can state
+a [contract](contracts.md), which the compiler tries to break while compiling
+and the program checks as it runs.
+
 There is no overloading, no default arguments, and no methods: functions that
 work on a type take it as a parameter, usually first (`push(v, x)`; for a
 struct to be changed, `push(&v, x)` in compiled code).
@@ -81,7 +85,9 @@ happen. It holds anywhere in the function: in either branch of an `if`, in a
 parameters or handed over to the callee, and natively whatever else the round made is freed before the
 jump or tail call, so a tail call that would have had to free something after
 returning is one all the same. Calls of C functions and of function values
-(`return f(x)` with `f` a parameter) are ordinary calls.
+(`return f(x)` with `f` a parameter) are ordinary calls, and so is every
+`return g(...)` in a function with an `ensures` clause, which has to check
+what `g` returned ([Contracts](contracts.md#tail-calls)).
 
 ## Entry points
 

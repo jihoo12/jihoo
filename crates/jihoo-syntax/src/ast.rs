@@ -159,7 +159,39 @@ pub struct FnDecl {
     pub name: String,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
+    /// `requires` and `ensures` clauses, in the order written.
+    pub contracts: Vec<Contract>,
     pub body: Block,
+}
+
+/// Whether a contract clause is a `requires` or an `ensures`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractKind {
+    /// Holds when the function is called; the caller's duty.
+    Requires,
+    /// Holds when the function returns, with `result` the value returned; the
+    /// function's duty.
+    Ensures,
+}
+
+impl ContractKind {
+    pub fn word(self) -> &'static str {
+        match self {
+            ContractKind::Requires => "requires",
+            ContractKind::Ensures => "ensures",
+        }
+    }
+}
+
+/// `requires cond` or `ensures cond` between a function's signature and its
+/// body, with the condition's source text for messages.
+#[derive(Debug, Clone)]
+pub struct Contract {
+    /// Where the `requires` or `ensures` is.
+    pub pos: Pos,
+    pub kind: ContractKind,
+    pub cond: Expr,
+    pub text: String,
 }
 
 impl FnDecl {
@@ -838,6 +870,10 @@ pub fn set_program_pos(p: &mut Program, pos: Pos) {
         if let Some(t) = &mut f.ret {
             set_type_pos(t, pos);
         }
+        f.contracts.iter_mut().for_each(|c| {
+            c.pos = pos;
+            set_pos(&mut c.cond, pos);
+        });
         set_block_pos(&mut f.body, pos);
     }
     for m in &mut p.macro_calls {
@@ -1132,6 +1168,7 @@ pub fn names_in_program(p: &mut Program, f: &mut dyn FnMut(&mut String, NameRole
         if let Some(t) = &mut func.ret {
             names_in_type(t, f);
         }
+        func.contracts.iter_mut().for_each(|c| names_in_expr(&mut c.cond, f));
         names_in_block(&mut func.body, f);
     }
     for m in &mut p.macro_calls {

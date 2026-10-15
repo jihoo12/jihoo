@@ -6,6 +6,7 @@ otherwise run or expand forever, with an error that says which limit was hit.
 | limit | value | what happens |
 |-------|-------|--------------|
 | compile-time evaluation | 100 million VM steps per evaluation | `evaluation did not finish (step limit reached)` |
+| [contracts](../language/contracts.md) tried while compiling | 1000 inputs per function, each up to 100 000 VM steps, 20 million steps in all | not an error: inputs that need more are skipped, and the clauses are still checked at run time |
 | macro expansion depth | 64 nested expansions | `macro expansion is too deep`; does the macro expand to itself? |
 | item macro rounds | 16 | `item macros still produce item macros after 16 rounds` |
 | generic instances | 1000 instances of generic functions | `too many instances of generic functions`; does one instantiate itself forever? |
@@ -21,7 +22,8 @@ last collection, and not below 1 MiB ([VM and GC](../internals/vm.md#gc)). There
 is no fixed heap limit.
 
 The limits are constants in the source: `FUEL` in
-`crates/jihoo-sema/src/comptime.rs`, `MAX_DEPTH` in
+`crates/jihoo-sema/src/comptime.rs`, `CASES`, `CASE_FUEL` and `BUDGET` in
+`crates/jihoo-sema/src/refute.rs`, `MAX_DEPTH` in
 `crates/jihoo-sema/src/macros.rs`, `MAX_ITEM_ROUNDS` in
 `crates/jihoo-sema/src/lib.rs`, `MAX_INSTANCES` in
 `crates/jihoo-sema/src/generic.rs`, `MAX_NESTING` in

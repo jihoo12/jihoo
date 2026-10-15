@@ -1169,6 +1169,34 @@ impl<'p> Env<'p> {
         )
     }
 
+    /// The declaration that function `name` (a plain function or a generic
+    /// instance) was compiled from, and its comptime parameters.
+    pub(crate) fn decl_of(&self, name: &str) -> Option<(&'p FnDecl, Rc<Bindings>)> {
+        if let Some(key) = self.instance_keys.borrow().get(name) {
+            let inst = &self.instances.borrow()[key];
+            return Some((self.fn_decls[inst.fn_name.as_str()].1, inst.bindings.clone()));
+        }
+        let &(m, decl) = self.fn_decls.get(name)?;
+        Some((decl, self.root(m).clone()))
+    }
+
+    /// Whether a function of `module` may be given any value of struct
+    /// `name`: a tuple, a struct whose fields are all public, or one declared
+    /// in `module` when only that module can call the function (`!public`);
+    /// other callers only have the values that module's functions make.
+    pub(crate) fn buildable_from(&self, name: &str, module: usize, public: bool) -> bool {
+        if self.tuple_named(name).is_some() {
+            return true;
+        }
+        if self.path_named(name).is_some() {
+            return false;
+        }
+        match self.struct_decl(Pos::default(), name) {
+            Ok((decl, bindings)) => (bindings.module == module && !public) || decl.fields.iter().all(|f| f.is_pub),
+            Err(_) => false,
+        }
+    }
+
     /// The type and value of constant `name`, or `None` if there is no such constant.
     pub fn constant(&self, name: &str) -> Option<Result<Rc<(Type, ConstValue)>, Error>> {
         let (cm, decl) = *self.const_decls.get(name)?;

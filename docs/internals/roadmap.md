@@ -126,6 +126,13 @@
     part out and back. Paths are compared step by step; elements at
     different index registers, or an index written in between, count as the
     same element, so the part is copied.
+36. Contracts ([Contracts](../language/contracts.md)): `requires` and
+    `ensures` clauses on functions, checked at run time in every profile,
+    and **tried while compiling**: each function with a contract runs on the
+    VM with special and seeded random inputs, and the smallest input that
+    makes an `ensures` false, breaks a callee's `requires` or traps is a
+    compile error that shows the call. JIR is unchanged: a false clause
+    calls a function named after it that traps.
 
 ## Next
 
@@ -141,6 +148,10 @@
   the same stages written out as a loop.
 - **Traits** ([design](traits.md)): dynamic dispatch, when a program needs
   it.
+- **Contracts:** clauses on trait functions, which every impl would keep;
+  invariants of a module's structs, so that `pub` functions taking them can
+  be tried; `old(e)` for the value of an expression at the start; and
+  telling apart runtime contract failures from other traps natively.
 - **Memory:** taking an enum's payload out of a value that is used again
   (`take` covers fields and elements; payloads move only out of values
   that are only taken apart).

@@ -1,0 +1,77 @@
+// Contracts: `requires` says what a function needs, `ensures` what it
+// promises, with `result` the value it returns. While compiling, the compiler
+// calls each such function on the VM with about a thousand inputs it makes up
+// (0, -1, the largest integers, "", [], NaN, then random ones) and fails the
+// build with the smallest input that breaks a promise. Change `mid` below to
+// `return (lo + hi) / 2` and the build stops with:
+//
+//   contract broken: mid(1, 2147483647) returns -1073741824,
+//   so `ensures lo <= result && result <= hi` is false
+//
+// The clauses are also checked as the program runs, in every profile.
+//   jihoo run examples/contracts.jh
+
+// Halfway between two indices, without overflowing.
+fn mid(lo: i32, hi: i32) -> i32
+    requires 0 <= lo && lo <= hi
+    ensures lo <= result && result <= hi
+{
+    return lo + (hi - lo) / 2
+}
+
+fn is_sorted(xs: [i64]) -> bool {
+    for i in 1..len(xs) {
+        if xs[i - 1] > xs[i] { return false }
+    }
+    return true
+}
+
+// Where `x` is in the sorted list `xs`, or -1. Calling `mid` with arguments
+// that break its `requires` would be this function's fault, and the compiler
+// checks that too; so are bounds checks, which must never fail.
+fn search(xs: [i64], x: i64) -> i64
+    requires is_sorted(xs)
+    ensures result == -1 || xs[result] == x
+{
+    let lo: i32 = 0
+    let hi = len(xs) as i32
+    while lo < hi {
+        let m = mid(lo, hi - 1)
+        let y = xs[m as i64]
+        if y == x { return m as i64 }
+        if y < x { lo = m + 1 } else { hi = m }
+    }
+    return -1
+}
+
+// A recursive function with a contract: each call checks its own.
+fn gcd(a: u64, b: u64) -> u64
+    ensures (a == 0 && b == 0) || (result > 0 && a % result == 0 && b % result == 0)
+{
+    if b == 0 { return a }
+    return gcd(b, a % b)
+}
+
+enum Shape {
+    Square(i64)
+    Rect(i64, i64)
+}
+
+// Structs, tuples and enums are made up too, part by part.
+fn area(s: Shape) -> i64
+    requires match s { Square(n) => n >= 0 && n < 1000000, Rect(w, h) => w >= 0 && h >= 0 && w < 1000000 && h < 1000000 }
+    ensures result >= 0
+{
+    match s {
+        Square(n) => return n * n
+        Rect(w, h) => return w * h
+    }
+}
+
+fn main() {
+    let xs: [i64] = [2, 3, 5, 7, 11, 13]
+    print(search(xs, 7))             // 3
+    print(search(xs, 4))             // -1
+    print(gcd(84, 36))               // 12
+    print(area(Shape.Rect(3, 4)))    // 12
+}

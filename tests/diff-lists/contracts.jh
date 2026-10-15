@@ -1,0 +1,56 @@
+// Contracts on lists and strings: `ensures` reads the parameters as they were
+// called, which natively keeps them alive (or copies them) until the check.
+
+fn is_sorted(xs: [i64]) -> bool {
+    for i in 1..len(xs) {
+        if xs[i - 1] > xs[i] { return false }
+    }
+    return true
+}
+
+fn insert(xs: [i64], x: i64) -> [i64]
+    requires is_sorted(xs)
+    ensures is_sorted(result) && len(result) == len(xs) + 1
+{
+    push(xs, x)
+    let i = len(xs) - 1
+    while i > 0 && xs[i - 1] > xs[i] {
+        let t = xs[i]
+        xs[i] = xs[i - 1]
+        xs[i - 1] = t
+        i = i - 1
+    }
+    return xs
+}
+
+fn sorted(xs: [i64]) -> [i64]
+    ensures is_sorted(result) && len(result) == len(xs)
+{
+    let out: [i64] = []
+    for x in xs {
+        out = insert(out, x)
+    }
+    return out
+}
+
+fn repeat(s: str, n: i64) -> str
+    requires n >= 0 && n < 50
+    ensures len(result) == len(s) * n
+{
+    let out = ""
+    for i in 0..n {
+        out = out + s
+    }
+    return out
+}
+
+fn entry() -> i64 {
+    let xs = sorted([5, 3, 9, 1, 4])
+    for x in xs {
+        out(x)
+    }
+    let ys = insert(xs, 2)
+    out(len(xs) * 10 + len(ys))
+    out(len(repeat("ab", 7)))
+    return ys[1]
+}

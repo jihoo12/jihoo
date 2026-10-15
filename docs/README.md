@@ -43,6 +43,7 @@ same on GitHub.
 ### Compile time
 
 - [Compile-time evaluation](language/compile-time-evaluation.md)
+- [Contracts](language/contracts.md)
 - [Generics](language/generics.md)
 - [Traits](language/traits.md)
 - [Macros](language/macros.md)

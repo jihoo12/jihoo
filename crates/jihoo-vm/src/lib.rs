@@ -228,6 +228,11 @@ impl<'m> Vm<'m> {
         self
     }
 
+    /// The steps left of what `with_fuel` gave.
+    pub fn fuel(&self) -> Option<u64> {
+        self.fuel
+    }
+
     /// Allocates a string on this VM's heap, to pass as an argument. It stays
     /// alive until the VM is dropped.
     pub fn alloc_string(&mut self, s: &str) -> Value {
@@ -278,6 +283,17 @@ impl<'m> Vm<'m> {
     /// The name of the function a `Value::Func` refers to.
     pub fn func_name(&self, index: u32) -> &'m str {
         &self.module.funcs[index as usize].name
+    }
+
+    /// After a call failed: the calls that were running, outermost first, as
+    /// each one's function and the values its parameter registers hold.
+    pub fn trace(&self) -> Vec<(&'m str, Vec<Value>)> {
+        let module = self.module;
+        let frames = self.stack.iter().map(|f| {
+            let func = &module.funcs[f.func];
+            (func.name.as_str(), f.regs[..func.params.len()].to_vec())
+        });
+        frames.collect()
     }
 
     pub fn run_main(&mut self, out: &mut dyn Write) -> Result<i64, VmError> {

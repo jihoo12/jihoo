@@ -471,12 +471,37 @@ impl Parser {
         }
         self.expect(&Tok::RParen, "`)`")?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
+        let contracts = self.contracts()?;
+        if let (true, Some(c)) = (is_extern, contracts.first()) {
+            return Err(Error::new(c.pos, "a C function cannot have a contract; wrap it in a jihoo function that does"));
+        }
+        if let (true, false, Some(c)) = (body_optional, *self.peek() == Tok::LBrace, contracts.first()) {
+            return Err(Error::new(c.pos, "a trait function without a body cannot have a contract yet; put it on each impl"));
+        }
         if is_extern || (body_optional && *self.peek() != Tok::LBrace) {
             let body = Block { stmts: vec![], end: pos };
-            return Ok((FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, body }, false));
+            return Ok((FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, contracts, body }, false));
         }
         let body = self.block()?;
-        Ok((FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, body }, true))
+        Ok((FnDecl { pos, is_pub, is_macro, is_extern, variadic, is_export, name, params, ret, contracts, body }, true))
+    }
+
+    /// `requires cond` and `ensures cond` clauses after a signature. The words
+    /// are only special here, so they stay free as names everywhere else.
+    fn contracts(&mut self) -> PResult<Vec<Contract>> {
+        let mut out = Vec::new();
+        loop {
+            let kind = match self.peek() {
+                Tok::Ident(w) if w == "requires" => ContractKind::Requires,
+                Tok::Ident(w) if w == "ensures" => ContractKind::Ensures,
+                _ => return Ok(out),
+            };
+            let pos = self.bump().pos;
+            let start = self.cur().start;
+            let cond = self.cond()?;
+            let text = self.src[start..self.prev_end()].to_string();
+            out.push(Contract { pos, kind, cond, text });
+        }
     }
 
     /// `trait Name { fn f(a: Self) -> T ... }`, where a function may have a

@@ -16,6 +16,7 @@ mod asm;
 mod atomics;
 mod closures;
 mod comptime;
+mod contracts;
 mod enums;
 mod equality;
 mod env;
@@ -28,6 +29,7 @@ mod macros;
 mod paths;
 mod patterns;
 mod place;
+mod refute;
 mod tail_calls;
 mod tasks;
 mod traits;
@@ -245,6 +247,10 @@ pub fn analyze_modules_with(mods: &[Module], opts: Options) -> Result<ir::Module
         }
     }
     funcs.extend(env.lambdas());
+    // Running code with errors would only find them again.
+    if errors.is_empty() {
+        errors.extend(env.refute_contracts(&funcs));
+    }
 
     // The types sema makes (generic instances, tuples, paths) are part of the
     // program only when its code or its declared types reach them: compile-time
@@ -501,6 +507,8 @@ struct FnCx<'a> {
     loops: Vec<Loop>,
     /// The position the last `loc` gave, and its block, with `Env::locs`.
     last_loc: Option<(BlockId, Pos)>,
+    /// In a function with `ensures`, where `return` goes (`contracts.rs`).
+    exit: Option<contracts::Exit>,
 }
 
 #[derive(Clone, Copy)]
@@ -575,6 +583,7 @@ impl<'a> FnCx<'a> {
             closure_regs: HashMap::new(),
             loops: Vec::new(),
             last_loc: None,
+            exit: None,
         }
     }
 
@@ -613,7 +622,9 @@ impl<'a> FnCx<'a> {
             self.closure_regs.insert(name.to_string(), regs);
         }
 
+        self.contracts_start(f, name)?;
         self.block(&f.body)?;
+        self.contracts_end(f, name)?;
         let mut func = self.finish(name, sig.ret.clone(), f.body.end)?;
         func.export = f.is_export.then(|| f.name.clone());
         Ok(func)
@@ -1058,8 +1069,9 @@ impl<'a> FnCx<'a> {
                     Some(e) => {
                         let r = self.expr(e, Some(&ret))?;
                         self.expect(e.pos, r, &ret, "the return value")?;
-                        // `return g(...)`: a jump or a tail call, not a call.
-                        if self.tail_call(r) {
+                        // `return g(...)`: a jump or a tail call, not a call,
+                        // unless `ensures` has to look at the result.
+                        if self.exit.is_none() && self.tail_call(r) {
                             let dead = self.new_block();
                             self.switch_to(dead);
                             return Ok(());
@@ -1069,7 +1081,9 @@ impl<'a> FnCx<'a> {
                     None if ret == Type::Unit => self.unit(),
                     None => return Err(Error::new(*pos, format!("missing return value of type {ret}"))),
                 };
-                self.terminate(Terminator::Ret(r));
+                if !self.return_through_exit(r) {
+                    self.terminate(Terminator::Ret(r));
+                }
                 // Anything after this goes into an unreachable block.
                 let dead = self.new_block();
                 self.switch_to(dead);

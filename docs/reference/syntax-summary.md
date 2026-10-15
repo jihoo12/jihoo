@@ -10,9 +10,9 @@ newline. The [Syntax](../language/syntax.md) page explains the lexical rules.
 file       = attribute* item*
 attribute  = "#![" ("native" | "freestanding") "]"
 item       = "import" path ("as" NAME)?
-           | "pub"? "fn" NAME "(" params ")" ("->" type)? block
+           | "pub"? "fn" NAME "(" params ")" ("->" type)? contract* block
            | "pub"? "extern" "fn" NAME "(" params ("," "...")? ")" ("->" type)?
-           | "pub"? "export" "fn" NAME "(" params ")" ("->" type)? block
+           | "pub"? "export" "fn" NAME "(" params ")" ("->" type)? contract* block
            | "pub"? "struct" NAME ("(" params ")")? "{" ("pub"? NAME ":" type) sep* "}"
            | "pub"? "enum" NAME ("(" params ")")? "{" (NAME ("(" types ")")?) sep* "}"
            | "pub"? "const" NAME (":" type)? "=" expr
@@ -21,6 +21,7 @@ item       = "import" path ("as" NAME)?
            | "pub"? "macro" NAME "(" params ")" "->" ("expr" | "stmts" | "items") block
            | path "!" "(" exprs ")"                       ; an item macro
 params     = (("comptime")? NAME ":" type ("+" path)*),*   ; `+ path`: more traits
+contract   = ("requires" | "ensures") expr                 ; `ensures` may read `result`
 path       = NAME ("." NAME)*
 ```
 
@@ -118,3 +119,6 @@ else    enum    export  extern    false   fn        for     go
 if      import  let     macro     match   pub       quote   ref
 return  select  struct  true      while
 ```
+
+`requires`, `ensures` and `result` are only special in a function's
+[contract](../language/contracts.md); elsewhere they are names.

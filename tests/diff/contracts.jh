@@ -1,0 +1,82 @@
+// Contracts that hold: the compiler tried to break each one while compiling,
+// and every profile checks them again as the program runs.
+
+struct Span { lo: i64, hi: i64 }
+
+enum Shape {
+    Square(i64)
+    Rect(i64, i64)
+}
+
+fn mid(lo: i32, hi: i32) -> i32
+    requires 0 <= lo && lo <= hi
+    ensures lo <= result && result <= hi
+{
+    return lo + (hi - lo) / 2
+}
+
+fn clamp(x: i64, lo: i64, hi: i64) -> i64
+    requires lo <= hi
+    ensures lo <= result && result <= hi
+    ensures x < lo || x > hi || result == x
+{
+    if x < lo { return lo }
+    if x > hi { return hi }
+    return x
+}
+
+fn width(s: Span) -> i64
+    requires s.lo <= s.hi && s.hi - s.lo >= 0
+    ensures result >= 0
+{
+    return s.hi - s.lo
+}
+
+fn area(s: Shape) -> i64
+    requires match s { Square(n) => n >= 0 && n < 1000, Rect(w, h) => w >= 0 && h >= 0 && w < 1000 && h < 1000 }
+    ensures result >= 0
+{
+    match s {
+        Square(n) => return n * n
+        Rect(w, h) => return w * h
+    }
+}
+
+fn gcd(a: u32, b: u32) -> u32
+    ensures (a == 0 && b == 0) || (result > 0 && a % result == 0 && b % result == 0)
+{
+    if b == 0 { return a }
+    return gcd(b, a % b)
+}
+
+// A parameter changed by the body: `ensures` sees the value it was called with.
+fn steps(n: i64) -> i64
+    requires n >= 0 && n < 1000
+    ensures result == n
+{
+    let k = 0
+    while n > 0 {
+        n = n - 1
+        k = k + 1
+    }
+    return k
+}
+
+// `requires` alone keeps a call of itself a jump.
+fn count(n: i64, acc: i64) -> i64
+    requires n >= 0
+{
+    if n == 0 { return acc }
+    return count(n - 1, acc + 1)
+}
+
+fn entry() -> i64 {
+    out(mid(3, 10) as i64)
+    out(clamp(-5, 0, 9) + clamp(5, 0, 9) * 10 + clamp(50, 0, 9) * 100)
+    out(width(Span { lo: -3, hi: 4 }))
+    out(area(Shape.Square(7)) + area(Shape.Rect(2, 3)))
+    out(gcd(84, 36) as i64)
+    out(steps(12))
+    out(count(100000, 0))
+    return 7
+}
