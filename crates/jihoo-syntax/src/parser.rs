@@ -1002,6 +1002,12 @@ impl Parser {
             }
             _ if negative => return Err(self.unexpected("an integer")),
             Tok::True | Tok::False => PatternKind::Bool(self.bump().tok == Tok::True),
+            // `()` matches the unit value, which is the only one of its type.
+            Tok::LParen if self.toks[self.i + 1].tok == Tok::RParen => {
+                self.bump();
+                self.bump();
+                PatternKind::Wild
+            }
             Tok::LParen => PatternKind::Tuple(self.tuple_parts("a tuple pattern", |p| p.pattern())?),
             Tok::Ident(name) if name == "_" => {
                 self.bump();
@@ -1323,6 +1329,12 @@ impl Parser {
                 self.quote()?
             }
             Tok::Dollar => return self.hole(HoleKind::Expr),
+            // `()`: the unit value.
+            Tok::LParen if self.toks[self.i + 1].tok == Tok::RParen => {
+                self.bump();
+                self.bump();
+                ExprKind::Tuple(vec![])
+            }
             Tok::LParen => {
                 let mut parts = self.with_struct_lit(true, |p| p.parenthesized(|p| p.expr()))?;
                 if parts.len() == 1 {

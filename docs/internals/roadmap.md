@@ -164,6 +164,14 @@
     error numbers on the VM too, and `lib/files.jh` over them; `parse_f64`
     and `strings.parse_float`, correctly rounded everywhere (Rust's parser on
     the VM, `strtod` natively, after the same check of the syntax).
+41. A real program, `examples/json.jh` (a small `jq`), and what it showed
+    about native memory: each arm of a `match` now takes apart the value it
+    matches, so `Done(v, rest)` moves its parts out instead of copying them;
+    a part read stays a view while another part of the same value changes
+    in place (`let t = s.text` as `s.at += 1`); and a variable replaced by a
+    value made from its old one (`v = items[k]` with `items` part of `v`)
+    frees the old one, which leaked before. Parsing a 0.9 MB document went
+    from 19 s, quadratic, to 0.03 s natively (the VM takes 0.8 s).
 
 ## Next
 

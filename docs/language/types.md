@@ -31,7 +31,9 @@ fn area(w: i64, h: i64) -> i64 {   // signatures are written out
 | `chan T` | a channel between tasks | hosted | [Tasks and channels](tasks-and-channels.md) |
 | `type`, `expr`, `stmts`, `items` | types and code, at compile time | all | [Generics](generics.md), [Macros](macros.md) |
 
-A function without `-> T` returns `unit`. Types of other modules are written
+A function without `-> T` returns `unit`, whose one value is written `()`,
+so a `Result(unit, str)` is `Result.Ok(())` when it worked (and the pattern
+`Ok(())` matches it). Types of other modules are written
 `alias.Name` ([Modules](modules.md)).
 
 ## Integers

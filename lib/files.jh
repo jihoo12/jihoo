@@ -8,8 +8,8 @@
 //       Err(msg) => files.eprint(msg)    // notes.txt: No such file or directory
 //   }
 //   match files.write("out.txt", "hello\n") {
-//       Some(msg) => files.eprint(msg)
-//       None => {}                         // written
+//       Ok(()) => {}                       // written
+//       Err(msg) => files.eprint(msg)
 //   }
 
 // Error numbers of Linux (the same on x86_64 and aarch64), which the
@@ -39,15 +39,15 @@ pub fn read(path: str) -> Result(str, str) {
     return Result.Ok(text)
 }
 
-// Makes the file at `path` hold `text`, creating it if it is missing; gives
-// why it could not, or `None`.
-pub fn write(path: str, text: str) -> Option(str) {
+// Makes the file at `path` hold `text`, creating it if it is missing, or
+// says why it could not.
+pub fn write(path: str, text: str) -> Result(unit, str) {
     return failure(path, write_file(path, text))
 }
 
 // Adds `text` at the end of the file at `path`, creating it if it is
-// missing; gives why it could not, or `None`.
-pub fn append(path: str, text: str) -> Option(str) {
+// missing, or says why it could not.
+pub fn append(path: str, text: str) -> Result(unit, str) {
     return failure(path, append_file(path, text))
 }
 
@@ -111,9 +111,9 @@ pub fn error_text(err: i64) -> str {
     return "error " + to_str(err)
 }
 
-fn failure(path: str, err: i64) -> Option(str) {
+fn failure(path: str, err: i64) -> Result(unit, str) {
     if err != 0 {
-        return Option.Some(message(path, err))
+        return Result.Err(message(path, err))
     }
-    return Option.None
+    return Result.Ok(())
 }

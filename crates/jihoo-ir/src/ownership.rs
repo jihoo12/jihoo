@@ -16,18 +16,20 @@
 //!   `payload`) gives a *view*: the backend copies the header only, so the view
 //!   shares the elements with the value it was read from, its *root*. A view is
 //!   kept as one when nothing can tell: the view itself is never changed, and
-//!   its root is not changed while the view is still used (liveness counts a
-//!   use of a view as a use of its root, so the root is not freed or moved
-//!   away before the view's last use either). Otherwise a `clone` right after
-//!   the read makes it a value of its own. So `len(g.nodes)` copies nothing.
+//!   its root is not changed while the view is still used, except in place at
+//!   a part disjoint from the view's (liveness counts a use of a view as a use
+//!   of its root, so the root is not freed or moved away before the view's
+//!   last use either). Otherwise a `clone` right after the read makes it a
+//!   value of its own. So `len(g.nodes)` copies nothing, and neither does
+//!   `let t = s.text` while `s.at` changes.
 //!   A `copy` of a value that is still used afterwards, or of a parameter,
 //!   is a view on the same terms, so the copy of a list that a `for` loop
 //!   walks costs nothing unless the body changes the list.
 //! - A value that is only *taken apart* (see [`takes`]): its owning parts read
-//!   out once each, in one block, where the value dies, gives the parts away:
-//!   they move out, and only the parts left are freed. So taking `(it, x)` out
-//!   of `Some((it, x))`, as a `for` loop over an iterator does each round,
-//!   copies nothing.
+//!   out once each, in a block where the value dies, gives the parts away:
+//!   they move out, and only the parts left are freed. Each arm of a `match`
+//!   takes apart what it matches. So taking `(it, x)` out of `Some((it, x))`,
+//!   as a `for` loop over an iterator does each round, copies nothing.
 //! - A part read out of a value that is used again (a field, an element, or
 //!   a path of them) is *taken* (`take`, see [`field_takes`]) when the read
 //!   would otherwise be copied and the part is not read again before it, or
@@ -689,6 +691,12 @@ fn projection(inst: &Inst) -> Option<(Reg, Reg)> {
 
 /// Which owning registers can stay views, and the root of each. `borrowed`
 /// registers (parameters) are never written, so they are roots that stay.
+///
+/// Changing the root in place does not end a view of a part the change
+/// cannot touch: `let t = s.text` stays a view while `s.at += 1`, since
+/// fields are disjoint whatever elements the paths pass through. So each
+/// view also knows its path from the root, where it has one (not through a
+/// payload or a ref).
 fn views(f: &Function, tracked: &HashSet<Reg>, moves: &HashSet<(usize, Reg, Reg)>) -> HashMap<Reg, Reg> {
     // Only a register written once, by a part read or a copy, and never
     // changed in place, can be a view. A part read starts one; so does a copy
@@ -700,6 +708,9 @@ fn views(f: &Function, tracked: &HashSet<Reg>, moves: &HashSet<(usize, Reg, Reg)
     let mut writes: HashMap<Reg, usize> = HashMap::new();
     let mut changed = HashSet::new();
     let mut source: HashMap<Reg, (Reg, bool)> = HashMap::new();
+    // The path of the part each part read reads, if it is one of fields and
+    // elements.
+    let mut step: HashMap<Reg, Option<Vec<PathStep>>> = HashMap::new();
     for (b, block) in f.blocks.iter().enumerate() {
         let mut live = live_out(f, b, &base);
         step_term(&block.term, &mut live, tracked, &HashMap::new());
@@ -713,10 +724,12 @@ fn views(f: &Function, tracked: &HashSet<Reg>, moves: &HashSet<(usize, Reg, Reg)
             if let Some((dst, src)) = projection(inst) {
                 if !moves.contains(&(b, dst, src)) {
                     source.insert(dst, (src, true));
+                    step.insert(dst, part_path(inst).map(|(_, _, p)| p));
                 }
             } else if let Inst::Copy { dst, src } = inst {
                 if dst != src {
                     source.insert(*dst, (*src, src.0 < params || live.contains(src)));
+                    step.insert(*dst, Some(vec![]));
                 }
             }
             step_back(inst, &mut live, tracked, &HashMap::new());
@@ -743,14 +756,23 @@ fn views(f: &Function, tracked: &HashSet<Reg>, moves: &HashSet<(usize, Reg, Reg)
             is_view.extend(more);
         }
         let mut roots = HashMap::new();
+        let mut paths: HashMap<Reg, Option<Vec<PathStep>>> = HashMap::new();
         for &d in &is_view {
             let mut r = source[&d].0;
+            // Outside in, as the reads go from the root.
+            let mut path = step[&d].clone();
             while is_view.contains(&r) {
+                path = match (&step[&r], path) {
+                    (Some(outer), Some(inner)) => Some(outer.iter().chain(&inner).copied().collect()),
+                    _ => None,
+                };
                 r = source[&r].0;
             }
             roots.insert(d, r);
+            paths.insert(d, path);
         }
-        // A view whose root is written while the view is live must be a copy.
+        // A view whose root is written while the view is live must be a copy,
+        // unless the root is changed in place at a part disjoint from it.
         let live_in = liveness(f, tracked, &roots);
         let mut conflicts = HashSet::new();
         for b in 0..f.blocks.len() {
@@ -758,8 +780,13 @@ fn views(f: &Function, tracked: &HashSet<Reg>, moves: &HashSet<(usize, Reg, Reg)
             step_term(&f.blocks[b].term, &mut live, tracked, &roots);
             for inst in f.blocks[b].insts.iter().rev() {
                 for w in defined(inst) {
+                    let changed = changed_part(inst, w);
                     for (v, root) in &roots {
-                        if *root == w && live.contains(v) && !defined(inst).contains(v) {
+                        let apart = match (&changed, &paths[v]) {
+                            (Some(c), Some(p)) => overlap(p, c) == Overlap::Disjoint,
+                            _ => false,
+                        };
+                        if *root == w && live.contains(v) && !defined(inst).contains(v) && !apart {
                             conflicts.insert(*v);
                         }
                     }
@@ -771,6 +798,25 @@ fn views(f: &Function, tracked: &HashSet<Reg>, moves: &HashSet<(usize, Reg, Reg)
             return roots;
         }
         excluded.extend(conflicts);
+    }
+}
+
+/// The part of `r` that `inst` changes in place, keeping the rest: a field,
+/// an element or a path of them that it writes, takes, or pushes onto or pops
+/// from.
+fn changed_part(inst: &Inst, r: Reg) -> Option<Vec<PathStep>> {
+    match inst {
+        Inst::SetField { dst, src, index, value } if *dst == r && *src == r && *value != r => {
+            Some(vec![PathStep::Field(*index)])
+        }
+        Inst::SetElem { dst, src, index, value } if *dst == r && *src == r && *value != r => {
+            Some(vec![PathStep::Elem(*index)])
+        }
+        Inst::SetPath { dst, src, path, value } if *dst == r && *src == r && *value != r => Some(path.clone()),
+        Inst::Push { root, path, value } if *root == r && *value != r => Some(path.clone()),
+        Inst::Pop { root, path, dst } if *root == r && *dst != r => Some(path.clone()),
+        Inst::Take { src, path, dst } if *src == r && *dst != r => Some(path.clone()),
+        _ => None,
     }
 }
 
@@ -1027,10 +1073,11 @@ struct Takes {
 /// The values of `f` that are only taken apart: values of the function's own
 /// (parameters only among `owned_params`, and nothing read out of or copied
 /// from another value, unless taken apart from it in turn) that nothing uses
-/// but `tag` and part reads, with the part reads in one block, each owning
-/// part read once, and the value dead after the last of them. Their owning
-/// parts can then move out: nothing can read the value again, so nothing can
-/// tell.
+/// but `tag` and part reads. In each block that reads parts of one, they are
+/// parts of one variant, each owning part is read once, and the value is dead
+/// after the last of them; so the arms of a `match` each take apart what they
+/// match. Their owning parts can then move out: nothing can read the value
+/// again, so nothing can tell.
 fn takes(f: &Function, tracked: &HashSet<Reg>, owning: &mut Owning, owned_params: &HashSet<Reg>) -> Takes {
     let params = f.params.len() as u32;
     let base = liveness(f, tracked, &HashMap::new());
@@ -1063,48 +1110,58 @@ fn takes(f: &Function, tracked: &HashSet<Reg>, owning: &mut Owning, owned_params
     }
     let inst = |(b, i): (usize, usize)| &f.blocks[b].insts[i];
 
-    // The values whose uses allow it, with the block they are taken apart in.
-    let mut candidates: HashMap<Reg, usize> = HashMap::new();
+    // The values whose uses allow it, with the blocks they are taken apart in.
+    let mut candidates: HashMap<Reg, Vec<usize>> = HashMap::new();
     'values: for (&r, uses) in &used {
         if (r.0 < params && !owned_params.contains(&r)) || in_term.contains(&r) {
             continue;
         }
-        let mut block = None;
-        let mut owning_parts = HashSet::new();
-        let mut variant = None;
-        let mut reads = HashSet::new();
+        // Per block: the variant read, the owning parts read, the reads.
+        #[derive(Default)]
+        struct InBlock {
+            variant: Option<u32>,
+            owning_parts: HashSet<Part>,
+            reads: HashSet<Reg>,
+        }
+        let mut blocks: HashMap<usize, InBlock> = HashMap::new();
         for &at in uses {
             let read = match (inst(at), part_read(inst(at))) {
                 (Inst::Tag { .. }, _) => continue,
                 (_, Some((dst, src, part))) if src == r && dst != r => (dst, part),
                 _ => continue 'values,
             };
-            if block.is_some_and(|b| b != at.0) || !reads.insert((read.0, r)) {
+            let here = blocks.entry(at.0).or_default();
+            if !here.reads.insert(read.0) {
                 continue 'values;
             }
-            block = Some(at.0);
             if let Part::Payload { variant: v, .. } = read.1 {
-                if variant.is_some_and(|w| w != v) {
+                if here.variant.is_some_and(|w| w != v) {
                     continue 'values;
                 }
-                variant = Some(v);
+                here.variant = Some(v);
             }
-            if tracked.contains(&read.0) && !owning_parts.insert(read.1) {
+            if tracked.contains(&read.0) && !here.owning_parts.insert(read.1) {
                 continue 'values;
             }
         }
-        let Some(b) = block else { continue };
-        if owning_parts.is_empty() {
-            continue;
+        let mut taken_in = Vec::new();
+        for (&b, here) in &blocks {
+            if here.owning_parts.is_empty() {
+                continue;
+            }
+            // Dead after its last use in the block, and not written in between.
+            let positions: Vec<usize> = uses.iter().filter(|(ub, _)| *ub == b).map(|(_, i)| *i).collect();
+            let (first, last) = (*positions.iter().min().unwrap(), *positions.iter().max().unwrap());
+            let written = defs.get(&r).is_some_and(|ds| ds.iter().any(|&(db, i)| db == b && i > first && i <= last));
+            if live_after[b][last].contains(&r) || written {
+                continue 'values;
+            }
+            taken_in.push(b);
         }
-        // Dead after its last use in the block, and not written in between.
-        let positions: Vec<usize> = uses.iter().filter(|(ub, _)| *ub == b).map(|(_, i)| *i).collect();
-        let (first, last) = (*positions.iter().min().unwrap(), *positions.iter().max().unwrap());
-        let written = defs.get(&r).is_some_and(|ds| ds.iter().any(|&(db, i)| db == b && i > first && i <= last));
-        if live_after[b][last].contains(&r) || written {
-            continue;
+        if !taken_in.is_empty() {
+            taken_in.sort_unstable();
+            candidates.insert(r, taken_in);
         }
-        candidates.insert(r, b);
     }
     // Each of them must be a value of the function's own: made fresh, or taken
     // out of another value taken apart.
@@ -1115,7 +1172,7 @@ fn takes(f: &Function, tracked: &HashSet<Reg>, owning: &mut Owning, owned_params
                 && ds.iter().all(|&at| match inst(at) {
                     Inst::Copy { .. } | Inst::Load { .. } | Inst::Deref { .. } | Inst::Elem { .. } | Inst::GetPath { .. } => false,
                     i => match part_read(i) {
-                        Some((_, src, _)) => candidates.get(&src) == Some(&at.0),
+                        Some((_, src, _)) => candidates.get(&src).is_some_and(|bs| bs.contains(&at.0)),
                         None => true,
                     },
                 })
@@ -1130,7 +1187,7 @@ fn takes(f: &Function, tracked: &HashSet<Reg>, owning: &mut Owning, owned_params
     }
 
     let mut taken = Takes { moves: HashSet::new(), rest: HashMap::new() };
-    for (&r, &b) in &candidates {
+    for (&r, &b) in candidates.iter().flat_map(|(r, bs)| bs.iter().map(move |b| (r, b))) {
         let mut parts = HashSet::new();
         let mut variant = None;
         let mut last = None;
@@ -1292,6 +1349,8 @@ fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
         for (mut inst, live_after) in block.insts.into_iter().zip(after) {
             let borrows = borrowed(&inst);
             let before = touched(&inst);
+            // The values it reads, through views too, before clones replace any.
+            let read: HashSet<Reg> = uses(&inst).iter().flat_map(|u| [*u].into_iter().chain(roots.get(u).copied())).collect();
             let mut moved = HashSet::new();
             let mut clones = Vec::new();
             // A call to a function that clones parameters on entry, with
@@ -1342,7 +1401,31 @@ fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
             dying.sort_by_key(|r| r.0);
             let dst = defined(&inst).first().copied();
             insts.extend(clones);
+            // A register written with a value made from its old one (`v =
+            // v.items[k]`, read through a view, or `xs = g(xs)` borrowing it)
+            // is live after, but its old value dies here: it moves to a
+            // register of its own first, which is freed after. (Not `%p =
+            // clone %p`, which makes a borrowed value or a view one's own.)
+            let mut replaced = None;
+            let keeps_old = matches!(inst, Inst::Clone { .. });
+            if let Some(d) = dst.filter(|&d| owned.contains(&d) && !moved.contains(&d) && !changes(&inst, d) && !keeps_old) {
+                let only_dst = defined(&inst) == [d] && inst.dst() == Some(d);
+                if read.contains(&d) && only_dst {
+                    let t = Reg(f.regs.len() as u32);
+                    f.regs.push(f.regs[d.0 as usize].clone());
+                    insts.push(Inst::Copy { dst: t, src: d });
+                    for r in inst.regs_mut().into_iter().skip(1) {
+                        if *r == d {
+                            *r = t;
+                        }
+                    }
+                    replaced = Some(t);
+                }
+            }
             insts.push(inst);
+            if let Some(t) = replaced {
+                insts.push(Inst::Drop { src: t });
+            }
             for src in dying {
                 // A value taken apart frees only the parts left in it.
                 match dst.and_then(|d| taken.rest.get(&(b, d, src))) {

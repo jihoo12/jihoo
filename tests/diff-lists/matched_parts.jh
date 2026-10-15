@@ -1,0 +1,104 @@
+// What the ownership pass moves instead of copying, natively, where the VM
+// shares: the payloads each arm of a `match` takes out of a value that dies
+// there; a part read while the value it is part of changes elsewhere; and a
+// variable replaced by a part of itself, whose old value is freed. The
+// `nocopy` functions must copy nothing natively; everything must print the
+// same on the VM.
+
+enum Tree {
+    Leaf(i64)
+    Node([Tree])
+}
+
+enum Step(T: type) {
+    Got(T, Cursor)
+    Stuck(str)
+}
+
+struct Cursor {
+    text: str
+    at: i64
+}
+
+// Each arm takes its payloads out of the step it matches.
+fn word(c: Cursor) -> Step(str) nocopy {
+    let start = c.at
+    while c.at < len(c.text) && c.text[c.at] != 32 {
+        c.at += 1
+    }
+    if c.at == start {
+        return Step(str).Stuck("no word at " + to_str(start))
+    }
+    let w = c.text[start:c.at]
+    c.at += 1
+    return Step(str).Got(w, c)
+}
+
+fn words(c: Cursor) -> [str] nocopy {
+    let out: [str] = []
+    while c.at < len(c.text) {
+        match word(c) {
+            Got(w, rest) => {
+                push(out, w)
+                c = rest
+            }
+            Stuck(why) => {
+                push(out, why)
+                return out
+            }
+        }
+    }
+    return out
+}
+
+// `text` stays a view while `at`, another field, changes.
+fn spaces(c: Cursor) -> i64 nocopy {
+    let t = c.text
+    let n = 0
+    while c.at < len(t) {
+        if t[c.at] == 32 {
+            n += 1
+        }
+        c.at += 1
+    }
+    return n
+}
+
+fn total(t: Tree) -> i64 {
+    match t {
+        Leaf(x) => return x
+        Node(kids) => {
+            let s = 0
+            for k in kids {
+                s += total(k)
+            }
+            return s
+        }
+    }
+}
+
+// `t` is replaced by a part of itself each round: the rest of it is freed.
+fn walk(t: Tree, path: [i64]) -> i64 {
+    for i in path {
+        match t {
+            Node(kids) => t = kids[i]
+            Leaf(_) => return -1
+        }
+    }
+    return total(t)
+}
+
+fn entry() -> i64 {
+    let c = Cursor { text: "one two  three", at: 0 }
+    for w in words(c) {
+        out(len(w))
+    }
+    out(spaces(c))
+    let deep: [Tree] = [Tree.Leaf(4), Tree.Node([Tree.Leaf(5), Tree.Leaf(6)])]
+    let t = Tree.Node([Tree.Leaf(1), Tree.Node(deep), Tree.Leaf(9)])
+    out(walk(t, [1, 1, 0]))
+    out(walk(t, [1, 1]))
+    out(walk(t, [0, 0]))
+    out(total(t))
+    return 0
+}

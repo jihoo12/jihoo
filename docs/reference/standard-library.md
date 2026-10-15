@@ -228,11 +228,14 @@ fn main() -> i64 {
 | function | description |
 |----------|-------------|
 | `read(path) -> Result(str, str)` | the whole file, or why it cannot be read |
-| `write(path, text) -> Option(str)` | makes the file hold `text`, creating it if missing; why it could not, or `None` |
-| `append(path, text) -> Option(str)` | adds `text` at the end of the file, creating it if missing; why it could not, or `None` |
+| `write(path, text) -> Result(unit, str)` | makes the file hold `text`, creating it if missing, or says why it could not |
+| `append(path, text) -> Result(unit, str)` | adds `text` at the end of the file, creating it if missing, or says why it could not |
 | `eprint(text)` | writes `text` and a newline to standard error |
 | `message(path, err) -> str` | `path: ` and what error number `err` means |
 | `error_text(err) -> str` | what error number `err` means (`"Permission denied"`), or `"error N"` for one the module does not know |
+
+`examples/json.jh`, a small `jq`, puts `files`, `args()`, `strings` and
+`parse_float` together.
 
 The module also names the error numbers the builtins give most often:
 `ENOENT`, `EACCES`, `EISDIR`, `ENOTDIR`, `EEXIST`, `EINVAL`, `ENOSPC` and a

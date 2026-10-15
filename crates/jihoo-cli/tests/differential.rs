@@ -594,10 +594,10 @@ fn files_and_arguments_agree() {
     let program = r#"import files
 import strings
 
-fn show(what: str, err: Option(str)) {
-    match err {
-        Some(msg) => print(what + " failed: " + msg)
-        None => print(what + " worked")
+fn show(what: str, done: Result(unit, str)) {
+    match done {
+        Ok(()) => print(what + " worked")
+        Err(msg) => print(what + " failed: " + msg)
     }
 }
 
@@ -650,6 +650,75 @@ fn main() -> i64 {
     assert_eq!(outputs[0], (Some(3), expected.to_string()), "on the VM");
     if let Some(native) = outputs.get(1) {
         assert_eq!(native, &outputs[0], "natively");
+    }
+    std::fs::remove_dir_all(&work).unwrap();
+}
+
+/// `examples/json.jh`, a program that puts arguments, files, `parse_float`,
+/// recursive enums and `Result` together, does the same on the VM and
+/// natively: prints a document or a part of it, writes one with `-o`, and
+/// reports errors with the same messages and exit statuses.
+#[test]
+fn json_example_agrees() {
+    let work = common::work_dir("json");
+    let doc = work.join("doc.json");
+    std::fs::write(
+        &doc,
+        r#"{"users": [{"name": "Ann \"A\" \u00e9\ud83d\ude00", "age": 31, "score": 1.5e2, "tags": ["a"]},
+            {"name": "Bo\nb", "age": -0, "score": 0.1, "tags": [], "extra": {}}], "big": 1e400, "none": null}"#,
+    )
+    .unwrap();
+    std::fs::write(work.join("bad.json"), "{\"a\": [1, 2,, 3]}").unwrap();
+    let example = std::fs::read_to_string(repo_root().join("examples/json.jh")).unwrap();
+    let hosted = work.join("json_hosted.jh");
+    std::fs::write(&hosted, format!("#![hosted]\n{example}")).unwrap();
+    let mut programs = vec![hosted];
+    if common::compiled_enabled() {
+        programs.push(repo_root().join("examples/json.jh"));
+    }
+    let cases: [&[&str]; 7] = [
+        &["doc.json"],
+        &["doc.json", ".users[0].name"],
+        &["doc.json", ".users[-1]", "-o", "OUT"],
+        &["doc.json", ".users[2]"],
+        &["doc.json", ".big"],
+        &["bad.json"],
+        &["missing.json"],
+    ];
+    let mut results = Vec::new();
+    for (k, program) in programs.iter().enumerate() {
+        let mut runs = Vec::new();
+        for case in cases {
+            let out_file = work.join(format!("out{k}.json"));
+            // Files are in `work`; paths (`.x`) and `-o` are as written.
+            let args: Vec<String> = case
+                .iter()
+                .map(|a| match *a {
+                    "OUT" => out_file.display().to_string(),
+                    a if a.starts_with('.') || a.starts_with('-') => a.to_string(),
+                    a => work.join(a).display().to_string(),
+                })
+                .collect();
+            let out = Command::new(JIHOO).arg("run").arg(program).arg("--").args(&args).output().unwrap();
+            let written = std::fs::read_to_string(&out_file).unwrap_or_default();
+            let text = |b: &[u8]| String::from_utf8_lossy(b).replace(&work.display().to_string(), "WORK");
+            runs.push((out.status.code(), text(&out.stdout), text(&out.stderr), written));
+        }
+        results.push(runs);
+    }
+    let hosted = &results[0];
+    assert_eq!(hosted[0].0, Some(0));
+    assert!(hosted[0].1.contains("\"name\": \"Ann \\\"A\\\" \u{e9}\u{1f600}\""), "{}", hosted[0].1);
+    assert_eq!(hosted[1].1, "\"Ann \\\"A\\\" \u{e9}\u{1f600}\"\n");
+    assert_eq!(hosted[2].3, "{\n  \"name\": \"Bo\\nb\",\n  \"age\": 0,\n  \"score\": 0.1,\n  \"tags\": [],\n  \"extra\": {}\n}\n");
+    assert_eq!((hosted[3].0, hosted[3].2.as_str()), (Some(1), ".users[2]: out of range, the array has 2\n"));
+    assert_eq!(hosted[4].1, "1.7976931348623157e308\n");
+    assert_eq!((hosted[5].0, hosted[5].2.as_str()), (Some(1), "WORK/bad.json:1:13: expected a value\n"));
+    assert_eq!((hosted[6].0, hosted[6].2.as_str()), (Some(1), "WORK/missing.json: No such file or directory\n"));
+    if let Some(native) = results.get(1) {
+        for (k, (h, n)) in hosted.iter().zip(native).enumerate() {
+            assert_eq!(h, n, "case {k} ({:?}) differs natively", cases[k]);
+        }
     }
     std::fs::remove_dir_all(&work).unwrap();
 }

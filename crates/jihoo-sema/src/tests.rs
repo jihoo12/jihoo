@@ -2084,6 +2084,14 @@ fn builtin_names_can_be_taken() {
 }
 
 #[test]
+fn unit_values() {
+    check("fn f(ok: bool) -> Result(unit, str) {\n if ok { return Result.Ok(()) }\n return Result.Err(\"no\") }\n\
+           fn main() {\n match f(true) {\n Ok(()) => print(1)\n Err(m) => print(m)\n }\n}")
+    .unwrap();
+    assert!(err("fn main() { let t = ((), 1) }").contains("a part of a tuple must have a value"));
+}
+
+#[test]
 fn files_and_arguments() {
     check(
         "fn main() -> i64 {\n let a: [str] = args()\n let (text, err) = read_file(a[0])\n\

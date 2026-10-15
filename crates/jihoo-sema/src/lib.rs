@@ -1293,6 +1293,8 @@ impl<'a> FnCx<'a> {
                 self.struct_literal(e.pos, &name, inits)?
             }
             ExprKind::ArrayLit(items) => self.array_literal(e.pos, items, expected)?,
+            // `()` is the unit value.
+            ExprKind::Tuple(items) if items.is_empty() => self.unit(),
             ExprKind::Tuple(items) => self.tuple(items, expected)?,
             // `[v; n]` where a list is expected: `n` copies, `n` known when it runs.
             ExprKind::ArrayRepeat(value, n) if matches!(expected, Some(Type::List(_))) => {

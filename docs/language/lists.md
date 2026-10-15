@@ -103,7 +103,11 @@ frees it there; nothing is counted or collected while the program runs.
 - Assigning or passing a list that is not used again afterwards moves it: no
   copy. A copy is made only where the original is still used, as the
   meaning of the program requires.
-- Reading a part, as `len(g.nodes[i].edges)`, copies nothing.
+- Reading a part, as `len(g.nodes[i].edges)`, copies nothing, also while
+  another part of the same value changes (`let t = s.text` as `s.at += 1`).
+- A value matched and not used again gives its parts away: in `match
+  parse(s) { Done(v, rest) => ... }` each arm takes `v` and `rest` out of
+  the result instead of copying them.
 - A function that only reads a list parameter never copies it. One that
   changes it copies it once, as on the VM, unless the caller's list was at
   its last use: then the function takes it over, so `xs = f(xs)` changes

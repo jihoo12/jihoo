@@ -1,0 +1,662 @@
+// A small `jq`: reads a JSON file, and prints it indented, or the part a
+// path names. It puts the standard library together: arguments, files,
+// `strings.parse_float`, recursive enums, lists of pairs and `Result`.
+//   jihoo run examples/json.jh -- data.json
+//   jihoo run examples/json.jh -- data.json '.users[0].name'
+//   jihoo run examples/json.jh -- data.json '.users' -o users.json
+//
+// A path is a sequence of `.name` and `[index]` steps (`.` alone is the
+// whole document). Errors go to standard error, with the exit status 1 for
+// a file that cannot be read or parsed and 2 for a wrong command line.
+
+import files
+import strings
+
+enum Json {
+    Null
+    Bool(bool)
+    Num(f64)
+    Str(str)
+    Arr([Json])
+    // Members in the order the document gives them.
+    Obj([(str, Json)])
+}
+
+// ---- parsing ----
+
+// What is left to parse: the text and where in it.
+struct Input {
+    text: str
+    at: i64
+}
+
+// A value and the input after it, or what is wrong and where.
+enum Parsed(T: type) {
+    Done(T, Input)
+    Failed(str)
+}
+
+fn fail(comptime T: type, inp: Input, what: str) -> Parsed(T) {
+    // Line and column of the error, counted from 1.
+    let line = 1
+    let col = 1
+    for i in 0..inp.at {
+        if inp.text[i] == 10 {
+            line += 1
+            col = 1
+        } else {
+            col += 1
+        }
+    }
+    return Parsed(T).Failed(to_str(line) + ":" + to_str(col) + ": " + what)
+}
+
+fn skip_space(inp: Input) -> Input {
+    while inp.at < len(inp.text) && is_json_space(inp.text[inp.at]) {
+        inp.at += 1
+    }
+    return inp
+}
+
+fn is_json_space(b: u8) -> bool {
+    return b == 32 || b == 9 || b == 10 || b == 13
+}
+
+// The next byte, or 0 at the end.
+fn peek(inp: Input) -> u8 {
+    if inp.at < len(inp.text) {
+        return inp.text[inp.at]
+    }
+    return 0
+}
+
+fn parse(text: str) -> Result(Json, str) {
+    match value(Input { text: text, at: 0 }) {
+        Done(v, rest) => {
+            rest = skip_space(rest)
+            if rest.at < len(rest.text) {
+                match fail(Json, rest, "text after the value") {
+                    Failed(msg) => return Result.Err(msg)
+                    Done(_, _) => {}
+                }
+            }
+            return Result.Ok(v)
+        }
+        Failed(msg) => return Result.Err(msg)
+    }
+}
+
+fn value(inp: Input) -> Parsed(Json) {
+    inp = skip_space(inp)
+    let c = peek(inp)
+    if c == 123 {              // {
+        return object(inp)
+    }
+    if c == 91 {               // [
+        return array(inp)
+    }
+    if c == 34 {               // "
+        match string(inp) {
+            Done(s, rest) => return Parsed(Json).Done(Json.Str(s), rest)
+            Failed(msg) => return Parsed(Json).Failed(msg)
+        }
+    }
+    if c == 45 || strings.is_digit(c) {
+        return number(inp)
+    }
+    if word(inp, "true") {
+        inp.at += 4
+        return Parsed(Json).Done(Json.Bool(true), inp)
+    }
+    if word(inp, "false") {
+        inp.at += 5
+        return Parsed(Json).Done(Json.Bool(false), inp)
+    }
+    if word(inp, "null") {
+        inp.at += 4
+        return Parsed(Json).Done(Json.Null, inp)
+    }
+    if c == 0 {
+        return fail(Json, inp, "the text ends where a value should be")
+    }
+    return fail(Json, inp, "expected a value")
+}
+
+fn word(inp: Input, w: str) -> bool {
+    return inp.at + len(w) <= len(inp.text) && inp.text[inp.at:inp.at + len(w)] == w
+}
+
+// `-?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?`, which `parse_float` reads.
+fn number(inp: Input) -> Parsed(Json) {
+    let start = inp.at
+    let i = inp.at
+    let t = inp.text
+    if peek(inp) == 45 {
+        i += 1
+    }
+    let digits = run_of_digits(t, i)
+    if digits == 0 || (digits > 1 && t[i] == 48) {
+        inp.at = i
+        return fail(Json, inp, "a number needs digits, and no 0 in front of them")
+    }
+    i += digits
+    if i < len(t) && t[i] == 46 {       // .
+        let more = run_of_digits(t, i + 1)
+        if more == 0 {
+            inp.at = i + 1
+            return fail(Json, inp, "expected digits after the point")
+        }
+        i += 1 + more
+    }
+    if i < len(t) && (t[i] == 101 || t[i] == 69) {     // e E
+        i += 1
+        if i < len(t) && (t[i] == 43 || t[i] == 45) {
+            i += 1
+        }
+        let more = run_of_digits(t, i)
+        if more == 0 {
+            inp.at = i
+            return fail(Json, inp, "expected digits in the exponent")
+        }
+        i += more
+    }
+    match strings.parse_float(t[start:i]) {
+        Some(x) => {
+            inp.at = i
+            return Parsed(Json).Done(Json.Num(x), inp)
+        }
+        None => return fail(Json, inp, "not a number")
+    }
+}
+
+fn run_of_digits(t: str, from: i64) -> i64 {
+    let i = from
+    while i < len(t) && strings.is_digit(t[i]) {
+        i += 1
+    }
+    return i - from
+}
+
+// A string, after its opening quote; escapes are decoded into UTF-8.
+fn string(inp: Input) -> Parsed(str) {
+    inp.at += 1
+    let out: [u8] = []
+    while inp.at < len(inp.text) {
+        let c = inp.text[inp.at]
+        if c == 34 {
+            inp.at += 1
+            return Parsed(str).Done(from_bytes(out), inp)
+        }
+        if c < 32 {
+            return fail(str, inp, "a control character in a string; write it as an escape")
+        }
+        if c != 92 {
+            push(out, c)
+            inp.at += 1
+        } else {
+            if inp.at + 1 >= len(inp.text) {
+                break
+            }
+            let e = inp.text[inp.at + 1]
+            inp.at += 2
+            if e == 117 {       // \uXXXX, maybe a surrogate pair
+                match code_point(inp) {
+                    Done(cp, rest) => {
+                        inp = rest
+                        out = utf8(out, cp)
+                    }
+                    Failed(msg) => return Parsed(str).Failed(msg)
+                }
+            } else {
+                let b = unescape(e)
+                if b == 0 {
+                    inp.at -= 1
+                    return fail(str, inp, "unknown escape")
+                }
+                push(out, b)
+            }
+        }
+    }
+    return fail(str, inp, "the text ends inside a string")
+}
+
+// The byte an escape `\e` stands for, or 0 for no escape (`\u` aside).
+fn unescape(e: u8) -> u8 {
+    if e == 34 || e == 92 || e == 47 {
+        return e
+    }
+    if e == 98 {
+        return 8
+    }
+    if e == 102 {
+        return 12
+    }
+    if e == 110 {
+        return 10
+    }
+    if e == 114 {
+        return 13
+    }
+    if e == 116 {
+        return 9
+    }
+    return 0
+}
+
+// The character of a `\u` escape whose `\u` was read: four hex digits, and
+// for a high surrogate a second `\u` escape with the low one.
+fn code_point(inp: Input) -> Parsed(i64) {
+    let hi = hex4(inp)
+    if hi < 0 {
+        return fail(i64, inp, "expected four hex digits")
+    }
+    inp.at += 4
+    if hi < 0xd800 || hi > 0xdfff {
+        return Parsed(i64).Done(hi, inp)
+    }
+    if hi > 0xdbff || !word(inp, "\\u") {
+        return fail(i64, inp, "a lone surrogate")
+    }
+    inp.at += 2
+    let lo = hex4(inp)
+    if lo < 0xdc00 || lo > 0xdfff {
+        return fail(i64, inp, "a lone surrogate")
+    }
+    inp.at += 4
+    return Parsed(i64).Done(0x10000 + ((hi - 0xd800) << 10) + (lo - 0xdc00), inp)
+}
+
+// Four hex digits at the input as a number, or -1.
+fn hex4(inp: Input) -> i64 {
+    if inp.at + 4 > len(inp.text) {
+        return -1
+    }
+    let n = 0
+    for k in 0..4 {
+        let d = hex_digit(inp.text[inp.at + k])
+        if d < 0 {
+            return -1
+        }
+        n = n * 16 + d
+    }
+    return n
+}
+
+fn hex_digit(b: u8) -> i64 {
+    if strings.is_digit(b) {
+        return (b - 48) as i64
+    }
+    if b >= 97 && b <= 102 {
+        return (b - 87) as i64
+    }
+    if b >= 65 && b <= 70 {
+        return (b - 55) as i64
+    }
+    return -1
+}
+
+fn utf8(out: [u8], cp: i64) -> [u8] {
+    if cp < 0x80 {
+        push(out, cp as u8)
+    } else if cp < 0x800 {
+        push(out, (0xc0 | (cp >> 6)) as u8)
+        push(out, (0x80 | (cp & 0x3f)) as u8)
+    } else if cp < 0x10000 {
+        push(out, (0xe0 | (cp >> 12)) as u8)
+        push(out, (0x80 | ((cp >> 6) & 0x3f)) as u8)
+        push(out, (0x80 | (cp & 0x3f)) as u8)
+    } else {
+        push(out, (0xf0 | (cp >> 18)) as u8)
+        push(out, (0x80 | ((cp >> 12) & 0x3f)) as u8)
+        push(out, (0x80 | ((cp >> 6) & 0x3f)) as u8)
+        push(out, (0x80 | (cp & 0x3f)) as u8)
+    }
+    return out
+}
+
+fn array(inp: Input) -> Parsed(Json) {
+    inp.at += 1
+    let items: [Json] = []
+    inp = skip_space(inp)
+    if peek(inp) == 93 {
+        inp.at += 1
+        return Parsed(Json).Done(Json.Arr(items), inp)
+    }
+    while true {
+        match value(inp) {
+            Done(v, rest) => {
+                push(items, v)
+                inp = skip_space(rest)
+            }
+            Failed(msg) => return Parsed(Json).Failed(msg)
+        }
+        let c = peek(inp)
+        inp.at += 1
+        if c == 93 {
+            return Parsed(Json).Done(Json.Arr(items), inp)
+        }
+        if c != 44 {
+            inp.at -= 1
+            return fail(Json, inp, "expected `,` or `]`")
+        }
+    }
+    trap()
+}
+
+fn object(inp: Input) -> Parsed(Json) {
+    inp.at += 1
+    let members: [(str, Json)] = []
+    inp = skip_space(inp)
+    if peek(inp) == 125 {
+        inp.at += 1
+        return Parsed(Json).Done(Json.Obj(members), inp)
+    }
+    while true {
+        inp = skip_space(inp)
+        if peek(inp) != 34 {
+            return fail(Json, inp, "expected a member's name")
+        }
+        let name = ""
+        match string(inp) {
+            Done(s, rest) => {
+                name = s
+                inp = skip_space(rest)
+            }
+            Failed(msg) => return Parsed(Json).Failed(msg)
+        }
+        if peek(inp) != 58 {
+            return fail(Json, inp, "expected `:`")
+        }
+        inp.at += 1
+        match value(inp) {
+            Done(v, rest) => {
+                push(members, (name, v))
+                inp = skip_space(rest)
+            }
+            Failed(msg) => return Parsed(Json).Failed(msg)
+        }
+        let c = peek(inp)
+        inp.at += 1
+        if c == 125 {
+            return Parsed(Json).Done(Json.Obj(members), inp)
+        }
+        if c != 44 {
+            inp.at -= 1
+            return fail(Json, inp, "expected `,` or `}`")
+        }
+    }
+    trap()
+}
+
+// ---- printing ----
+
+// `v` as indented JSON, two spaces a level, as `jq` writes it.
+fn render(v: Json) -> str {
+    let out: [u8] = []
+    out = emit(out, v, 0)
+    push(out, 10)
+    return from_bytes(out)
+}
+
+fn emit(out: [u8], v: Json, depth: i64) -> [u8] {
+    match v {
+        Null => out = text(out, "null")
+        Bool(b) => out = text(out, to_str(b))
+        Num(x) => out = text(out, number_text(x))
+        Str(s) => out = quoted(out, s)
+        Arr(items) => {
+            if len(items) == 0 {
+                return text(out, "[]")
+            }
+            push(out, 91)
+            for i, item in items {
+                if i > 0 {
+                    push(out, 44)
+                }
+                out = indent(out, depth + 1)
+                out = emit(out, item, depth + 1)
+            }
+            out = indent(out, depth)
+            push(out, 93)
+        }
+        Obj(members) => {
+            if len(members) == 0 {
+                return text(out, "{}")
+            }
+            push(out, 123)
+            for i, m in members {
+                if i > 0 {
+                    push(out, 44)
+                }
+                out = indent(out, depth + 1)
+                out = quoted(out, m.0)
+                out = text(out, ": ")
+                out = emit(out, m.1, depth + 1)
+            }
+            out = indent(out, depth)
+            push(out, 125)
+        }
+    }
+    return out
+}
+
+// Integers as integers; other numbers as the shortest text that reads back.
+// JSON has no infinities: a number too large for an `f64` (`1e400`) is
+// written as the largest one, as `jq` does.
+fn number_text(x: f64) -> str {
+    if x == trunc(x) && abs(x) < 9007199254740992.0 {
+        return to_str(x as i64)
+    }
+    if abs(x) == 1.0 / 0.0 {
+        return to_str(copysign(1.7976931348623157e308, x))
+    }
+    return to_str(x)
+}
+
+fn text(out: [u8], s: str) -> [u8] {
+    for b in s {
+        push(out, b)
+    }
+    return out
+}
+
+fn indent(out: [u8], depth: i64) -> [u8] {
+    push(out, 10)
+    for i in 0..2 * depth {
+        push(out, 32)
+    }
+    return out
+}
+
+fn quoted(out: [u8], s: str) -> [u8] {
+    push(out, 34)
+    for b in s {
+        if b == 34 || b == 92 {
+            push(out, 92)
+            push(out, b)
+        } else if b == 10 {
+            out = text(out, "\\n")
+        } else if b == 9 {
+            out = text(out, "\\t")
+        } else if b == 13 {
+            out = text(out, "\\r")
+        } else if b < 32 {
+            out = text(out, "\\u00")
+            push(out, hex(b >> 4))
+            push(out, hex(b & 15))
+        } else {
+            push(out, b)
+        }
+    }
+    push(out, 34)
+    return out
+}
+
+fn hex(d: u8) -> u8 {
+    if d < 10 {
+        return 48 + d
+    }
+    return 87 + d
+}
+
+// ---- paths ----
+
+enum Step {
+    Name(str)
+    Index(i64)
+}
+
+fn parse_path(p: str) -> Result([Step], str) {
+    let steps: [Step] = []
+    if p == "." {
+        return Result.Ok(steps)
+    }
+    let i = 0
+    while i < len(p) {
+        if p[i] == 46 {                 // .name
+            let j = i + 1
+            while j < len(p) && p[j] != 46 && p[j] != 91 {
+                j += 1
+            }
+            if j == i + 1 {
+                return Result.Err("an empty name in the path at " + to_str(i))
+            }
+            push(steps, Step.Name(p[i + 1:j]))
+            i = j
+        } else if p[i] == 91 {          // [index]
+            let j = strings.index_from(p, "]", i)
+            if j < 0 {
+                return Result.Err("a `[` without `]` in the path")
+            }
+            match strings.parse_int(p[i + 1:j]) {
+                Some(n) => push(steps, Step.Index(n))
+                None => return Result.Err("not an index: " + p[i + 1:j])
+            }
+            i = j + 1
+        } else {
+            return Result.Err("a path is `.name` and `[index]` steps, not `" + p[i:] + "`")
+        }
+    }
+    return Result.Ok(steps)
+}
+
+// The part of `v` at `steps`, or what is missing. A negative index counts
+// from the end.
+fn at(v: Json, steps: [Step]) -> Result(Json, str) {
+    let shown = ""
+    for step in steps {
+        match step {
+            Name(n) => {
+                shown = shown + "." + n
+                match v {
+                    Obj(members) => {
+                        let found = false
+                        for m in members {
+                            if !found && m.0 == n {
+                                v = m.1
+                                found = true
+                            }
+                        }
+                        if !found {
+                            return Result.Err(shown + ": no such member")
+                        }
+                    }
+                    _ => return Result.Err(shown + ": not an object")
+                }
+            }
+            Index(i) => {
+                shown = shown + "[" + to_str(i) + "]"
+                match v {
+                    Arr(items) => {
+                        let k = i
+                        if k < 0 {
+                            k += len(items)
+                        }
+                        if k < 0 || k >= len(items) {
+                            return Result.Err(shown + ": out of range, the array has " + to_str(len(items)))
+                        }
+                        v = items[k]
+                    }
+                    _ => return Result.Err(shown + ": not an array")
+                }
+            }
+        }
+    }
+    return Result.Ok(v)
+}
+
+// ---- the command ----
+
+fn usage() -> i64 {
+    files.eprint("usage: json FILE [PATH] [-o OUT]")
+    return 2
+}
+
+fn main() -> i64 {
+    let a = args()
+    let input = ""
+    let path = "."
+    let output = ""
+    let rest: [str] = []
+    let i = 0
+    while i < len(a) {
+        if a[i] == "-o" {
+            if i + 1 == len(a) {
+                return usage()
+            }
+            output = a[i + 1]
+            i += 2
+        } else {
+            push(rest, a[i])
+            i += 1
+        }
+    }
+    if len(rest) == 0 || len(rest) > 2 {
+        return usage()
+    }
+    input = rest[0]
+    if len(rest) == 2 {
+        path = rest[1]
+    }
+    let steps: [Step] = []
+    match parse_path(path) {
+        Ok(s) => steps = s
+        Err(msg) => {
+            files.eprint(msg)
+            return usage()
+        }
+    }
+    match files.read(input) {
+        Err(msg) => {
+            files.eprint(msg)
+            return 1
+        }
+        Ok(text) => match parse(text) {
+            Err(msg) => {
+                files.eprint(input + ":" + msg)
+                return 1
+            }
+            Ok(doc) => match at(doc, steps) {
+                Err(msg) => {
+                    files.eprint(msg)
+                    return 1
+                }
+                Ok(part) => {
+                    let out = render(part)
+                    if output == "" {
+                        // `print` adds the last newline.
+                        print(out[:len(out) - 1])
+                        return 0
+                    }
+                    match files.write(output, out) {
+                        Ok(()) => return 0
+                        Err(msg) => {
+                            files.eprint(msg)
+                            return 1
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
