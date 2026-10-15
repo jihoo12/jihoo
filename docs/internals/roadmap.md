@@ -199,7 +199,10 @@
   invariants of a module's structs, so that `pub` functions taking them can
   be tried; `old(e)` for the value of an expression at the start; and
   telling apart runtime contract failures from other traps natively.
-- **Memory:** taking an enum's payload out of a value that is used again
+- **Memory** ([design](memory.md)): counted list and string buffers, so that
+  a copy the ownership pass cannot avoid costs O(1) instead of the whole
+  value; uniqueness checks hoisted out of loops; ownership made explicit in
+  JIR and checked. Also taking an enum's payload out of a value that is used again
   (`take` covers fields and elements; payloads move only out of values
   that are only taken apart).
 

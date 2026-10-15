@@ -75,4 +75,5 @@ same on GitHub.
 - [Testing](internals/testing.md)
 - [Design: code as data](internals/code-as-data.md)
 - [Design: traits](internals/traits.md)
+- [Design: native memory](internals/memory.md)
 - [Roadmap](internals/roadmap.md)
