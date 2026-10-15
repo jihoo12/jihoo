@@ -55,8 +55,10 @@
 //!
 //! Such a function `f` also gets a *consuming* version, `f.own`, that takes
 //! those parameters over instead of cloning them. A call whose arguments for
-//! them are values of the caller's own at their last use calls `f.own`, and
-//! the values move: so `xs = f(xs)` changes `xs` in place, copying nothing.
+//! any of them are values of the caller's own at their last use calls
+//! `f.own`: those values move, and the caller clones the others, as `f`
+//! would have. So `xs = f(xs)` changes `xs` in place, copying nothing, and
+//! `m = maps.set(m, k, v)` copies at most `k`.
 //!
 //! No borrow checker is needed because nothing can refer to a value's memory:
 //! references into values are paths (indices), and pointers to owning values
@@ -1354,21 +1356,32 @@ fn function(f: &mut Function, cx: &mut Cx<'_>, given: &[usize]) {
             let mut moved = HashSet::new();
             let mut clones = Vec::new();
             // A call to a function that clones parameters on entry, with
-            // values of our own at their last use for all of them, hands them
-            // over to its consuming version instead.
+            // values of our own at their last use for any of them, hands those
+            // over to its consuming version instead. The others it copies
+            // itself, as the function would have: so `m = maps.set(m, k, v)`
+            // copies the key it cannot give, not the map.
             if let Inst::Call { func, args, .. } = &mut inst {
                 if let Some(params) = cx.cloning.get(func.as_str()) {
-                    let gives = params.iter().all(|&i| {
-                        let a = args[i];
+                    let gives = |a: Reg| {
                         owned.contains(&a)
                             && !live_after.contains(&a)
                             && args.iter().filter(|&&x| x == a).count() == 1
                             && !roots.values().any(|r| *r == a && live_after.iter().any(|v| roots.get(v) == Some(&a)))
-                    });
-                    if gives {
+                    };
+                    let given: Vec<bool> = params.iter().map(|&i| gives(args[i])).collect();
+                    if given.iter().any(|&g| g) {
                         cx.wanted.insert(func.clone());
                         *func = consuming(func);
-                        moved.extend(params.iter().map(|&i| args[i]));
+                        for (&i, &g) in params.iter().zip(&given) {
+                            if g {
+                                moved.insert(args[i]);
+                            } else {
+                                let t = Reg(f.regs.len() as u32);
+                                f.regs.push(f.regs[args[i].0 as usize].clone());
+                                clones.push(Inst::Clone { dst: t, src: args[i] });
+                                args[i] = t;
+                            }
+                        }
                     }
                 }
             }

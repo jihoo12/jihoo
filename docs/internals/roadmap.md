@@ -172,6 +172,11 @@
     value made from its old one (`v = items[k]` with `items` part of `v`)
     frees the old one, which leaked before. Parsing a 0.9 MB document went
     from 19 s, quadratic, to 0.03 s natively (the VM takes 0.8 s).
+42. A call hands over what it can: when some of the parameters a function
+    copies get values at their last use and others do not, the call still
+    goes to the consuming version, and the caller copies the others. Before,
+    `m = maps.set(m, w, n)` with a word `w` still in a list copied the whole
+    map; counting 300,000 words took 129 s natively, now 0.13 s.
 
 ## Next
 

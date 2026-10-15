@@ -304,6 +304,43 @@ fn nocopy_with_the_library() {
     std::fs::remove_dir_all(&work).unwrap();
 }
 
+/// A call that can hand over some of the parameters a function copies, but
+/// not all, still calls its consuming version: the caller copies the others.
+/// So counting words with `m = maps.set(m, w, n)`, where `w` is still part
+/// of a list, copies each word, not the whole map (which made it quadratic).
+#[test]
+fn partly_handed_over_calls_copy_only_the_rest() {
+    let work = common::work_dir("handover");
+    let path = work.join("count.jh");
+    let src = "import maps
+
+fn main() {
+    let words: [str] = [\"a\", \"b\", \"a\"]
+    \
+               let m = maps.new(str, i64)
+    for w in words {
+        match maps.get(m, w) {
+            \
+               Some(n) => m = maps.set(m, w, n + 1)
+            None => m = maps.set(m, w, 1)
+        }
+    }
+    \
+               print(maps.size(m))
+}
+";
+    std::fs::write(&path, src).unwrap();
+    let out = Command::new(JIHOO).arg("emit-ir").arg(&path).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let jir = String::from_utf8_lossy(&out.stdout);
+    let main = &jir[jir.find("fn @main(").unwrap()..];
+    let main = &main[..main.find("\n}\n").unwrap()];
+    let sets: Vec<&str> = main.lines().filter(|l| l.contains("call @maps.set")).collect();
+    assert_eq!(sets.len(), 2, "{main}");
+    assert!(sets.iter().all(|l| l.contains(".own(")), "{main}");
+    std::fs::remove_dir_all(&work).unwrap();
+}
+
 /// Errors in an imported module name that module's file.
 #[test]
 fn errors_in_imported_modules_name_their_file() {
