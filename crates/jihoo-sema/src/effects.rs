@@ -27,10 +27,10 @@ impl Effects {
     pub const NONE: Effects = Effects(0);
     /// Writes to standard output.
     pub const PRINTS: Effects = Effects(1);
-    /// Reads standard input.
+    /// Reads standard input, or the program's arguments.
     pub const READS_INPUT: Effects = Effects(2);
     /// Reads or writes state that other code shares: cells, memory behind
-    /// pointers, atomics, channels, tasks.
+    /// pointers, atomics, channels, tasks, files.
     pub const SHARED_STATE: Effects = Effects(4);
     /// Runs code the compiler cannot see, which may do anything above.
     pub const UNKNOWN: Effects = Effects(8);
@@ -175,6 +175,7 @@ impl crate::env::Env<'_> {
                 | Inst::Splat { .. }
                 | Inst::Loc { .. }
                 | Inst::ToStr { .. }
+                | Inst::ParseFloat { .. }
                 | Inst::Len { .. } => Effects::NONE,
                 // Integer division traps on 0 (and MIN / -1).
                 Inst::Binary { op: BinOp::Div | BinOp::Rem, lhs, .. } if !matches!(ty(*lhs), Type::Float(_)) => Effects::MAY_FAIL,
@@ -217,7 +218,8 @@ impl crate::env::Env<'_> {
                 | Inst::Spawn { .. }
                 | Inst::Select { .. } => Effects::SHARED_STATE | Effects::MAY_FAIL,
                 Inst::Print { .. } => Effects::PRINTS,
-                Inst::ReadLine { .. } => Effects::READS_INPUT,
+                Inst::ReadLine { .. } | Inst::Args { .. } => Effects::READS_INPUT,
+                Inst::ReadFile { .. } | Inst::WriteFile { .. } => Effects::SHARED_STATE,
                 Inst::Call { func, .. } => self.call_effects(func, fin),
                 Inst::CallIndirect { .. }
                 | Inst::Syscall { .. }

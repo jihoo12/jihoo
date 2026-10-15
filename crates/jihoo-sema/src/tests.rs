@@ -2080,6 +2080,28 @@ fn builtin_names_can_be_taken() {
     // A module's own `push` (as `alloc.push` is) wins over the builtin.
     check("fn push(a: i64, b: i64) -> i64 { return a + b }\nfn main() { print(push(1, 2)) }").unwrap();
     check("fn read_line() -> i64 { return 1 }\nfn main() { print(read_line()) }").unwrap();
+    check("fn args(n: i64) -> i64 { return n }\nfn main() { print(args(1)) }").unwrap();
+}
+
+#[test]
+fn files_and_arguments() {
+    check(
+        "fn main() -> i64 {\n let a: [str] = args()\n let (text, err) = read_file(a[0])\n\
+         let e: i64 = write_file(\"f\", text) + append_file(\"f\", \"x\") + err\n let x: f64 = parse_f64(\"1.5\")\n return e }",
+    )
+    .unwrap();
+    // The same natively; not freestanding, which has no `str`.
+    check(&native("fn f() -> i64 { return read_file(\"f\").1 + len(args()) }")).unwrap();
+    assert!(err(&fs("fn f() -> i64 { return read_file(\"f\").1 }")).contains("`read_file` uses `str`"));
+    assert!(err("fn main() { print(len(args(1))) }").contains("`args` takes no arguments"));
+    assert!(err("fn main() { print(read_file()) }").contains("`read_file` takes exactly 1 argument"));
+    assert!(err("fn main() { print(write_file(\"f\")) }").contains("`write_file` takes exactly 2 arguments"));
+    assert!(err("fn main() { print(parse_f64(1)) }").contains("the argument of `parse_f64` must be str"));
+    // Not while compiling: the program's world is not there yet.
+    assert!(err("const N = len(args())\nfn main() { print(N) }").contains("`args` cannot run at compile time"));
+    assert!(err("const T = read_file(\"f\").0\nfn main() { print(T) }").contains("`read_file` cannot run at compile time"));
+    // `parse_f64` can.
+    check("const X = parse_f64(\"2.5\")\nfn main() { print(X) }").unwrap();
 }
 
 #[test]

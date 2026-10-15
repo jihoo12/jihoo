@@ -802,6 +802,11 @@ class Glue {
 // `print` in native modules (defined below).
 FunctionCallee libc_fn(Module &m, const char *name);
 Function *print_float_fn(Module &m);
+// `args`, `readfile`, `writefile` and `parsefloat` (defined below).
+std::pair<GlobalVariable *, GlobalVariable *> argv_globals(Module &m);
+Function *read_file_fn(Module &m);
+Function *write_file_fn(Module &m);
+Function *parse_float_fn(Module &m);
 
 // Builds the inline asm for a raw Linux syscall. args[0] is the syscall number;
 // all operands are i64.
@@ -2018,6 +2023,47 @@ class FnGen {
         b_.CreateStore(b_.getInt64(1), b_.CreateStructGEP(h, slot(inst.dst), 2));
         return;
       }
+      case Op::Args: {
+        if (!native_) fail(f_.name, "`args` needs the C library's `main`; it is only available in native modules");
+        const jir::Type &elem = *list_of(inst.dst).pointee;
+        auto [argc_g, argv_g] = argv_globals(mod_);
+        Value *argc = b_.CreateSExt(b_.CreateLoad(b_.getInt32Ty(), argc_g), i64_);
+        // Without the program's name.
+        Value *n = b_.CreateSelect(b_.CreateICmpSGT(argc, b_.getInt64(1)), b_.CreateSub(argc, b_.getInt64(1)), b_.getInt64(0));
+        Value *data = new_list(elem, n, slot(inst.dst));
+        Value *argv = b_.CreateLoad(PointerType::get(ctx_, 0), argv_g);
+        Type *ety = types_.lower(elem);
+        Glue::loop(b_, n, [&](Value *i) {
+          Value *arg = b_.CreateLoad(PointerType::get(ctx_, 0),
+                                     b_.CreateGEP(PointerType::get(ctx_, 0), argv, {b_.CreateAdd(i, b_.getInt64(1))}));
+          str_from_c(arg, b_.CreateGEP(ety, data, {i}));
+        });
+        return;
+      }
+      case Op::ReadFile: {
+        if (!native_) fail(f_.name, "`readfile` needs the C library; it is only available in native modules");
+        if (!is_str(arg_reg(0)) || type(inst.dst).kind != jir::Type::Struct) fail(f_.name, "`readfile` needs a str");
+        auto *st = llvm::cast<StructType>(types_.lower(type(inst.dst)));
+        Value *path = slot(arg_reg(0));
+        Value *err = b_.CreateCall(read_file_fn(mod_), {list_field(path, 0), list_field(path, 1),
+                                                        b_.CreateStructGEP(st, slot(inst.dst), 0)});
+        b_.CreateStore(err, b_.CreateStructGEP(st, slot(inst.dst), 1));
+        return;
+      }
+      case Op::WriteFile: {
+        if (!native_) fail(f_.name, "`writefile` needs the C library; it is only available in native modules");
+        if (!is_str(arg_reg(0)) || !is_str(arg_reg(1))) fail(f_.name, "`writefile` needs two strs");
+        Value *path = slot(arg_reg(0)), *data = slot(arg_reg(1));
+        store(inst.dst, b_.CreateCall(write_file_fn(mod_), {list_field(path, 0), list_field(path, 1), list_field(data, 0),
+                                                            list_field(data, 1), b_.getInt1(inst.imm != 0)}));
+        return;
+      }
+      case Op::ParseFloat: {
+        if (!is_str(arg_reg(0))) fail(f_.name, "`parsefloat` needs a str");
+        Value *src = slot(arg_reg(0));
+        store(inst.dst, b_.CreateCall(parse_float_fn(mod_), {list_field(src, 0), list_field(src, 1)}));
+        return;
+      }
       case Op::Clone:
         if (type(inst.dst) != type(arg_reg(0))) fail(f_.name, "`clone` result has the wrong type");
         if (glue_.owns(type(inst.dst)))
@@ -2587,6 +2633,270 @@ Function *print_float_fn(Module &m) {
   return fn;
 }
 
+// The C library functions the file builtins call, with their C types.
+FunctionCallee os_fn(Module &m, const std::string &name) {
+  LLVMContext &ctx = m.getContext();
+  Type *i32 = Type::getInt32Ty(ctx), *i64 = Type::getInt64Ty(ctx), *ptr = PointerType::get(ctx, 0);
+  FunctionType *ty = name == "open"                       ? FunctionType::get(i32, {ptr, i32}, true)
+                     : name == "read" || name == "write" ? FunctionType::get(i64, {i32, ptr, i64}, false)
+                     : name == "close"                   ? FunctionType::get(i32, {i32}, false)
+                     : name == "memchr"                  ? FunctionType::get(ptr, {ptr, i32, i64}, false)
+                     : name == "malloc"                  ? FunctionType::get(ptr, {i64}, false)
+                     : name == "realloc"                 ? FunctionType::get(ptr, {ptr, i64}, false)
+                     : name == "free"                    ? FunctionType::get(Type::getVoidTy(ctx), {ptr}, false)
+                     : name == "strtod"                  ? FunctionType::get(Type::getDoubleTy(ctx), {ptr, ptr}, false)
+                                                         : FunctionType::get(ptr, {}, false);  // __errno_location
+  return m.getOrInsertFunction(name, ty);
+}
+
+// Error numbers and `open` flags, the same on x86_64 and aarch64 Linux.
+constexpr int64_t kEINTR = 4, kENOMEM = 12, kEINVAL = 22;
+constexpr int64_t kO_WRONLY = 01, kO_CREAT = 0100, kO_TRUNC = 01000, kO_APPEND = 02000, kO_CLOEXEC = 02000000;
+
+// C's argc and argv, which C's `main` keeps for `args`.
+std::pair<GlobalVariable *, GlobalVariable *> argv_globals(Module &m) {
+  auto get = [&](const char *name, Type *ty) {
+    if (GlobalVariable *g = m.getNamedGlobal(name)) return g;
+    return new GlobalVariable(m, ty, false, GlobalValue::InternalLinkage, Constant::getNullValue(ty), name);
+  };
+  return {get("jihoo.argc", Type::getInt32Ty(m.getContext())), get("jihoo.argv", PointerType::get(m.getContext(), 0))};
+}
+
+// Defines `i32 jihoo.open(ptr path, i64 len, i32 flags)`: C's `open` of the
+// path of `len` bytes at `path`, with mode 0666. A path with a NUL byte in it
+// is -1 with errno EINVAL, as on the VM.
+Function *open_fn(Module &m) {
+  if (Function *f = m.getFunction("jihoo.open")) return f;
+  LLVMContext &ctx = m.getContext();
+  Type *i32 = Type::getInt32Ty(ctx), *i64 = Type::getInt64Ty(ctx), *ptr = PointerType::get(ctx, 0);
+  auto *fn = Function::Create(FunctionType::get(i32, {ptr, i64, i32}, false), GlobalValue::InternalLinkage, "jihoo.open", m);
+  Value *path = fn->getArg(0), *len = fn->getArg(1), *flags = fn->getArg(2);
+  auto block = [&](const char *n) { return BasicBlock::Create(ctx, n, fn); };
+  IRBuilder<> b(block("entry"));
+  auto call = [&](const char *name, std::vector<Value *> args) { return b.CreateCall(os_fn(m, name), args); };
+  auto fail = [&](int64_t err) {
+    b.CreateStore(b.getInt32(err), call("__errno_location", {}));
+    b.CreateRet(b.getInt32(-1));
+  };
+  BasicBlock *nul = block("nul"), *copy = block("copy"), *no_mem = block("no_mem"), *open = block("open");
+  b.CreateCondBr(b.CreateIsNotNull(call("memchr", {path, b.getInt32(0), len})), nul, copy);
+  b.SetInsertPoint(nul);
+  fail(kEINVAL);
+  b.SetInsertPoint(copy);
+  Value *c = call("malloc", {b.CreateAdd(len, b.getInt64(1))});
+  b.CreateCondBr(b.CreateIsNull(c), no_mem, open);
+  b.SetInsertPoint(no_mem);
+  fail(kENOMEM);
+  b.SetInsertPoint(open);
+  b.CreateMemCpy(c, Align(1), path, Align(1), len);
+  b.CreateStore(b.getInt8(0), b.CreateGEP(b.getInt8Ty(), c, len));
+  Value *fd = call("open", {c, flags, b.getInt32(0666)});
+  // `free` keeps errno, as POSIX now says, but not every C library did.
+  Value *err = b.CreateLoad(i32, call("__errno_location", {}));
+  call("free", {c});
+  b.CreateStore(err, call("__errno_location", {}));
+  b.CreateRet(fd);
+  return fn;
+}
+
+// Defines `i64 jihoo.read_file(ptr path, i64 len, ptr out)`: reads the whole
+// file at the path into the str at `out` and gives 0, or makes it "" and
+// gives the error number.
+Function *read_file_fn(Module &m) {
+  if (Function *f = m.getFunction("jihoo.read_file")) return f;
+  LLVMContext &ctx = m.getContext();
+  Type *i32 = Type::getInt32Ty(ctx), *i64 = Type::getInt64Ty(ctx), *ptr = PointerType::get(ctx, 0);
+  StructType *header = StructType::get(ctx, {ptr, i64, i64});
+  auto *fn = Function::Create(FunctionType::get(i64, {ptr, i64, ptr}, false), GlobalValue::InternalLinkage,
+                              "jihoo.read_file", m);
+  Value *out = fn->getArg(2);
+  auto block = [&](const char *n) { return BasicBlock::Create(ctx, n, fn); };
+  IRBuilder<> b(block("entry"));
+  auto call = [&](const char *name, std::vector<Value *> args) { return b.CreateCall(os_fn(m, name), args); };
+  auto errno_now = [&] { return b.CreateSExt(b.CreateLoad(i32, call("__errno_location", {})), i64); };
+  Value *err = b.CreateAlloca(i64), *buf = b.CreateAlloca(ptr), *cap = b.CreateAlloca(i64), *n = b.CreateAlloca(i64);
+  BasicBlock *open_failed = block("open_failed"), *fail = block("fail"), *start = block("start"), *no_mem = block("no_mem"),
+             *loop = block("loop"), *grow = block("grow"), *grow_failed = block("grow_failed"), *grown = block("grown"),
+             *read = block("read"), *read_failed = block("read_failed"), *give_up = block("give_up"),
+             *not_failed = block("not_failed"), *more = block("more"), *done = block("done");
+  Value *fd = b.CreateCall(open_fn(m), {fn->getArg(0), fn->getArg(1), b.getInt32(kO_CLOEXEC)});
+  b.CreateCondBr(b.CreateICmpSLT(fd, b.getInt32(0)), open_failed, start);
+  b.SetInsertPoint(open_failed);
+  b.CreateStore(errno_now(), err);
+  b.CreateBr(fail);
+  // The error number, and "" (a literal's header: nothing to free).
+  b.SetInsertPoint(fail);
+  b.CreateStore(ConstantPointerNull::get(PointerType::get(ctx, 0)), b.CreateStructGEP(header, out, 0));
+  b.CreateStore(b.getInt64(0), b.CreateStructGEP(header, out, 1));
+  b.CreateStore(b.getInt64(0), b.CreateStructGEP(header, out, 2));
+  b.CreateRet(b.CreateLoad(i64, err));
+
+  b.SetInsertPoint(start);
+  b.CreateStore(b.getInt64(4096), cap);
+  b.CreateStore(b.getInt64(0), n);
+  Value *first = call("malloc", {b.getInt64(4096)});
+  b.CreateStore(first, buf);
+  b.CreateCondBr(b.CreateIsNull(first), no_mem, loop);
+  b.SetInsertPoint(no_mem);
+  call("close", {fd});
+  b.CreateStore(b.getInt64(kENOMEM), err);
+  b.CreateBr(fail);
+
+  // Read into the rest of the buffer, twice as big once it is full.
+  b.SetInsertPoint(loop);
+  b.CreateCondBr(b.CreateICmpEQ(b.CreateLoad(i64, n), b.CreateLoad(i64, cap)), grow, read);
+  b.SetInsertPoint(grow);
+  Value *bigger = b.CreateMul(b.CreateLoad(i64, cap), b.getInt64(2));
+  Value *moved = call("realloc", {b.CreateLoad(ptr, buf), bigger});
+  b.CreateCondBr(b.CreateIsNull(moved), grow_failed, grown);
+  b.SetInsertPoint(grow_failed);
+  b.CreateStore(b.getInt64(kENOMEM), err);
+  b.CreateBr(give_up);
+  b.SetInsertPoint(grown);
+  b.CreateStore(moved, buf);
+  b.CreateStore(bigger, cap);
+  b.CreateBr(read);
+  b.SetInsertPoint(read);
+  Value *at = b.CreateGEP(b.getInt8Ty(), b.CreateLoad(ptr, buf), b.CreateLoad(i64, n));
+  Value *got = call("read", {fd, at, b.CreateSub(b.CreateLoad(i64, cap), b.CreateLoad(i64, n))});
+  b.CreateCondBr(b.CreateICmpSLT(got, b.getInt64(0)), read_failed, not_failed);
+  b.SetInsertPoint(read_failed);
+  Value *e = errno_now();
+  b.CreateStore(e, err);
+  b.CreateCondBr(b.CreateICmpEQ(e, b.getInt64(kEINTR)), loop, give_up);
+  b.SetInsertPoint(give_up);
+  call("free", {b.CreateLoad(ptr, buf)});
+  call("close", {fd});
+  b.CreateBr(fail);
+  b.SetInsertPoint(not_failed);
+  b.CreateCondBr(b.CreateICmpEQ(got, b.getInt64(0)), done, more);
+  b.SetInsertPoint(more);
+  b.CreateStore(b.CreateAdd(b.CreateLoad(i64, n), got), n);
+  b.CreateBr(loop);
+
+  b.SetInsertPoint(done);
+  call("close", {fd});
+  b.CreateStore(b.CreateLoad(ptr, buf), b.CreateStructGEP(header, out, 0));
+  b.CreateStore(b.CreateLoad(i64, n), b.CreateStructGEP(header, out, 1));
+  b.CreateStore(b.CreateLoad(i64, cap), b.CreateStructGEP(header, out, 2));
+  b.CreateRet(b.getInt64(0));
+  return fn;
+}
+
+// Defines `i64 jihoo.write_file(ptr path, i64 len, ptr data, i64 n, i1 append)`:
+// makes the file at the path hold the `n` bytes at `data`, or adds them at its
+// end, and gives 0 or the error number.
+Function *write_file_fn(Module &m) {
+  if (Function *f = m.getFunction("jihoo.write_file")) return f;
+  LLVMContext &ctx = m.getContext();
+  Type *i32 = Type::getInt32Ty(ctx), *i64 = Type::getInt64Ty(ctx), *ptr = PointerType::get(ctx, 0);
+  auto *fn = Function::Create(FunctionType::get(i64, {ptr, i64, ptr, i64, Type::getInt1Ty(ctx)}, false),
+                              GlobalValue::InternalLinkage, "jihoo.write_file", m);
+  Value *data = fn->getArg(2), *total = fn->getArg(3), *append = fn->getArg(4);
+  auto block = [&](const char *n) { return BasicBlock::Create(ctx, n, fn); };
+  IRBuilder<> b(block("entry"));
+  auto call = [&](const char *name, std::vector<Value *> args) { return b.CreateCall(os_fn(m, name), args); };
+  auto errno_now = [&] { return b.CreateSExt(b.CreateLoad(i32, call("__errno_location", {})), i64); };
+  Value *k = b.CreateAlloca(i64);
+  b.CreateStore(b.getInt64(0), k);
+  BasicBlock *open_failed = block("open_failed"), *loop = block("loop"), *write = block("write"), *advance = block("advance"),
+             *write_failed = block("write_failed"), *give_up = block("give_up"), *done = block("done");
+  Value *flags = b.CreateSelect(append, b.getInt32(kO_WRONLY | kO_CREAT | kO_APPEND | kO_CLOEXEC),
+                                b.getInt32(kO_WRONLY | kO_CREAT | kO_TRUNC | kO_CLOEXEC));
+  Value *fd = b.CreateCall(open_fn(m), {fn->getArg(0), fn->getArg(1), flags});
+  b.CreateCondBr(b.CreateICmpSLT(fd, b.getInt32(0)), open_failed, loop);
+  b.SetInsertPoint(open_failed);
+  b.CreateRet(errno_now());
+  // `write` may write less than it was given.
+  b.SetInsertPoint(loop);
+  b.CreateCondBr(b.CreateICmpSLT(b.CreateLoad(i64, k), total), write, done);
+  b.SetInsertPoint(write);
+  Value *from = b.CreateLoad(i64, k);
+  Value *wrote = call("write", {fd, b.CreateGEP(b.getInt8Ty(), data, from), b.CreateSub(total, from)});
+  b.CreateCondBr(b.CreateICmpSLT(wrote, b.getInt64(0)), write_failed, advance);
+  b.SetInsertPoint(advance);
+  b.CreateStore(b.CreateAdd(from, wrote), k);
+  b.CreateBr(loop);
+  b.SetInsertPoint(write_failed);
+  Value *e = errno_now();
+  b.CreateCondBr(b.CreateICmpEQ(e, b.getInt64(kEINTR)), loop, give_up);
+  b.SetInsertPoint(give_up);
+  call("close", {fd});
+  b.CreateRet(e);
+  b.SetInsertPoint(done);
+  call("close", {fd});
+  b.CreateRet(b.getInt64(0));
+  return fn;
+}
+
+// Defines `double jihoo.parse_float(ptr s, i64 len)`: the double nearest to
+// the decimal number `[+-]digits[.digits][(e|E)[+-]digits]` in the `len`
+// bytes at `s`, or NaN if they are not one. The check is the VM's
+// (`is_decimal` in jihoo-vm), state by state; C's `strtod` then reads the
+// number, correctly rounded as the VM's is. (`strtod` reads more than that
+// syntax, such as hex floats and `inf`, which the check keeps from it.)
+Function *parse_float_fn(Module &m) {
+  if (Function *f = m.getFunction("jihoo.parse_float")) return f;
+  LLVMContext &ctx = m.getContext();
+  Type *i8 = Type::getInt8Ty(ctx), *i64 = Type::getInt64Ty(ctx), *dbl = Type::getDoubleTy(ctx);
+  Type *ptr = PointerType::get(ctx, 0);
+  auto *fn = Function::Create(FunctionType::get(dbl, {ptr, i64}, false), GlobalValue::InternalLinkage, "jihoo.parse_float", m);
+  Value *s = fn->getArg(0), *len = fn->getArg(1);
+  auto block = [&](const char *n) { return BasicBlock::Create(ctx, n, fn); };
+  IRBuilder<> b(block("entry"));
+  auto call = [&](const char *name, std::vector<Value *> args) { return b.CreateCall(os_fn(m, name), args); };
+  // The state after each class of byte (digit, sign, '.', 'e', other), from
+  // states 0 (start), 1 (sign), 2 (digits), 3 ('.'), 4 (fraction digits), 5
+  // ('e'), 6 (exponent sign), 7 (exponent digits); -1 is no number.
+  const int8_t next[8][5] = {{2, 1, -1, -1, -1}, {2, -1, -1, -1, -1}, {2, -1, 3, 5, -1}, {4, -1, -1, -1, -1},
+                             {4, -1, -1, 5, -1}, {7, 6, -1, -1, -1}, {7, -1, -1, -1, -1}, {7, -1, -1, -1, -1}};
+  std::vector<Constant *> cells;
+  for (auto &row : next)
+    for (int8_t v : row) cells.push_back(ConstantInt::get(i8, v, true));
+  auto *table_ty = ArrayType::get(i8, cells.size());
+  auto *table = new GlobalVariable(m, table_ty, true, GlobalValue::PrivateLinkage, ConstantArray::get(table_ty, cells),
+                                   "jihoo.decimal_states");
+  BasicBlock *entry = b.GetInsertBlock(), *head = block("head"), *body = block("body"), *end = block("end"),
+             *not_number = block("not_number"), *number = block("number"), *no_mem = block("no_mem"), *convert = block("convert");
+  b.CreateBr(head);
+  b.SetInsertPoint(head);
+  PHINode *i = b.CreatePHI(i64, 2), *state = b.CreatePHI(i64, 2);
+  i->addIncoming(b.getInt64(0), entry);
+  state->addIncoming(b.getInt64(0), entry);
+  b.CreateCondBr(b.CreateICmpULT(i, len), body, end);
+  b.SetInsertPoint(body);
+  Value *c = b.CreateLoad(i8, b.CreateGEP(i8, s, i));
+  auto is = [&](char ch) { return b.CreateICmpEQ(c, b.getInt8(ch)); };
+  Value *cls = b.CreateSelect(b.CreateOr(is('e'), is('E')), b.getInt64(3), b.getInt64(4));
+  cls = b.CreateSelect(is('.'), b.getInt64(2), cls);
+  cls = b.CreateSelect(b.CreateOr(is('+'), is('-')), b.getInt64(1), cls);
+  cls = b.CreateSelect(b.CreateICmpULT(b.CreateSub(c, b.getInt8('0')), b.getInt8(10)), b.getInt64(0), cls);
+  Value *cell = b.CreateAdd(b.CreateMul(state, b.getInt64(5)), cls);
+  Value *to = b.CreateSExt(b.CreateLoad(i8, b.CreateGEP(table_ty, table, {b.getInt64(0), cell})), i64);
+  i->addIncoming(b.CreateAdd(i, b.getInt64(1)), body);
+  state->addIncoming(to, body);
+  b.CreateCondBr(b.CreateICmpSLT(to, b.getInt64(0)), not_number, head);
+  b.SetInsertPoint(end);
+  Value *accept = b.CreateOr(b.CreateOr(b.CreateICmpEQ(state, b.getInt64(2)), b.CreateICmpEQ(state, b.getInt64(4))),
+                             b.CreateICmpEQ(state, b.getInt64(7)));
+  b.CreateCondBr(accept, number, not_number);
+  b.SetInsertPoint(not_number);
+  b.CreateRet(ConstantFP::getNaN(dbl));
+  // `strtod` wants the text NUL-terminated.
+  b.SetInsertPoint(number);
+  Value *text = call("malloc", {b.CreateAdd(len, b.getInt64(1))});
+  b.CreateCondBr(b.CreateIsNull(text), no_mem, convert);
+  b.SetInsertPoint(no_mem);
+  emit_trap(b);
+  b.SetInsertPoint(convert);
+  b.CreateMemCpy(text, Align(1), s, Align(1), len);
+  b.CreateStore(b.getInt8(0), b.CreateGEP(i8, text, len));
+  Value *x = call("strtod", {text, ConstantPointerNull::get(PointerType::get(ctx, 0))});
+  call("free", {text});
+  b.CreateRet(x);
+  return fn;
+}
+
 // The extension the C ABI wants for a narrow integer or a bool.
 Attribute::AttrKind c_extension(const jir::Type &t) {
   if (t.kind == jir::Type::Bool) return Attribute::ZExt;
@@ -2727,6 +3037,9 @@ void define_c_main(Module &m, Function *jihoo_main, const jir::Function &f) {
   auto *ty = FunctionType::get(i32, {i32, PointerType::get(ctx, 0)}, false);
   auto *fn = Function::Create(ty, GlobalValue::ExternalLinkage, "main", m);
   IRBuilder<> b(BasicBlock::Create(ctx, "entry", fn));
+  auto [argc, argv] = argv_globals(m);
+  b.CreateStore(fn->getArg(0), argc);
+  b.CreateStore(fn->getArg(1), argv);
   std::vector<Value *> args;
   if (f.params.size() == 2) args = {fn->getArg(0), fn->getArg(1)};
   Value *result = b.CreateCall(jihoo_main, args);

@@ -25,7 +25,7 @@ pub use verify::verify;
 /// module instead of compiling it with other rules. Bump it whenever the
 /// format or the meaning of anything in it changes (see "Versions" in
 /// `docs/jir.md`); the `version` tests check that both sides and the spec agree.
-pub const JIR_VERSION: u32 = 19;
+pub const JIR_VERSION: u32 = 20;
 
 /// Language profile, selected with `#![native]` or `#![freestanding]` at the
 /// top of a source file.
@@ -494,6 +494,18 @@ pub enum Inst {
     /// Hosted only: the next line of standard input with its `\n`, or `""` at
     /// the end of the input.
     ReadLine { dst: Reg },
+    /// Hosted and native: the program's arguments, without its name, a `[str]`.
+    Args { dst: Reg },
+    /// Hosted and native: the whole file at `path` (a `str`), as `(str, i64)`:
+    /// its bytes and 0, or `""` and the error number (`errno`) of what failed.
+    ReadFile { dst: Reg, path: Reg },
+    /// Hosted and native: makes the file at `path` hold the `str` `data`, or
+    /// with `append` adds `data` at its end; creates it if missing. `dst` is
+    /// an `i64`: 0, or the error number of what failed.
+    WriteFile { dst: Reg, path: Reg, data: Reg, append: bool },
+    /// Hosted and native: the `f64` nearest to the decimal number in `str`
+    /// `src` (ties to even), or NaN if `src` is not one (see `docs/jir.md`).
+    ParseFloat { dst: Reg, src: Reg },
     /// Compile time only (macros): `prefix` plus a number never handed out before
     /// in this compilation, for names that cannot clash.
     Unique { dst: Reg, prefix: Reg },
@@ -618,7 +630,7 @@ impl Inst {
     pub fn regs_mut(&mut self) -> Vec<&mut Reg> {
         use Inst::*;
         match self {
-            Const { dst, .. } | FConst { dst, .. } | Unit { dst } | Str { dst, .. } | FuncRef { dst, .. } | ReadLine { dst } => {
+            Const { dst, .. } | FConst { dst, .. } | Unit { dst } | Str { dst, .. } | FuncRef { dst, .. } | ReadLine { dst } | Args { dst } => {
                 vec![dst]
             }
             Copy { dst, src }
@@ -636,6 +648,8 @@ impl Inst {
             | ToStr { dst, src }
             | Len { dst, src }
             | FromBytes { dst, src }
+            | ReadFile { dst, path: src }
+            | ParseFloat { dst, src }
             | Addr { dst, src }
             | Unique { dst, prefix: src }
             | Stringify { dst, code: src }
@@ -653,6 +667,7 @@ impl Inst {
             | AtomicRmw { dst, ptr: lhs, value: rhs, .. }
             | ElemPtr { dst, ptr: lhs, index: rhs } => vec![dst, lhs, rhs],
             AtomicCas { dst, ptr, expected, new } => vec![dst, ptr, expected, new],
+            WriteFile { dst, path, data, .. } => vec![dst, path, data],
             SetElem { dst, src, index, value } => vec![dst, src, index, value],
             Slice { dst, src, lo, hi } => vec![dst, src, lo, hi],
             Store { ptr, value } | AtomicStore { ptr, value } | Send { chan: ptr, value } => vec![ptr, value],

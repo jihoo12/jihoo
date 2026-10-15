@@ -473,10 +473,11 @@ fn jihoo_run_runs_native_programs() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("was killed by signal"));
     assert!(matches!(out.status.code(), Some(132 | 133)), "{:?}", out.status); // SIGILL, or SIGTRAP on aarch64
 
-    // Hosted programs still run on the VM, which has no arguments for them.
-    std::fs::write(&src, "#![hosted]\nfn main() { print(1) }\n").unwrap();
-    let out = Command::new(JIHOO).arg("run").arg(&src).args(["--", "a"]).output().unwrap();
-    assert!(String::from_utf8_lossy(&out.stderr).contains("hosted programs take no arguments"));
+    // Hosted programs still run on the VM, which gives them the arguments.
+    std::fs::write(&src, "#![hosted]\nfn main() -> i64 { print(args()[1])\n return len(args()) }\n").unwrap();
+    let out = Command::new(JIHOO).arg("run").arg(&src).args(["--", "a", "b"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "b\n");
+    assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stderr));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -581,6 +582,76 @@ fn words_example_reads_standard_input() {
     assert!(out.status.success());
     let expected = "11 words\n     3  the\n     2  and\n     2  end\n     1  a\n     1  cat\n";
     assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
+}
+
+/// `args`, `read_file`, `write_file` and `append_file` (and `lib/files.jh`)
+/// give the same results on the VM and natively, failures included: the same
+/// error numbers for a missing file, a directory, a path with a NUL byte in
+/// it and a file in a missing directory.
+#[test]
+fn files_and_arguments_agree() {
+    let work = common::work_dir("files");
+    let program = r#"import files
+import strings
+
+fn show(what: str, err: Option(str)) {
+    match err {
+        Some(msg) => print(what + " failed: " + msg)
+        None => print(what + " worked")
+    }
+}
+
+fn main() -> i64 {
+    let a = args()
+    print(len(a))
+    for x in a {
+        print("[" + x + "]")
+    }
+    let dir = a[0]
+    let path = dir + "/notes.txt"
+    show("write", files.write(path, "one\n"))
+    show("append", files.append(path, "two\n"))
+    show("append", files.append(path, ""))
+    match files.read(path) {
+        Ok(text) => print(strings.join(strings.lines(text), "+"))
+        Err(msg) => print(msg)
+    }
+    show("write", files.write(path, ""))
+    print(len(read_file(path).0))
+    let (text, err) = read_file(dir + "/missing")
+    print(len(text) + err)
+    print(read_file(dir).1)
+    print(write_file(dir, "x"))
+    print(write_file(dir + "/no/such/file", "x"))
+    print(read_file(from_bytes([97 as u8, 0 as u8, 98 as u8])).1)
+    let big = strings.repeat("0123456789", 100000)
+    show("write", files.write(path, big))
+    print(read_file(path).0 == big)
+    return len(a)
+}
+"#;
+    let mut outputs = Vec::new();
+    for attr in ["#![hosted]\n", ""] {
+        if attr.is_empty() && !common::compiled_enabled() {
+            break;
+        }
+        let dir = work.join(if attr.is_empty() { "native" } else { "hosted" });
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = work.join(format!("files{}.jh", outputs.len()));
+        std::fs::write(&src, format!("{attr}{program}")).unwrap();
+        let out = Command::new(JIHOO).arg("run").arg(&src).arg("--").arg(&dir).arg("two words").arg("").output().unwrap();
+        assert!(out.stderr.is_empty(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        // The directories differ; nothing else may.
+        let stdout = String::from_utf8_lossy(&out.stdout).replace(dir.to_str().unwrap(), "DIR");
+        outputs.push((out.status.code(), stdout));
+    }
+    let expected = "3\n[DIR]\n[two words]\n[]\nwrite worked\nappend worked\nappend worked\none+two\n\
+                    write worked\n0\n2\n21\n21\n2\n22\nwrite worked\ntrue\n";
+    assert_eq!(outputs[0], (Some(3), expected.to_string()), "on the VM");
+    if let Some(native) = outputs.get(1) {
+        assert_eq!(native, &outputs[0], "natively");
+    }
+    std::fs::remove_dir_all(&work).unwrap();
 }
 
 #[test]

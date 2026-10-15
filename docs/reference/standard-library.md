@@ -10,6 +10,7 @@ One of them, the prelude, needs no import.
 | [`strings`](#strings) | hosted, native | searching, splitting, joining, trimming and parsing text |
 | [`lists`](#lists) | hosted, native | sorting, mapping and searching lists, and fused pipelines (`fuse!`) |
 | [`maps`](#maps) | hosted, native | hash maps, `Map(K, V)`, for keys with `Hash` and `==` |
+| [`files`](#files) | hosted, native | reading and writing whole files, with messages for what failed |
 | [`iters`](#iters) | all (`range`, `take`, `count`, `sum`), hosted, native | iterators: ranges, lists, and `map`, `filter`, `zip` over others |
 | [`meta`](#meta) | all, while compiling | the shape of code, for macros that read the code they are given |
 | [`libc`](#libc) | native | declarations of C library functions |
@@ -21,7 +22,7 @@ One of them, the prelude, needs no import.
 | [`thread`](#thread) | native | threads on all cores, with POSIX threads |
 | [`channel`](#channel) | native | channels between threads, with `close` |
 
-`strings`, `lists` and `maps` work on `str` and lists, which hosted and native programs have.
+`strings`, `lists`, `maps` and `files` work on `str` and lists, which hosted and native programs have.
 `sys`, `alloc`, `io` and `sync` are marked `#![freestanding]`: they use neither
 GC nor libc, only `syscall`, so native programs can import them too. `coro`,
 `thread` and `channel` are marked `#![native]`: they use the C library to
@@ -128,6 +129,7 @@ fn main() {
 | `from_byte(b) -> str` | the one-byte string of `b` |
 | `is_space(b)`, `is_digit(b)`, `is_letter(b)` | ASCII classes of a byte, `bool` |
 | `parse_int(s) -> Option(i64)` | the decimal integer `s` writes, with an optional sign and spaces around it, or `None` if it is not one or does not fit |
+| `parse_float(s) -> Option(f64)` | the decimal number `s` writes (`[+-]digits[.digits][(e\|E)[+-]digits]`, spaces around it allowed) as the nearest `f64`, or `None` if it is not one; too large is infinite (`parse_float("1e999")`) |
 
 `sep`, `sub` and `old` must not be empty. `split`, `join`, `repeat` and
 `replace` build their results byte by byte in a `[u8]`, so they take time in
@@ -194,6 +196,47 @@ The functions are evaluated once, before the loop. `fuse!` is a
 [`meta`](#meta) and asks `type_of` for the type the last stage gives. A stage
 it does not know stops the compilation with a message that names it.
 `examples/pipe.jh` compares it with `map`, `filter` and `fold`.
+
+## files
+
+Whole files for hosted and native programs, on the builtins `read_file`,
+`write_file` and `append_file` ([Builtins](builtins.md#hosted-and-native)),
+the same on the VM and natively. What failed is a message that names the file
+and says why, in the words of C's `strerror`.
+
+```jihoo
+import files
+import strings
+
+fn main() -> i64 {
+    let a = args()
+    if len(a) != 1 {
+        files.eprint("usage: count FILE")
+        return 2
+    }
+    match files.read(a[0]) {
+        Ok(text) => print(len(strings.lines(text)))
+        Err(msg) => {
+            files.eprint(msg)          // notes.txt: No such file or directory
+            return 1
+        }
+    }
+    return 0
+}
+```
+
+| function | description |
+|----------|-------------|
+| `read(path) -> Result(str, str)` | the whole file, or why it cannot be read |
+| `write(path, text) -> Option(str)` | makes the file hold `text`, creating it if missing; why it could not, or `None` |
+| `append(path, text) -> Option(str)` | adds `text` at the end of the file, creating it if missing; why it could not, or `None` |
+| `eprint(text)` | writes `text` and a newline to standard error |
+| `message(path, err) -> str` | `path: ` and what error number `err` means |
+| `error_text(err) -> str` | what error number `err` means (`"Permission denied"`), or `"error N"` for one the module does not know |
+
+The module also names the error numbers the builtins give most often:
+`ENOENT`, `EACCES`, `EISDIR`, `ENOTDIR`, `EEXIST`, `EINVAL`, `ENOSPC` and a
+few more, with Linux's values, which are the same on both targets.
 
 ## maps
 

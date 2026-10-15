@@ -171,6 +171,12 @@ impl Display for Inst {
             Inst::StrByte { dst, src, index } => write!(f, "{dst} = strbyte {src}, {index}"),
             Inst::Slice { dst, src, lo, hi } => write!(f, "{dst} = slice {src}, {lo}, {hi}"),
             Inst::ReadLine { dst } => write!(f, "{dst} = readline"),
+            Inst::Args { dst } => write!(f, "{dst} = args"),
+            Inst::ReadFile { dst, path } => write!(f, "{dst} = readfile {path}"),
+            Inst::WriteFile { dst, path, data, append } => {
+                write!(f, "{dst} = {} {path}, {data}", if *append { "appendfile" } else { "writefile" })
+            }
+            Inst::ParseFloat { dst, src } => write!(f, "{dst} = parsefloat {src}"),
             Inst::Repeat { dst, value, count } => write!(f, "{dst} = repeat {value}, {count}"),
             Inst::Push { root, path, value } => write!(f, "push {root}, ({}), {value}", steps(path)),
             Inst::Pop { dst, root, path } => write!(f, "{dst} = pop {root}, ({})", steps(path)),

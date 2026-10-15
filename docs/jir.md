@@ -1,4 +1,4 @@
-# JIR — jihoo IR text format (version 19)
+# JIR — jihoo IR text format (version 20)
 
 JIR is the contract between the Rust frontend/VM and the C++ LLVM backend.
 `jihoo emit-ir` writes it, `jihoo-llc` reads it, and `jihoo` reads it back too
@@ -49,6 +49,7 @@ editing it fails a test until you decide whether the edit needs a new version.
 | 17 | `tailcall`, a call that takes the caller's place |
 | 18 | `file` headers and `loc`, source positions |
 | 19 | `take` moves a part at a path (`take %s, (field 0, elem %i)`), not only a field |
+| 20 | `args`, `readfile`, `writefile`, `appendfile` and `parsefloat` |
 
 ## Example
 
@@ -414,6 +415,28 @@ also take a `str`, which is a sequence of bytes.
 `push` and `pop` change register `%r` (or the cell): as for `setpath %r, %r`,
 the list is changed in place unless something else refers to it, so a loop of
 `push`es takes time in proportion to the number of elements.
+
+#### Arguments, files and numbers in text (hosted and native)
+
+| syntax                              | operands              | result | meaning |
+|-------------------------------------|-----------------------|--------|---------|
+| `%d = args`                         |                       | `[str]` | the program's arguments, without its name (natively C's `argv[1]` on) |
+| `%d = readfile %p`                  | `str`                 | a struct of a `str` and an `i64` | the bytes of the file at path `%p` and 0, or `""` and the error number |
+| `%d = writefile %p, %s`             | `str, str`            | `i64`  | makes the file at `%p` hold `%s`, creating it (mode 0666, less the umask) if missing; 0 or the error number |
+| `%d = appendfile %p, %s`            | `str, str`            | `i64`  | the same, but adds `%s` at the end of the file |
+| `%d = parsefloat %s`                | `str`                 | `f64`  | the `f64` nearest to the decimal number `%s` (ties to even), or NaN if `%s` is not one |
+
+Error numbers are Linux's (`errno`), the same on both targets: what `open`,
+`read` or `write` failed with. A path with a NUL byte in it is `EINVAL` (22),
+which C's `open` could not be asked. `readfile`'s struct is any whose fields
+are a `str` and an `i64`, in that order (the frontend uses the tuple
+`(str, i64)`).
+
+A decimal number for `parsefloat` is `[+-]digits[.digits][(e|E)[+-]digits]`
+and nothing else: no spaces, no `inf` or `nan`, no hex. A number too large
+for an `f64` is infinite, and one too small is zero, with its sign.
+Natively the number is read with C's `strtod` after the check, so it assumes
+the C locale.
 
 #### Ownership (native lists)
 

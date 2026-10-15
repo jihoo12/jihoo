@@ -159,6 +159,11 @@
     part evaluated after one of the pattern's own calls that is not, and
     any part right of `&&` or `||`. Elsewhere the call is compiled as
     written. `map_map` still fuses `map`s of inert functions.
+40. Arguments, files and floats in text, in hosted and native programs alike
+    (JIR 20): `args()`, `read_file`, `write_file`, `append_file`, with Linux's
+    error numbers on the VM too, and `lib/files.jh` over them; `parse_f64`
+    and `strings.parse_float`, correctly rounded everywhere (Rust's parser on
+    the VM, `strtod` natively, after the same check of the syntax).
 
 ## Next
 
@@ -194,7 +199,8 @@
 - **Concurrency:** weaker memory orders (acquire/release) for code that needs
   the speed; threads in freestanding programs, over `clone`; tasks on more
   than one core in the VM, which needs a GC that threads can share.
-- **Hosted library:** files; parsing floats.
+- **Library:** directories, and reading a file a piece at a time; the
+  environment.
 
 ## Library layers
 

@@ -464,11 +464,25 @@ fn is_builtin(name: &str) -> bool {
 
 /// Builtins whose names a module may take: a module that defines a function
 /// of that name calls its own (as `alloc.push` is). Floats, atomics, `trap`,
-/// and the hosted builtins for lists, input and channels.
+/// and the hosted builtins for lists, input, files and channels.
 pub(crate) fn is_takeable_builtin(name: &str) -> bool {
     floats::is_float_builtin(name)
         || atomics::is_atomic_builtin(name)
-        || matches!(name, "trap" | "read_line" | "push" | "pop" | "from_bytes" | "send" | "recv")
+        || matches!(
+            name,
+            "trap"
+                | "read_line"
+                | "push"
+                | "pop"
+                | "from_bytes"
+                | "send"
+                | "recv"
+                | "args"
+                | "read_file"
+                | "write_file"
+                | "append_file"
+                | "parse_f64"
+        )
 }
 
 /// What `FnCx::save` keeps.
@@ -1480,6 +1494,50 @@ impl<'a> FnCx<'a> {
         Ok(self.emit_to(Type::Str, |dst| Inst::ReadLine { dst }))
     }
 
+    /// The builtins on the world outside the program, and `parse_f64`,
+    /// which works on the `str` they give: `args()`, `read_file(path)`,
+    /// `write_file(path, data)`, `append_file(path, data)` and
+    /// `parse_f64(s)`.
+    fn os_builtin(&mut self, pos: Pos, name: &str, args: &[Expr]) -> Result<Reg, Error> {
+        // Macros have `str` in every profile (and `meta` uses `strings`).
+        if self.profile() == Profile::Freestanding && !self.in_macro {
+            return Err(Error::new(pos, format!("`{name}` uses `str`, which freestanding programs do not have")));
+        }
+        let takes = match name {
+            "args" => "no arguments",
+            "read_file" => "exactly 1 argument, a `str` path",
+            "parse_f64" => "exactly 1 argument, a `str`",
+            _ => "exactly 2 arguments, a `str` path and the `str` to write",
+        };
+        let count = match name {
+            "args" => 0,
+            "read_file" | "parse_f64" => 1,
+            _ => 2,
+        };
+        if args.len() != count {
+            return Err(Error::new(pos, format!("`{name}` takes {takes}")));
+        }
+        let mut regs = Vec::with_capacity(count);
+        for a in args {
+            let r = self.expr(a, Some(&Type::Str))?;
+            self.expect(a.pos, r, &Type::Str, &format!("the argument of `{name}`"))?;
+            regs.push(r);
+        }
+        Ok(match (name, &regs[..]) {
+            ("args", []) => self.emit_to(Type::List(Box::new(Type::Str)), |dst| Inst::Args { dst }),
+            ("read_file", &[path]) => {
+                let ty = self.env.tuple_type(vec![Type::Str, Type::I64]);
+                self.emit_to(ty, |dst| Inst::ReadFile { dst, path })
+            }
+            ("parse_f64", &[src]) => self.emit_to(Type::F64, |dst| Inst::ParseFloat { dst, src }),
+            (_, &[path, data]) => {
+                let append = name == "append_file";
+                self.emit_to(Type::I64, |dst| Inst::WriteFile { dst, path, data, append })
+            }
+            _ => unreachable!(),
+        })
+    }
+
     /// `from_bytes(b)`: the `str` made of the bytes in the `[u8]` `b`.
     fn str_from_bytes(&mut self, pos: Pos, args: &[Expr]) -> Result<Reg, Error> {
         let [arg] = args else {
@@ -1726,6 +1784,9 @@ impl<'a> FnCx<'a> {
                     return match base {
                         "trap" => self.trap(pos, args),
                         "read_line" => self.read_line(pos, args),
+                        "args" | "read_file" | "write_file" | "append_file" | "parse_f64" => {
+                            self.os_builtin(pos, base, args)
+                        }
                         "push" => self.list_push(pos, args),
                         "pop" => self.list_pop(pos, args),
                         "from_bytes" => self.str_from_bytes(pos, args),

@@ -137,6 +137,8 @@ pub struct Vm<'m> {
     uniques: u64,
     /// Where `read_line` reads from.
     input: Input,
+    /// What `args` gives.
+    args: Vec<String>,
 }
 
 /// Where `read_line` reads lines from.
@@ -144,7 +146,8 @@ pub enum Input {
     /// The process's standard input (the default).
     Stdin,
     Reader(Box<dyn BufRead>),
-    /// No input: `read_line` is an error, as during compile-time evaluation.
+    /// No input: `read_line` is an error, as during compile-time evaluation,
+    /// and so are `args` and files.
     Closed,
 }
 
@@ -183,12 +186,19 @@ impl<'m> Vm<'m> {
             code_types: HashMap::new(),
             wanted_type: None,
             input: Input::Stdin,
+            args: Vec::new(),
         }
     }
 
     /// Makes `read_line` read from `input` instead of standard input.
     pub fn with_input(mut self, input: Input) -> Self {
         self.input = input;
+        self
+    }
+
+    /// Makes `args` give `args`, the program's arguments without its name.
+    pub fn with_args(mut self, args: Vec<String>) -> Self {
+        self.args = args;
         self
     }
 
@@ -935,6 +945,46 @@ impl<'m> Vm<'m> {
                 let r = self.alloc_bytes(line.into());
                 self.set(*dst, Value::Str(r));
             }
+            Inst::Args { dst } => {
+                self.outside("args")?;
+                for a in self.args.clone() {
+                    let r = self.alloc_str(&a);
+                    self.temp_roots.push(Value::Str(r));
+                }
+                // Rooted until the list holds them.
+                let r = self.alloc_agg(self.temp_roots.clone());
+                self.temp_roots.clear();
+                self.set(*dst, Value::Agg(r));
+            }
+            Inst::ReadFile { dst, path } => {
+                self.outside("read_file")?;
+                let path = self.heap.bytes(self.str_ref(*path)?).to_vec();
+                let (bytes, err) = match os_path(&path).and_then(std::fs::read) {
+                    Ok(b) => (b, 0),
+                    Err(e) => (Vec::new(), errno(&e)),
+                };
+                let r = self.alloc_bytes(bytes.into());
+                self.temp_roots.push(Value::Str(r));
+                let t = self.alloc_agg(vec![Value::Str(r), Value::Int(err)]);
+                self.temp_roots.clear();
+                self.set(*dst, Value::Agg(t));
+            }
+            Inst::WriteFile { dst, path, data, append } => {
+                self.outside(if *append { "append_file" } else { "write_file" })?;
+                let path = self.heap.bytes(self.str_ref(*path)?).to_vec();
+                let data = self.str_ref(*data)?;
+                let written = os_path(&path).and_then(|p| {
+                    use std::io::Write as _;
+                    let mut file =
+                        std::fs::OpenOptions::new().write(true).create(true).append(*append).truncate(!*append).open(p)?;
+                    file.write_all(self.heap.bytes(data))
+                });
+                self.set(*dst, Value::Int(written.err().map_or(0, |e| errno(&e))));
+            }
+            Inst::ParseFloat { dst, src } => {
+                let x = parse_float(self.heap.bytes(self.str_ref(*src)?));
+                self.set(*dst, Value::float(x));
+            }
             Inst::Stringify { dst, code } => {
                 let Value::Str(c) = self.get(*code) else {
                     return Err(self.error("`stringify` needs code"));
@@ -1547,6 +1597,75 @@ fn type_name(v: Value) -> &'static str {
     }
 }
 
+impl Vm<'_> {
+    /// Fails unless the program may use the world outside it: not at compile
+    /// time, where there is no input (`Input::Closed`).
+    fn outside(&self, what: &str) -> Result<(), VmError> {
+        match self.input {
+            Input::Closed => Err(self.error(&format!("`{what}` cannot run at compile time"))),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// A path's bytes as a path for the OS. A NUL byte cannot be in one; that is
+/// `EINVAL`, as natively.
+fn os_path(bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    if bytes.contains(&0) {
+        return Err(std::io::Error::from_raw_os_error(22));
+    }
+    Ok(std::ffi::OsStr::from_bytes(bytes).into())
+}
+
+/// The error number of `e`, or `EIO` for an error that has none.
+fn errno(e: &std::io::Error) -> i64 {
+    e.raw_os_error().map_or(5, i64::from)
+}
+
+/// `parsefloat`: the nearest `f64` to `text` if it is a decimal number
+/// (`[+-]digits[.digits][(e|E)[+-]digits]`), else NaN.
+pub fn parse_float(text: &[u8]) -> f64 {
+    if !is_decimal(text) {
+        return f64::NAN;
+    }
+    // Correctly rounded, ties to even, as C's `strtod` natively.
+    std::str::from_utf8(text).ok().and_then(|t| t.parse().ok()).unwrap_or(f64::NAN)
+}
+
+/// Whether `text` is `[+-]digits[.digits][(e|E)[+-]digits]`. The states and
+/// the table are the same as natively (`parse_float_fn` in the backend).
+fn is_decimal(text: &[u8]) -> bool {
+    // State after each class of byte (digit, sign, '.', 'e', other), from
+    // states 0 (start), 1 (sign), 2 (digits), 3 ('.'), 4 (fraction digits),
+    // 5 ('e'), 6 (exponent sign), 7 (exponent digits); -1 is no number.
+    const NEXT: [[i8; 5]; 8] = [
+        [2, 1, -1, -1, -1],
+        [2, -1, -1, -1, -1],
+        [2, -1, 3, 5, -1],
+        [4, -1, -1, -1, -1],
+        [4, -1, -1, 5, -1],
+        [7, 6, -1, -1, -1],
+        [7, -1, -1, -1, -1],
+        [7, -1, -1, -1, -1],
+    ];
+    let mut state = 0i8;
+    for &c in text {
+        let class = match c {
+            b'0'..=b'9' => 0,
+            b'+' | b'-' => 1,
+            b'.' => 2,
+            b'e' | b'E' => 3,
+            _ => 4,
+        };
+        state = NEXT[state as usize][class];
+        if state < 0 {
+            return false;
+        }
+    }
+    matches!(state, 2 | 4 | 7)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2143,6 +2262,17 @@ fn main() {
         Vm::new(&m).with_input(input).run_main(&mut out).unwrap();
         // "ab\n", "\n", and "last" without a newline.
         assert_eq!(String::from_utf8(out).unwrap(), "3\n1\n4\n");
+    }
+
+    #[test]
+    fn parse_float_reads_decimals_only() {
+        for (text, x) in [("0", 0.0), ("-2.5", -2.5), ("+1e3", 1000.0), ("1.25E-2", 0.0125), ("1e999", f64::INFINITY)] {
+            assert_eq!(parse_float(text.as_bytes()), x, "{text}");
+        }
+        assert!(parse_float(b"-0").is_sign_negative());
+        for text in ["", ".5", "5.", "1e", "inf", "NaN", "0x1p3", " 1", "1_0", "+-1"] {
+            assert!(parse_float(text.as_bytes()).is_nan(), "{text}");
+        }
     }
 
     #[test]

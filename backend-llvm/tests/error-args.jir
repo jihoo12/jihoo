@@ -1,0 +1,13 @@
+; A program's arguments are C's `main`'s, which freestanding modules do not
+; have (nor `str`, which `args` gives).
+; expect: error `args` needs the C library's `main`; it is only available in native modules
+jir 20
+profile freestanding
+
+fn @_start() -> i64 {
+  regs [str] i64
+bb0:
+  %0 = args
+  %1 = len %0
+  ret %1
+}

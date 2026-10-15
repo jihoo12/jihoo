@@ -158,10 +158,10 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
                 if let Some(a) = opts.link.first() {
                     return Err(format!("{}: hosted programs link nothing, so `{a}` cannot be linked in", opts.input.display()));
                 }
-                if !opts.args.is_empty() {
-                    return Err(format!("{}: hosted programs take no arguments", opts.input.display()));
-                }
-                let code = jihoo_vm::run(&m, &mut std::io::stdout()).map_err(|e| e.to_string())?;
+                let code = jihoo_vm::Vm::new(&m)
+                    .with_args(opts.args.clone())
+                    .run_main(&mut std::io::stdout())
+                    .map_err(|e| e.to_string())?;
                 return Ok(ExitCode::from(code as u8));
             }
             run_compiled(&m, &opts)

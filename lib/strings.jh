@@ -268,3 +268,16 @@ pub fn parse_int(s: str) -> Option(i64) {
     }
     return Option.Some(-n)
 }
+
+// The number `s` writes in decimal, `[+-]digits[.digits][(e|E)[+-]digits]`
+// with spaces around it, as the nearest `f64` (ties to even), or `None` if it
+// is not one. Too large a number is infinite and too small a one zero, with
+// its sign: `parse_float("1e999")` is `Some(inf)`.
+pub fn parse_float(s: str) -> Option(f64) {
+    let x = parse_f64(trim(s))
+    // Not a number is the only NaN `parse_f64` gives.
+    if x != x {
+        return Option.None
+    }
+    return Option.Some(x)
+}

@@ -515,7 +515,7 @@ fn consumed(inst: &mut Inst) -> Vec<&mut Reg> {
 fn borrowed(inst: &Inst) -> Vec<Reg> {
     use Inst::*;
     match inst {
-        Const { .. } | FConst { .. } | Unit { .. } | Str { .. } | FuncRef { .. } | ReadLine { .. } | Trap | Fence | Loc { .. } => {
+        Const { .. } | FConst { .. } | Unit { .. } | Str { .. } | FuncRef { .. } | ReadLine { .. } | Args { .. } | Trap | Fence | Loc { .. } => {
             vec![]
         }
         Copy { .. } | Struct { .. } | Variant { .. } | Array { .. } | Ref { .. } | Closure { .. } | Spawn { .. } => vec![],
@@ -533,6 +533,8 @@ fn borrowed(inst: &Inst) -> Vec<Reg> {
         | ToStr { src, .. }
         | Len { src, .. }
         | FromBytes { src, .. }
+        | ReadFile { path: src, .. }
+        | ParseFloat { src, .. }
         | Addr { src, .. }
         | Unique { prefix: src, .. }
         | Stringify { code: src, .. }
@@ -552,6 +554,7 @@ fn borrowed(inst: &Inst) -> Vec<Reg> {
         AtomicRmw { ptr, value, .. } | AtomicStore { ptr, value } => vec![*ptr, *value],
         AtomicCas { ptr, expected, new, .. } => vec![*ptr, *expected, *new],
         Slice { src, lo, hi, .. } => vec![*src, *lo, *hi],
+        WriteFile { path, data, .. } => vec![*path, *data],
         Store { ptr, .. } | Send { chan: ptr, .. } => vec![*ptr],
         GetPath { src, path, .. } | CellGet { cell: src, path, .. } | Take { src, path, .. } => {
             [*src].into_iter().chain(path_regs(path)).collect()

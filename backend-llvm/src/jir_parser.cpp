@@ -347,6 +347,20 @@ Inst parse_assign(Line &l) {
     inst.args = {a, l.reg()};
   } else if (w == "readline") {
     inst.op = Op::ReadLine;
+  } else if (w == "args") {
+    inst.op = Op::Args;
+  } else if (w == "readfile") {
+    inst.op = Op::ReadFile;
+    inst.args = {l.reg()};
+  } else if (w == "writefile" || w == "appendfile") {
+    inst.op = Op::WriteFile;
+    inst.imm = w == "appendfile";
+    uint32_t p = l.reg();
+    l.punct(",");
+    inst.args = {p, l.reg()};
+  } else if (w == "parsefloat") {
+    inst.op = Op::ParseFloat;
+    inst.args = {l.reg()};
   } else if (w == "strbyte") {
     inst.op = Op::StrByte;
     uint32_t s = l.reg();

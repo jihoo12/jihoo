@@ -58,6 +58,16 @@ function called `sqrt` (or declares `extern fn sqrt`) calls its own `sqrt`.
 | `to_str(x)` | `str` | a number or `bool` as text, as `print` would write it (also in macros) |
 | `from_bytes(b)` | `str` | the string of the bytes in `b: [u8]` |
 | `read_line()` | `str` | the next line of standard input with its `\n` (or without, for a last line that has none), or `""` at the end of the input; not at compile time |
+| `args()` | `[str]` | the program's arguments, without its name (`jihoo run p.jh -- a b` gives `["a", "b"]`); not at compile time |
+| `read_file(path)` | `(str, i64)` | the bytes of the file at `path` and 0, or `""` and the error number of what failed (`errno`: 2 for a missing file); not at compile time |
+| `write_file(path, s)` | `i64` | makes the file at `path` hold `s`, creating it if missing; 0, or the error number; not at compile time |
+| `append_file(path, s)` | `i64` | adds `s` at the end of the file at `path`, creating it if missing; 0, or the error number; not at compile time |
+| `parse_f64(s)` | `f64` | the `f64` nearest to the decimal number `s`, `[+-]digits[.digits][(e\|E)[+-]digits]` with nothing around it, ties to even; NaN if `s` is not one |
+
+The [`files`](standard-library.md#files) library turns the error numbers into
+messages, and `strings.parse_float` allows spaces around a number and gives
+an `Option`. Error numbers are Linux's, the same on the VM and natively; a
+path with a NUL byte in it is 22 (`EINVAL`).
 
 `print` writes integers in decimal, bools as `true`/`false`, and floats as the
 shortest text that reads back as the same value (`0.1`, `1.0`, `1e100`, `inf`,
@@ -79,7 +89,8 @@ traps loses what is still buffered. Freestanding programs have no `print`; the
 | `recv(c)` | `T` | receives a value, waiting until there is one |
 
 As with the float builtins, a module may take the names `from_bytes`,
-`read_line`, `push`, `pop`, `send` and `recv`: one that defines a function of
+`read_line`, `args`, `read_file`, `write_file`, `append_file`, `parse_f64`,
+`push`, `pop`, `send` and `recv`: one that defines a function of
 that name calls its own (`alloc.push` and `channel.send` are two).
 
 ## Native and freestanding

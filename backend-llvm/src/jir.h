@@ -12,7 +12,7 @@ namespace jir {
 
 // The one JIR version this backend reads, from the `jir N` header. It must
 // equal JIR_VERSION in crates/jihoo-ir/src/lib.rs (a Rust test checks this).
-constexpr int64_t kVersion = 19;
+constexpr int64_t kVersion = 20;
 
 enum class Profile { Hosted, Native, Freestanding };
 
@@ -148,6 +148,8 @@ enum class Op {
   Len, Slice, Repeat, Push, Pop, Clone, Drop,
   // Native strings.
   StrByte, FromBytes, ToStr, ReadLine,
+  // The world outside a native program, and decimal text to a float.
+  Args, ReadFile, WriteFile, ParseFloat,
   // A function value that captured values: native only.
   Closure,
   // Native `ref` and `cell`: counted boxes.
@@ -168,7 +170,7 @@ struct Inst {
   Op op;
   uint32_t dst = 0;            // unused for Store, AtomicStore, Spawn, Print, Trap and Fence
   std::vector<uint32_t> args;  // operand registers
-  int64_t imm = 0;             // Const value, field index, or variant index
+  int64_t imm = 0;             // Const value, field index, variant index, or WriteFile's append
   double fimm = 0;             // FConst value
   int64_t imm2 = 0;            // Payload: index of the value in the variant
   std::string text;            // Str bytes, Call/FuncRef function, Struct name, or Asm template

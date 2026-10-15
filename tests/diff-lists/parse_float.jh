@@ -1,0 +1,48 @@
+// Decimal text to floats (`parse_f64`, `strings.parse_float`), the same on
+// the VM and natively: the nearest double, and NaN for anything else.
+import strings
+
+fn show(s: str) {
+    let x = parse_f64(s)
+    if x != x {
+        out(-1)
+    } else {
+        out(to_bits(x) as i64)
+    }
+}
+
+fn entry() -> i64 {
+    let good: [str] = [
+        "0", "-0", "+0", "1", "-1", "0.1", "0.30000000000000004", "1.5e3", "1.5E+3", "2e-3",
+        "123456789012345678901234567890", "1e308", "1.8e308", "1e999", "-1e999", "4.9e-324",
+        "2.4703282292062327e-324", "2.4703282292062328e-324", "1e-400", "-1e-400",
+        "9007199254740993", "0.000001", "1e0", "00012.5000",
+        // Halfway between two doubles: ties go to the even one.
+        "9007199254740993.0", "9007199254740995",
+        "2.2250738585072011e-308", "1.7976931348623157e308", "1.7976931348623158e308",
+    ]
+    for s in good {
+        show(s)
+    }
+    let bad: [str] = [
+        "", "+", "-", ".", ".5", "5.", "1e", "1e+", "e5", "1.2.3", "1e5.5", "--1", "+-1",
+        "inf", "nan", "NaN", "infinity", "0x10", "0x1p3", " 1", "1 ", "1_000", "1,5", "١",
+    ]
+    for s in bad {
+        show(s)
+    }
+    // `strings.parse_float` allows spaces around the number.
+    let total = 0.0
+    for s in strings.fields(" 1.5\t2.25\n-0.75 x 1e1 ") {
+        match strings.parse_float(s) {
+            Some(x) => total = total + x
+            None => out(len(s))
+        }
+    }
+    out(to_bits(total) as i64)
+    match strings.parse_float("  -2.5  ") {
+        Some(x) => out((x * 4.0) as i64)
+        None => out(0)
+    }
+    return 0
+}

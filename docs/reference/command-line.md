@@ -6,7 +6,7 @@ VM. Programs are native unless their root file says otherwise
 
 ```sh
 jihoo run hello.jh                   # compile and run
-jihoo run args.jh -- one two         # with arguments for `main(argc, argv)`
+jihoo run args.jh -- one two         # with arguments, for `args()`
 jihoo build args.jh -o args          # compile to an executable
 jihoo emit-ir fib.jh                 # print the program's JIR
 ```
@@ -24,8 +24,8 @@ Its exit status is the program's: what `main` returns (modulo 256), or 0 if
   that traps (an out-of-bounds index, division by zero, `trap()`) is killed by
   a signal; `jihoo run` says so and exits with 128 plus the signal's number, as
   a shell reports it. What the program printed before is not lost.
-- A **hosted** program (`#![hosted]`) runs on the VM. It takes no arguments
-  and no link inputs. A runtime error (also a deadlock) is printed as
+- A **hosted** program (`#![hosted]`) runs on the VM, which gives it the
+  arguments through `args()`. It takes no link inputs. A runtime error (also a deadlock) is printed as
   `error: runtime error in @function: message` and exits with status 1.
 
 ### `jihoo build <file.jh> [-o out] [link inputs]`

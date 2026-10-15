@@ -618,6 +618,23 @@ impl Cx<'_> {
                         expect(src, &Type::List(Box::new(Type::U8))).and(expect(dst, &Type::Str))
                     }
                     Inst::ReadLine { dst } => expect(dst, &Type::Str),
+                    // `str` is not freestanding, so these are hosted and native.
+                    Inst::Args { dst } => expect(dst, &Type::List(Box::new(Type::Str))),
+                    Inst::ReadFile { dst, path } => {
+                        expect(path, &Type::Str)?;
+                        let parts: Option<Vec<&Type>> = match ty(dst)? {
+                            Type::Struct(n) => self.structs.get(n.as_str()).map(|s| s.fields.iter().map(|(_, t)| t).collect()),
+                            _ => None,
+                        };
+                        match parts {
+                            Some(p) if p == [&Type::Str, &Type::I64] => Ok(()),
+                            _ => Err(format!("`readfile` gives a struct of a str and an i64, not {}", ty(dst)?.jir())),
+                        }
+                    }
+                    Inst::WriteFile { dst, path, data, .. } => {
+                        expect(path, &Type::Str).and(expect(data, &Type::Str)).and(expect(dst, &Type::I64))
+                    }
+                    Inst::ParseFloat { dst, src } => expect(src, &Type::Str).and(expect(dst, &Type::F64)),
                     Inst::Trap => Ok(()),
                     Inst::Loc { file, .. } => {
                         if *file as usize >= self.module_files {

@@ -1,0 +1,119 @@
+// Files, for hosted and native programs, on the builtins `read_file`,
+// `write_file` and `append_file`. A failure is a message that names the
+// file and says what went wrong, as C's `strerror` would.
+//
+//   import files
+//   match files.read("notes.txt") {
+//       Ok(text) => print(len(text))
+//       Err(msg) => files.eprint(msg)    // notes.txt: No such file or directory
+//   }
+//   match files.write("out.txt", "hello\n") {
+//       Some(msg) => files.eprint(msg)
+//       None => {}                         // written
+//   }
+
+// Error numbers of Linux (the same on x86_64 and aarch64), which the
+// builtins give.
+pub const EPERM = 1
+pub const ENOENT = 2
+pub const EIO = 5
+pub const ENOMEM = 12
+pub const EACCES = 13
+pub const EEXIST = 17
+pub const ENOTDIR = 20
+pub const EISDIR = 21
+pub const EINVAL = 22
+pub const EMFILE = 24
+pub const EFBIG = 27
+pub const ENOSPC = 28
+pub const EROFS = 30
+pub const ENAMETOOLONG = 36
+pub const ELOOP = 40
+
+// The whole file at `path`, or why it cannot be read.
+pub fn read(path: str) -> Result(str, str) {
+    let (text, err) = read_file(path)
+    if err != 0 {
+        return Result.Err(message(path, err))
+    }
+    return Result.Ok(text)
+}
+
+// Makes the file at `path` hold `text`, creating it if it is missing; gives
+// why it could not, or `None`.
+pub fn write(path: str, text: str) -> Option(str) {
+    return failure(path, write_file(path, text))
+}
+
+// Adds `text` at the end of the file at `path`, creating it if it is
+// missing; gives why it could not, or `None`.
+pub fn append(path: str, text: str) -> Option(str) {
+    return failure(path, append_file(path, text))
+}
+
+// Writes `text` and a newline to standard error.
+pub fn eprint(text: str) {
+    append_file("/dev/stderr", text + "\n")
+}
+
+// `path: what error number `err` means`.
+pub fn message(path: str, err: i64) -> str {
+    return path + ": " + error_text(err)
+}
+
+// What error number `err` means, in the words of the C library.
+pub fn error_text(err: i64) -> str {
+    if err == EPERM {
+        return "Operation not permitted"
+    }
+    if err == ENOENT {
+        return "No such file or directory"
+    }
+    if err == EIO {
+        return "Input/output error"
+    }
+    if err == ENOMEM {
+        return "Cannot allocate memory"
+    }
+    if err == EACCES {
+        return "Permission denied"
+    }
+    if err == EEXIST {
+        return "File exists"
+    }
+    if err == ENOTDIR {
+        return "Not a directory"
+    }
+    if err == EISDIR {
+        return "Is a directory"
+    }
+    if err == EINVAL {
+        return "Invalid argument"
+    }
+    if err == EMFILE {
+        return "Too many open files"
+    }
+    if err == EFBIG {
+        return "File too large"
+    }
+    if err == ENOSPC {
+        return "No space left on device"
+    }
+    if err == EROFS {
+        return "Read-only file system"
+    }
+    if err == ENAMETOOLONG {
+        return "File name too long"
+    }
+    if err == ELOOP {
+        return "Too many levels of symbolic links"
+    }
+    return "error " + to_str(err)
+}
+
+fn failure(path: str, err: i64) -> Option(str) {
+    if err != 0 {
+        return Option.Some(message(path, err))
+    }
+    return Option.None
+}

@@ -1,7 +1,7 @@
 ; `take` moves a field out of a struct and leaves it empty (all zeros), which
 ; a later `setfield` writes over: 7 taken, 0 left, then 5 written.
 ; expect: exit 75
-jir 19
+jir 20
 profile freestanding
 
 struct $P { x: i64, y: i64 } size 16 align 8

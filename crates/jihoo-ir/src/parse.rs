@@ -548,6 +548,13 @@ fn assign(l: &mut Line, dst: Reg) -> Result<Inst> {
             Inst::Slice { dst, src, lo, hi }
         }
         "readline" => Inst::ReadLine { dst },
+        "args" => Inst::Args { dst },
+        "readfile" => Inst::ReadFile { dst, path: l.reg()? },
+        "writefile" | "appendfile" => {
+            let (path, data) = l.two()?;
+            Inst::WriteFile { dst, path, data, append: op == "appendfile" }
+        }
+        "parsefloat" => Inst::ParseFloat { dst, src: l.reg()? },
         "repeat" => {
             let (value, count) = l.two()?;
             Inst::Repeat { dst, value, count }

@@ -392,7 +392,7 @@ fn breach(name: &str) -> Option<(String, ContractKind, usize)> {
 
 /// Whether a VM error says the code cannot run while compiling at all.
 fn unsupported(msg: &str) -> bool {
-    ["pointers", "`syscall`", "inline asm", "`read_line`", "deadlock", "channel", "`type_of`", "cannot bitcast"]
+    ["pointers", "`syscall`", "inline asm", "`read_line`", "cannot run at compile time", "deadlock", "channel", "`type_of`", "cannot bitcast"]
         .iter()
         .any(|w| msg.contains(w))
 }
