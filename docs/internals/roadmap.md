@@ -205,6 +205,14 @@
     `filter_in_place` pass, so `lists.map` with `strings.to_upper`, or with
     a function that prints, writes into the list too; `map_map` does not,
     and still fuses only inert functions.
+47. Payloads move out of values used again: a value is taken apart in each
+    block that reads only its parts and where it dies, whatever the rest of
+    the function does with it, unless it is a view or a view of it is still
+    used. Rebuilding a state in a variable (`st = State.Busy(xs)` after
+    `push(xs, i)`) went from 0.87 s to 0.12 s for 30 million rounds; out of
+    a field every arm writes again, from O(n²) to O(n) (15.3 s to 2 ms for
+    100,000 rounds). The fuzzer now takes apart and rebuilds a `Slot(T)`
+    of random payload types.
 
 ## Next
 
@@ -225,9 +233,9 @@
   invariants of a module's structs, so that `pub` functions taking them can
   be tried; `old(e)` for the value of an expression at the start; and
   telling apart runtime contract failures from other traps natively.
-- **Memory** ([design](memory.md)): taking an enum's payload out of a
-  value that is used again (`take` covers fields and elements; payloads move
-  only out of values that are only taken apart).
+- **Memory** ([design](memory.md)): taking a payload out of a field that
+  some arm of a `match` leaves as it is (`take` of paths through payloads),
+  or putting it back on that path.
 
 - **Floats:** `fma`, which IEEE also defines exactly, but freestanding code on
   x86_64 would need an exact software version.

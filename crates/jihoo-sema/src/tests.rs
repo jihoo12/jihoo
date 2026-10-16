@@ -2486,6 +2486,30 @@ fn handed_on_parameters_copy_nothing() {
     assert!(e.contains("copies fn(i64) -> i64 here: a value is put into a new value and copied, since it is still used afterwards"), "{e}");
 }
 
+/// A value taken apart where it dies gives its payload away, however it is
+/// used elsewhere: before, or after it is written again.
+#[test]
+fn payloads_move_out_of_values_used_again() {
+    let src = "#![native]\nenum State { Idle, Busy([i64], str) }\n\
+               fn size(s: State) -> i64 { match s {\n  Busy(xs, _) => return len(xs)\n  Idle => return 0\n} }\n\
+               fn main() {\n  let st = State.Busy([], \"a\")\n  print(size(st))\n  for i in 0..10 {\n    match st {\n      Busy(xs, name) => {\n        push(xs, i)\n        st = State.Busy(xs, name + \"!\")\n      }\n      Idle => {}\n    }\n  }\n  print(size(st))\n}";
+    let m = check(src).unwrap();
+    assert!(jihoo_ir::cost::copies(&m).is_empty(), "{m}");
+    let main = m.func("main").unwrap().to_string();
+    assert!(main.contains("moves"), "{main}");
+    // Out of a field of a value used again, which every arm writes again:
+    // taken out, then apart.
+    let src = "#![native]\nenum State { Idle, Busy([i64]) }\nstruct M { st: State, steps: i64 }\n\
+               fn main() {\n  let m = M { st: State.Busy([]), steps: 0 }\n  for i in 0..10 {\n    match m.st {\n      Busy(xs) => {\n        push(xs, i)\n        m.st = State.Busy(xs)\n      }\n      Idle => m.st = State.Idle\n    }\n    m.steps += 1\n  }\n  print(m.steps)\n}";
+    let m = check(src).unwrap();
+    assert!(jihoo_ir::cost::copies(&m).is_empty(), "{m}");
+    // Still read after, through what a payload holds: copied.
+    let src = "#![native]\nenum Box { Full([i64]) }\n\
+               fn main() {\n  let b = Box.Full([1])\n  let ys: [i64] = []\n  match b {\n    Full(xs) => {\n      ys = xs\n      push(ys, 2)\n    }\n  }\n  match b {\n    Full(xs) => print(len(xs) + len(ys))\n  }\n}";
+    let m = check(src).unwrap();
+    assert!(!jihoo_ir::cost::copies(&m).is_empty(), "{m}");
+}
+
 // ---- rules ----
 
 const POW: &str = "fn pow(x: i64, n: i64) -> i64 {\n  let r = 1\n  for i in 0..n { r = r * x }\n  return r\n}\n";

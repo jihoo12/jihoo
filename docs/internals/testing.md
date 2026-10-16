@@ -79,6 +79,12 @@ Programs with lists also run `lists.fuse!` pipelines of random `map` and
 expand the same macro, so comparing them could not catch a wrong expansion;
 the loop can, and a program whose two results differ fails its seed.
 
+They also take apart a `Slot(T)` (`Empty`, or `Full(T, [i64])`) with a
+payload of a random type in a loop, in a variable or a tuple, and on some
+ways build it again from the payload, leave it as it is, or keep a copy of
+it first: the cases where the ownership pass moves a payload out of a value
+used again, or must not.
+
 With `JIHOO_VALGRIND` set to valgrind's path, the native programs with lists
 (in `tests/diff-lists` and the fuzzer's list mode) run under it, and a leak or
 an invalid access fails them. They are built with `-O0` for it: LLVM may

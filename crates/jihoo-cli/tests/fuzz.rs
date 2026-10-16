@@ -33,6 +33,8 @@
 //! They run `lists.fuse!` pipelines of `map` and `filter` closures ending in
 //! `sum`, `count` or `collect`, and the same pipelines as loops written out,
 //! whose results must be the same.
+//! They take apart a `Slot(T)` in a loop and build it again, or not, from
+//! its payload, changed.
 //! Lists never become empty, so indexes (taken modulo the length) are in
 //! bounds. Those run on the VM and natively only, where the ownership pass
 //! decides where lists are copied and freed; with `JIHOO_VALGRIND` set to
@@ -186,6 +188,10 @@ impl Gen {
             // Changes its copy of a list: `v.f = grown(v.f)` moves the field
             // out and back in natively (`take`).
             for l in ["fn grown(comptime T: type, xs: [T]) -> [T] {", "    push(xs, xs[0])", "    return xs", "}"] {
+                self.line(l);
+            }
+            // Taken apart and built again by `payload_stmt`.
+            for l in ["enum Slot(T: type) {", "    Empty,", "    Full(T, [i64]),", "}"] {
                 self.line(l);
             }
         }
@@ -802,6 +808,10 @@ impl Gen {
         }
         if self.lists && self.rng.chance(6) {
             self.pipeline();
+            return;
+        }
+        if self.lists && self.rng.chance(6) {
+            self.payload_stmt();
             return;
         }
         if self.traits && depth > 0 && self.loops < 2 && self.rng.chance(4) && self.rep_loop(depth) {
@@ -1535,6 +1545,101 @@ impl Gen {
             _ => None,
         }
     }
+
+    /// A `Slot(T)` taken apart by a `match` in a loop and, on some paths,
+    /// built again from its payload, changed: so the payload moves out of a
+    /// value used again (natively, without a copy), or stays in it, or in a
+    /// copy made first. The slot is a variable, or part of a tuple that is
+    /// used again too.
+    fn payload_stmt(&mut self) {
+        // As a type argument, `cell (A, B)` reads as `cell(A, B)`, a call.
+        let mut t = self.any_ty(2);
+        while self.ty_name(&t).contains("cell (") {
+            t = self.any_ty(2);
+        }
+        let tn = self.ty_name(&t);
+        let x = self.expr(&t, 2);
+        let s = self.fresh("s");
+        let in_tuple = self.rng.chance(40);
+        let target = if in_tuple {
+            self.line(&format!("let {s}: (Slot({tn}), i64) = (Slot.Full({x}, [1]), 0)"));
+            format!("{s}.0")
+        } else {
+            self.line(&format!("let {s}: Slot({tn}) = Slot.Full({x}, [1])"));
+            s.clone()
+        };
+        let kept = self.rng.chance(30).then(|| {
+            let k = self.fresh("k");
+            self.line(&format!("let {k}: Slot({tn}) = {target}"));
+            k
+        });
+        let (i, a, ns) = (self.fresh("i"), self.fresh("a"), self.fresh("ns"));
+        let rounds = 1 + self.rng.below(4);
+        self.line(&format!("for {i} in 0..{rounds} {{"));
+        self.indent += 1;
+        self.line(&format!("match {target} {{"));
+        self.indent += 1;
+        self.line(&format!("Full({a}, {ns}) => {{"));
+        self.indent += 1;
+        self.line(&format!("push({ns}, {i})"));
+        if let Ty::List(e) = &t {
+            if self.rng.chance(50) {
+                let y = self.expr(e, 1);
+                self.line(&format!("push({a}, {y})"));
+            }
+        }
+        match self.rng.below(10) {
+            0..=4 => self.line(&format!("{target} = Slot.Full({a}, {ns})")),
+            5 | 6 => self.line(&format!("{target} = Slot.Empty")),
+            7 => {
+                self.line(&format!("if {i} % 2 == 0 {{"));
+                self.line(&format!("    {target} = Slot.Full({a}, {ns})"));
+                self.line("}");
+            }
+            // Left as it was.
+            _ => self.out(&format!("len({ns})"), &Ty::I64),
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.line("Empty => {");
+        self.indent += 1;
+        if self.rng.chance(50) {
+            let y = self.expr(&t, 1);
+            self.line(&format!("{target} = Slot.Full({y}, [{i}])"));
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        if in_tuple {
+            self.line(&format!("{s}.1 = {s}.1 + 1"));
+        }
+        self.indent -= 1;
+        self.line("}");
+        for e in [Some(target), kept].into_iter().flatten() {
+            self.dump_slot(&e, &t);
+        }
+        if in_tuple {
+            self.out(&format!("{s}.1"), &Ty::I64);
+        }
+    }
+
+    /// Prints what `Slot` `e`, of `T` = `t`, holds.
+    fn dump_slot(&mut self, e: &str, t: &Ty) {
+        let (a, ns) = (self.fresh("a"), self.fresh("ns"));
+        self.line(&format!("match {e} {{"));
+        self.indent += 1;
+        self.line(&format!("Full({a}, {ns}) => {{"));
+        self.indent += 1;
+        self.dump(&a, t);
+        self.dump(&ns, &Ty::List(Box::new(Ty::I64)));
+        self.indent -= 1;
+        self.line("}");
+        self.line("Empty => out(-1)");
+        self.indent -= 1;
+        self.line("}");
+    }
+
 
     fn declare(&mut self, t: Ty, e: String) {
         let name = self.fresh("v");

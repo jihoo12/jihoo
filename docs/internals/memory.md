@@ -235,6 +235,39 @@ The in-place rules pass, so `words = lists.map(words, ...)` with
 `strings.to_upper`, or a `map` whose `f` prints, allocates nothing either. `map_map` does not,
 and still fuses only inert functions.
 
+Payloads, too. The pass moved the parts out of a value only when the
+whole function did nothing else with it but take it apart. A state kept
+in a variable and rebuilt in a loop is used elsewhere as well, before or
+after:
+
+```jihoo
+match st {
+    Busy(xs) => {
+        push(xs, i)
+        st = State.Busy(xs)
+    }
+    Idle => {}
+}
+```
+
+There `xs` was a copy, an O(1) one since step 1, freed again when `st`
+died just after. 30 million rounds took 0.87 s, against 0.13 s for the
+same `push`es on a list in a variable. Now each block that takes a value
+apart, where it dies, decides for itself: the payload moves out of `st`
+whatever happens to `st` elsewhere. That takes 0.12 s. A value that is a
+view of another, or whose views are still used after that point, is left
+as it was, and `owncheck.rs` checks the rest.
+
+Out of a field it matters more. In `match m.st { Busy(xs) => ... }`, with
+`m` used again, `m.st` was a view, and so was its payload: `push` copied
+the whole list each round, since `m.st` still held it, which is O(n²).
+Now the field is taken (`take`) when what is read out of it would be
+copied, so a loop of 100,000 rounds goes from 15.3 s to 2 ms. That needs
+every way on from the `match` to write `m.st` again before reading it,
+as for any `take`: an arm that leaves `m.st` as it is (`Idle => {}`)
+keeps it a view, and its payload a copy. Taking the payload alone, out of
+the field, would need a `take` of paths through payloads.
+
 ### 5. Later, in the language
 
 `inout` parameters (Hylo's) would let a function change the caller's value in

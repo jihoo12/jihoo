@@ -1,0 +1,155 @@
+// Payloads move out of a value taken apart where it dies, even when the
+// value is used elsewhere: before, or after it is written again. Natively
+// the payload is then not copied; what the program computes, and frees,
+// must be what it was.
+
+enum State {
+    Idle,
+    Busy([i64], str),
+}
+
+enum Tree {
+    Leaf(i64),
+    Node([Tree], str),
+}
+
+struct Machine {
+    st: State,
+    steps: i64,
+}
+
+fn size(s: State) -> i64 {
+    match s {
+        Busy(xs, name) => return len(xs) * 100 + len(name),
+        Idle => return 0,
+    }
+}
+
+fn total(xs: [i64]) -> i64 {
+    let s = 0
+    for x in xs {
+        s += x
+    }
+    return s
+}
+
+fn count(t: Tree) -> i64 {
+    match t {
+        Leaf(n) => return n,
+        Node(kids, _) => {
+            let s = 0
+            for k in kids {
+                s += count(k)
+            }
+            return s
+        }
+    }
+}
+
+// Takes `s` apart on one path, and gives it back whole on the other.
+fn grow(s: State, x: i64) -> State {
+    if x % 3 == 0 {
+        return s
+    }
+    match s {
+        Busy(xs, name) => {
+            push(xs, x)
+            return State.Busy(xs, name)
+        }
+        Idle => return State.Busy([x], "new"),
+    }
+}
+
+fn entry() -> i64 {
+    // Used before and after; taken apart in the loop.
+    let st = State.Busy([], "a")
+    out(size(st))
+    for i in 0..20 {
+        match st {
+            Busy(xs, name) => {
+                push(xs, i)
+                if i % 7 == 6 {
+                    st = State.Idle
+                } else {
+                    st = State.Busy(xs, name + "b")
+                }
+            }
+            Idle => st = State.Busy([i], ""),
+        }
+    }
+    out(size(st))
+
+    // A copy still used: its payload stays.
+    let kept = st
+    match st {
+        Busy(xs, _) => {
+            push(xs, 99)
+            st = State.Busy(xs, "c")
+        }
+        Idle => {}
+    }
+    out(size(kept))
+    out(size(st))
+
+    // Through a function, with a path that gives the value back.
+    let g = State.Idle
+    for i in 1..10 {
+        g = grow(g, i)
+    }
+    out(size(g))
+
+    // A field one arm leaves as it is: the machine is used again, so the
+    // payload is copied.
+    let m = Machine { st: State.Busy([1, 2], "m"), steps: 0 }
+    for i in 0..5 {
+        match m.st {
+            Busy(xs, name) => {
+                push(xs, total(xs))
+                m.st = State.Busy(xs, name)
+            }
+            Idle => {}
+        }
+        m.steps += 1
+    }
+    out(size(m.st) + m.steps)
+
+    // A field every arm writes again: taken out of the machine, then apart.
+    let w = Machine { st: State.Busy([3], "w"), steps: 0 }
+    for i in 0..6 {
+        match w.st {
+            Busy(xs, name) => {
+                push(xs, i)
+                if i == 4 {
+                    w.st = State.Idle
+                } else {
+                    w.st = State.Busy(xs, name)
+                }
+            }
+            Idle => w.st = State.Busy([i], "again"),
+        }
+        w.steps += 1
+    }
+    out(size(w.st) + w.steps)
+
+    // Nested: a tree rebuilt from the children taken out of it.
+    let t = Tree.Node([Tree.Leaf(1), Tree.Node([Tree.Leaf(2)], "in")], "top")
+    out(count(t))
+    for i in 0..3 {
+        match t {
+            Node(kids, name) => {
+                push(kids, Tree.Leaf(i * 10))
+                t = Tree.Node(kids, name)
+            }
+            Leaf(n) => t = Tree.Leaf(n + 1),
+        }
+    }
+    out(count(t))
+
+    // Taken apart, then dropped without being written again.
+    let last = State.Busy([5, 6], "end")
+    match last {
+        Busy(xs, _) => out(total(xs)),
+        Idle => {}
+    }
+    return 0
+}
