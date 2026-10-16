@@ -224,10 +224,16 @@ Rules apply only where the functions they are given are inert (no effects,
 certain to return), since rules may reorder calls. To count `x % 3 == 0`
 as inert, the effect analysis now knows that dividing by a constant other
 than 0 and -1 cannot trap. A function with a loop (`strings.to_upper`) is
-still not inert, so `map` over strings with it is compiled as written. The
-in-place rules call `f` in the same order as `map`, so they could apply to
-any `f`; that needs the rule checker to compare the order in which a rule
-and its pattern call the functions they are given, which the roadmap has.
+is not inert. But the in-place rules call `f` just as `map` and `filter`
+do, once for each element, in order, so they can apply to any `f`. The rule
+checker now shows this: the first time a rule would apply to a function
+that is not inert, it runs the rule and its pattern again with functions
+that record each call (which parameter, and with what) and trap at one of
+the first few calls, and compares the records, the output and where each
+side stops ([Rules that keep the order of calls](../language/rules.md#rules-that-keep-the-order-of-calls)).
+The in-place rules pass, so `words = lists.map(words, ...)` with
+`strings.to_upper`, or a `map` whose `f` prints, allocates nothing either. `map_map` does not,
+and still fuses only inert functions.
 
 ### 5. Later, in the language
 
@@ -298,6 +304,6 @@ The cost in memory is 8 bytes for each list or string buffer.
 1. ~~Counted buffers in the backend.~~ Done.
 2. ~~Uniqueness checks that fold away.~~ Done.
 3. ~~Explicit ownership in JIR and the checker.~~ Done.
-4. ~~Reuse of unique buffers~~, for `map` and `filter`, as rules. Done. Next:
-   checking the order of calls in rules, so that they apply to any `f`.
+4. ~~Reuse of unique buffers~~, for `map` and `filter`, as rules, for any
+   `f`. Done.
 5. `inout` parameters, if programs still want them.

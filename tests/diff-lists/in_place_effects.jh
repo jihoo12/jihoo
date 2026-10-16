@@ -1,0 +1,59 @@
+// `map_in_place` and `filter_in_place` call the function they are given as
+// `lists.map` and `lists.filter` do: once for each element, in order. So
+// they apply to functions with effects too: functions that print, loop,
+// change cells or come from parameters. All of it must print the same as
+// on the VM. (Stopping at the same element when one traps is checked by
+// `map_and_filter_reuse_the_list` in `differential.rs`.)
+import lists
+import strings
+
+fn shout(x: i64) -> i64 {
+    out(x)
+    return x * 2
+}
+
+fn total(xs: [i64]) -> i64 {
+    let s = 0
+    for x in xs {
+        s += x
+    }
+    return s
+}
+
+fn each(xs: [i64], f: fn(i64) -> i64) -> [i64] {
+    return lists.map(xs, f)
+}
+
+fn entry() -> i64 {
+    // Prints each element as it goes.
+    let xs: [i64] = [1, 2, 3, 4]
+    xs = lists.map(xs, shout)
+    xs = lists.filter(xs, fn(x: i64) -> bool {
+        out(x + 100)
+        return x % 4 == 0
+    })
+    out(total(xs))
+
+    // Loops: `to_upper` runs over each string's bytes.
+    let words: [str] = ["map", "in", "place"]
+    words = lists.map(words, fn(w: str) -> str { return strings.to_upper(w) })
+    words = lists.filter(words, fn(w: str) -> bool {
+        out(len(w))
+        return strings.contains(w, "A")
+    })
+    out(len(strings.join(words, ",")))
+    out(words[1][0] as i64)
+
+    // A counter the calls share, and a function from a parameter.
+    let n = cell(0)
+    let ys: [i64] = [10, 20, 30]
+    ys = lists.map(ys, fn(y: i64) -> i64 {
+        *n = *n + 1
+        return y + *n
+    })
+    out(total(ys))
+    let still = ys
+    ys = each(ys, shout)
+    out(total(still) * 1000 + total(ys))
+    return 0
+}

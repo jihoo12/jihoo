@@ -168,8 +168,9 @@ fn main() {
 
 `map` to the same type and `filter` reuse the list's memory: the module has
 [rules](../language/rules.md) `map_in_place` and `filter_in_place` that
-replace them where `f` or `keep` has no effects, and write the result into
-the list passed in. Natively, `xs = lists.map(xs, f)` then allocates
+replace them and write the result into the list passed in. They call `f` or
+`keep` once for each element, in order, as `map` and `filter` do, so they
+apply whatever the function does, printing and looping included. Natively, `xs = lists.map(xs, f)` then allocates
 nothing; where `xs` is still used, it is copied once, at the first write.
 Either way the result is the same, and the compiler checks the rules
 against what they replace.

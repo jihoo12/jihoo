@@ -197,6 +197,14 @@
     allocates nothing (0.05 s and 17 MB instead of 0.10 s and 33 MB on 2
     million integers). Dividing by a constant other than 0 and -1 counts as
     inert for rules, so `x % 3 == 0` can be given to them.
+46. Rules that keep the order of calls apply to any function: the first
+    time a rule would apply to a function with effects, the compiler runs
+    it next to its pattern with functions that record each call and trap
+    at one of the first few, and the rule applies when the calls, the
+    output and where each side stops are all the same. `map_in_place` and
+    `filter_in_place` pass, so `lists.map` with `strings.to_upper`, or with
+    a function that prints, writes into the list too; `map_map` does not,
+    and still fuses only inert functions.
 
 ## Next
 
@@ -212,18 +220,14 @@
   the same stages written out as a loop.
 - **Traits** ([design](traits.md)): dynamic dispatch, when a program needs
   it.
-- **Rules:** comparing the effects of the functions a rule is given (a
-  rule that reorders calls is checked with functions that have none), and
-  patterns that are operators (`x * 1`) or methods.
+- **Rules:** patterns that are operators (`x * 1`) or methods.
 - **Contracts:** clauses on trait functions, which every impl would keep;
   invariants of a module's structs, so that `pub` functions taking them can
   be tried; `old(e)` for the value of an expression at the start; and
   telling apart runtime contract failures from other traps natively.
-- **Memory** ([design](memory.md)): rules that apply to functions with
-  effects when they keep the order of calls (so that `map_in_place` applies
-  to any `f`). Also taking an enum's payload out of a value that is used again
-  (`take` covers fields and elements; payloads move only out of values
-  that are only taken apart).
+- **Memory** ([design](memory.md)): taking an enum's payload out of a
+  value that is used again (`take` covers fields and elements; payloads move
+  only out of values that are only taken apart).
 
 - **Floats:** `fma`, which IEEE also defines exactly, but freestanding code on
   x86_64 would need an exact software version.

@@ -62,8 +62,9 @@ pub fn filter(comptime T: type, xs: [T], keep: fn(T) -> bool) -> [T] {
 // `map` and `filter` where the result is a list of the same type as `xs`
 // write it into `xs`'s memory: natively, when `xs` is handed over (as in
 // `xs = lists.map(xs, f)`), nothing is allocated. They are rules, which the
-// compiler checks against what they replace, and apply only where `f` or
-// `keep` has no effects, so the order of the calls cannot be told apart.
+// compiler checks against what they replace. They call `f` or `keep` once
+// for each element, in order, as `map` and `filter` do, which the compiler
+// checks too, so they apply whatever `f` or `keep` does.
 
 // `map` from a type to itself, in place.
 pub fn map_in_place(comptime T: type, xs: [T], f: fn(T) -> T) -> [T] replaces map(xs, f) {

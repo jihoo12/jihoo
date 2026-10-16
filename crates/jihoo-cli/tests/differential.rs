@@ -343,17 +343,22 @@ fn main() {
 
 /// `xs = lists.map(xs, f)` and `lists.filter` to the same type become the
 /// library's in-place rules, and take the list over: no list is allocated.
-/// A function with an effect keeps the call as written.
+/// They call `f` as `map` and `filter` do, so they apply whatever `f` does:
+/// when it prints, loops, or traps part of the way through, which both
+/// builds stop at the same element for.
 #[test]
 fn map_and_filter_reuse_the_list() {
     let work = common::work_dir("in-place");
     let path = work.join("in_place.jh");
-    let src = "import lists\n\nfn main() {\n    let xs: [i64] = [1, 2, 3]\n    \
+    let src = "import lists\nimport strings\n\nfn main() {\n    let xs: [i64] = [1, 2, 3]\n    \
                xs = lists.map(xs, fn(x: i64) -> i64 { return x * 2 })\n    \
                xs = lists.filter(xs, fn(x: i64) -> bool { return x % 4 == 0 })\n    \
                let ys = lists.map(xs, fn(x: i64) -> i64 { print(x)\n return x })\n    \
                let zs = lists.map(xs, fn(x: i64) -> str { return to_str(x) })\n    \
-               print(len(ys) + len(zs))\n}\n";
+               let words: [str] = [\"map\", \"in\", \"place\"]\n    \
+               words = lists.map(words, fn(w: str) -> str { return strings.to_upper(w) })\n    \
+               xs = lists.filter(xs, fn(x: i64) -> bool { print(x)\n return x > 0 })\n    \
+               print(len(ys) + len(zs) + len(words))\n}\n";
     std::fs::write(&path, src).unwrap();
     let out = Command::new(JIHOO).arg("emit-ir").arg(&path).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -361,10 +366,30 @@ fn map_and_filter_reuse_the_list() {
     let main = &jir[jir.find("fn @main(").unwrap()..];
     let main = &main[..main.find("\n}\n").unwrap()];
     let calls: Vec<&str> = main.lines().filter_map(|l| l.split("call @lists.").nth(1)).map(|c| c.split('(').next().unwrap()).collect();
-    assert!(calls[0].starts_with("map_in_place") && calls[0].ends_with(".own"), "{calls:?}");
-    assert!(calls[1].starts_with("filter_in_place") && calls[1].ends_with(".own"), "{calls:?}");
-    // It prints: kept as written. To another type: kept too.
-    assert!(calls[2].starts_with("map.") && calls[3].starts_with("map."), "{calls:?}");
+    let in_place = |c: &str, rule: &str| c.starts_with(rule) && c.ends_with(".own");
+    assert!(in_place(calls[0], "map_in_place") && in_place(calls[1], "filter_in_place"), "{calls:?}");
+    // It prints: in place too, on a copy, since `xs` is used again.
+    assert!(calls[2].starts_with("map_in_place") && !calls[2].ends_with(".own"), "{calls:?}");
+    // To another type: kept as written.
+    assert!(calls[3].starts_with("map."), "{calls:?}");
+    // `to_upper` loops; `keep` prints.
+    assert!(in_place(calls[4], "map_in_place") && in_place(calls[5], "filter_in_place"), "{calls:?}");
+
+    // `f` traps at the third element: both stop after printing two.
+    let path = work.join("in_place_trap.jh");
+    let src = "import lists\n\nfn main() {\n    let xs: [i64] = [5, 2, 0, 7]\n    \
+               xs = lists.map(xs, fn(x: i64) -> i64 { print(x)\n return 10 / x })\n    print(len(xs))\n}\n";
+    for (profile, compiled) in [("#![hosted]\n", false), ("", true)] {
+        if compiled && std::env::var_os("JIHOO_LLC").is_none() {
+            continue;
+        }
+        std::fs::write(&path, format!("{profile}{src}")).unwrap();
+        let out = Command::new(JIHOO).arg("run").arg(&path).output().unwrap();
+        assert!(!out.status.success(), "{profile}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "5\n2\n0\n", "{profile}");
+    }
+    let out = Command::new(JIHOO).arg("emit-ir").arg(&path).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("call @lists.map_in_place."));
     std::fs::remove_dir_all(&work).unwrap();
 }
 

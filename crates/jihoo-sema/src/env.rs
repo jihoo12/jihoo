@@ -130,6 +130,9 @@ pub(crate) struct Env<'p> {
     /// for, and the functions whose answer is being worked out (`effects.rs`).
     pub(crate) effects: RefCell<HashMap<String, crate::effects::Effects>>,
     pub(crate) effects_open: RefCell<HashSet<String>>,
+    /// Whether each rule instance asked about calls the functions it is
+    /// given as its pattern does (`rules.rs`).
+    pub(crate) order_kept: RefCell<HashMap<String, bool>>,
     const_decls: HashMap<String, (usize, &'p ConstDecl)>,
     /// Traits by key, like the declarations above.
     pub(crate) trait_decls: HashMap<String, (usize, &'p TraitDecl)>,
@@ -210,6 +213,7 @@ impl<'p> Env<'p> {
             rule_index: std::cell::OnceCell::new(),
             effects: RefCell::new(HashMap::new()),
             effects_open: RefCell::new(HashSet::new()),
+            order_kept: RefCell::new(HashMap::new()),
             const_decls: HashMap::new(),
             trait_decls: HashMap::new(),
             impls: Vec::new(),

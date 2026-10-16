@@ -6,7 +6,8 @@
 //! parts of the pattern that are not its parameters run after all of the
 //! parameters' parts instead of between them. That is only unobservable for
 //! code that is *inert*: it has no effect anyone can see, and it always
-//! returns. Code that prints but cannot trap, or that can trap but does
+//! returns. (Or for any code, when the rule is shown to call it as the
+//! pattern does: `rules.rs`, `keeps_order`.) Code that prints but cannot trap, or that can trap but does
 //! nothing else, can tell the order apart either way: a trap ends the
 //! program at a different point of what it printed.
 //!

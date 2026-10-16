@@ -85,7 +85,8 @@ gives up (and rolls back) unless:
   function (not generic) is;
 - a part right of `&&` or `||` is inert;
 - a function value a part gives was made by that part's code, a `funcref`
-  (possibly a hoisted one) or `closure` of a function that is inert;
+  (possibly a hoisted one) or `closure` of a function that is inert; or
+  else the rule keeps the order of calls (`Env::keeps_order`, below);
 - no other part's type holds a function value.
 
 `Env::effects_of` summarizes a JIR function, through everything it calls, as
@@ -105,6 +106,19 @@ written for parameters of function type (`f.arg.N`), which are all inert.
 Results are compared as constants (any NaN equals any other), along with
 what each side prints; traps only match traps. A rule or pattern that
 reads standard input is refused, since both run with none.
+
+`Env::keeps_order` answers, once per rule instance and only when a call
+would give one a function that is not inert, whether the rule calls the
+functions it is given as its pattern does. It runs the two side by side
+again, through helpers `f.order.rule` and `f.order.of_pattern` that take
+the rule's parameters and a number `k`, make a cell, and pass each
+function wrapped in a closure of `f.order.trace.N`: that counts the call in
+the cell, prints the parameter's name and the arguments that can be
+printed, traps if the call is the `k`th, and calls the function. Each input
+(a quarter as many as for the values) is tried with no `k` and with one of
+the first four; the results, the output and the trap messages must all be
+the same. One that is not, or that cannot be run (still being compiled, or not checkable), is taken not to keep the
+order, which is not an error.
 
 ## Copy-free functions
 

@@ -1,4 +1,7 @@
-//! Rewrite rules the compiler checks: functions that replace a pattern.
+//! of the parts. So the functions must be inert and visible at the call,
+//! and so must the parts that would move past code that is not inert, or
+//! that `&&` and `||` may skip. A rule that calls the functions it is
+//! given as its pattern does (`keeps_order`) may be given any function.//! Rewrite rules the compiler checks: functions that replace a pattern.
 //!
 //! ```jihoo
 //! fn map_map(comptime T: type, xs: [T], g: fn(T) -> T, f: fn(T) -> T) -> [T]
@@ -38,6 +41,11 @@
 //! smallest input where they differ; one whose parameters or result the
 //! compiler cannot make up or compare, whose code cannot run while compiling,
 //! or that reads input, is refused.
+//!
+//! Whether a rule keeps the order of calls is checked the same way, with
+//! each function wrapped in one that prints that it was called, and with
+//! what, and that traps at one of the first few calls. A rule that does not
+//! is still a rule, for inert functions.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -57,12 +65,18 @@ use crate::{BlockBuf, FnCx};
 
 /// Inputs tried per rule.
 const CASES: usize = if cfg!(test) { 300 } else { 1000 };
+/// Inputs tried per rule for the order of calls, each twice: the values
+/// are checked already.
+const ORDER_CASES: usize = CASES / 4;
 /// VM steps for one side of one input; an input that needs more is skipped.
 const CASE_FUEL: u64 = 100_000;
 /// VM steps for all inputs of one rule.
 const BUDGET: u64 = if cfg!(test) { 5_000_000 } else { 20_000_000 };
 const SHRINK_RUNS: usize = 1000;
 const DEPTH: u32 = 4;
+/// When checking the order of calls, the wrapped functions trap at one of
+/// the first this many calls.
+const TRAP_AT: usize = 4;
 
 impl<'p> Env<'p> {
     /// The rules whose pattern calls function `key`, in a fixed order.
@@ -219,7 +233,8 @@ impl FnCx<'_> {
     ///   evaluate at all, must be inert;
     /// - a function a part gives must be one the compiler can see (written
     ///   there, or named), and inert: the rule may call it in another order,
-    ///   or another number of times;
+    ///   or another number of times. Unless the rule keeps the order
+    ///   (`keeps_order`): then it may be any function;
     /// - no part may hold function values inside other values.
     ///
     /// Otherwise the call is compiled as written.
@@ -237,6 +252,9 @@ impl FnCx<'_> {
         // Whether an operation of the pattern ran before this point in the
         // call as written, that the rule runs after all of the parts.
         let mut moved = false;
+        // Whether a function given may not be inert, which the rule must
+        // then call as the pattern does.
+        let mut in_order = false;
         for step in steps {
             let (name, guarded) = match step {
                 Step::Op(op) => {
@@ -261,9 +279,7 @@ impl FnCx<'_> {
                 return Ok(None);
             }
             if matches!(got, Type::Fn(..)) {
-                if !self.fn_value_effects(&mark, r).inert() {
-                    return Ok(None);
-                }
+                in_order |= !self.fn_value_effects(&mark, r).inert();
             } else if self.holds_fn(&got, &mut HashSet::new()) {
                 return Ok(None);
             }
@@ -279,6 +295,9 @@ impl FnCx<'_> {
         };
         let args: Vec<Reg> = runtime.iter().map(|p| regs[p.name.as_str()]).collect();
         if args.iter().zip(&sig.params).any(|(r, want)| self.ty(*r) != want) {
+            return Ok(None);
+        }
+        if in_order && !self.env.keeps_order(&func) {
             return Ok(None);
         }
         Ok(Some(self.emit_to(sig.ret.clone(), |dst| jihoo_ir::Inst::Call { dst, func, args })))
@@ -453,7 +472,8 @@ fn pattern_vars(e: &Expr, params: &[&str], seen: &mut HashMap<String, usize>) ->
 enum Outcome {
     /// The result, and what it printed.
     Value(ConstValue, Vec<u8>),
-    Trap(String),
+    /// Why it trapped, and what it printed before.
+    Trap(String, Vec<u8>),
     /// It did not finish within its steps.
     Unknown,
 }
@@ -467,6 +487,11 @@ struct Check {
     module: Rc<jihoo_ir::Module>,
     program: Rc<Program>,
     fuel: u64,
+    /// Whether two traps must also have the same cause and have printed the
+    /// same, as when checking the order of calls.
+    strict: bool,
+    /// The inputs both sides finished.
+    decided: usize,
 }
 
 impl<'p> Env<'p> {
@@ -505,39 +530,10 @@ impl<'p> Env<'p> {
 
     fn check_rule_fn(&self, f: &Function, decl: &FnDecl, rule: &Contract, bindings: Rc<Bindings>) -> Result<(), Error> {
         let refuse = |why: String| Error::new(rule.pos, format!("cannot check that `{}` does what it replaces: {why}", decl.name));
-        let module = bindings.module;
-        for t in &f.params {
-            if !self.rule_makeable(t, module) {
-                return Err(refuse(format!("the compiler cannot make up values of type {t} to try it with")));
-            }
-        }
-        if !self.comparable(&f.ret, &mut HashSet::new()) {
-            return Err(refuse(format!("values of type {} cannot be compared", f.ret)));
-        }
-
-        let mut gen = Gen::new(self, &f.name);
-        let mut made = Vec::new();
-        for t in &f.params {
-            if let Type::Fn(ps, r) = t {
-                if gen.fns.contains_key(&t.to_string()) {
-                    continue;
-                }
-                let fs = self.sample_fns(&f.name, made.len(), ps, r, &bindings, &mut gen)?;
-                gen.fns.insert(t.to_string(), fs.iter().map(|(f, _)| f.name.clone()).collect());
-                for (func, text) in fs {
-                    gen.fn_text.insert(func.name.clone(), text);
-                    made.push(func);
-                }
-            }
-        }
-        let pattern = self.pattern_fn(f, decl, rule, bindings)?;
-        // Both sides run with no input; what they would read at run time is
-        // not tried.
-        if (self.effects_of(&f.name) | self.body_effects(&pattern)).has(Effects::READS_INPUT) {
-            return Err(refuse("it reads standard input, which the checks cannot give it".into()));
-        }
-        let pattern_name = pattern.name.clone();
-        made.push(pattern);
+        let (mut gen, made, pattern_name) = self.rule_sides(f, decl, rule, &bindings, &f.name).map_err(|e| match e {
+            Refused::Why(why) => refuse(why),
+            Refused::Error(e) => e,
+        })?;
         let cannot = |e: Error| refuse(e.msg.trim_start_matches("cannot evaluate this at compile time: ").to_string());
         self.prepare(rule.pos, made, &pattern_name).map_err(cannot)?;
         let (vm_module, program) = self.prepare(rule.pos, vec![], &f.name).map_err(cannot)?;
@@ -549,28 +545,13 @@ impl<'p> Env<'p> {
             module: vm_module,
             program,
             fuel: BUDGET,
+            strict: false,
+            decided: 0,
         };
 
         let specials: Vec<Vec<ConstValue>> = c.params.iter().map(|t| gen.specials(t, DEPTH)).collect();
-        let total: usize = specials.iter().map(Vec::len).try_fold(1usize, |a, n| a.checked_mul(n)).unwrap_or(usize::MAX);
         for i in 0..CASES {
-            let args: Vec<ConstValue> = if i < CASES / 2 && i < total {
-                let mut k = i;
-                specials
-                    .iter()
-                    .map(|vs| {
-                        let v = vs[k % vs.len()].clone();
-                        k /= vs.len();
-                        v
-                    })
-                    .collect()
-            } else {
-                let size = 1 + (i * 16 / CASES) as u32;
-                match c.params.iter().map(|t| gen.random(t, size, DEPTH)).collect::<Option<Vec<_>>>() {
-                    Some(args) => args,
-                    None => continue,
-                }
-            };
+            let Some(args) = case(&mut gen, &c.params, &specials, i, CASES) else { continue };
             if c.fuel == 0 {
                 break;
             }
@@ -582,8 +563,185 @@ impl<'p> Env<'p> {
         Ok(())
     }
 
-    /// `fn rule.pattern(params) -> R { return pattern }`, with rules off.
-    fn pattern_fn(&self, f: &Function, decl: &FnDecl, rule: &Contract, bindings: Rc<Bindings>) -> Result<Function, Error> {
+    /// What both sides of the rule `f` need to run, named from `prefix`: the
+    /// inputs, the functions written to pass for its parameters of function
+    /// type, and the pattern as a function, with its name.
+    fn rule_sides(
+        &self,
+        f: &Function,
+        decl: &FnDecl,
+        rule: &Contract,
+        bindings: &Rc<Bindings>,
+        prefix: &str,
+    ) -> Result<(Gen<'_, 'p>, Vec<Function>, String), Refused> {
+        let module = bindings.module;
+        for t in &f.params {
+            if !self.rule_makeable(t, module) {
+                return Err(Refused::Why(format!("the compiler cannot make up values of type {t} to try it with")));
+            }
+        }
+        if !self.comparable(&f.ret, &mut HashSet::new()) {
+            return Err(Refused::Why(format!("values of type {} cannot be compared", f.ret)));
+        }
+
+        let mut gen = Gen::new(self, &f.name);
+        let mut made = Vec::new();
+        for t in &f.params {
+            if let Type::Fn(ps, r) = t {
+                if gen.fns.contains_key(&t.to_string()) {
+                    continue;
+                }
+                let fs = self.sample_fns(prefix, made.len(), ps, r, bindings, &mut gen).map_err(Refused::Error)?;
+                gen.fns.insert(t.to_string(), fs.iter().map(|(f, _)| f.name.clone()).collect());
+                for (func, text) in fs {
+                    gen.fn_text.insert(func.name.clone(), text);
+                    made.push(func);
+                }
+            }
+        }
+        let pattern = self.pattern_fn(f, decl, rule, bindings.clone(), &format!("{prefix}.pattern")).map_err(Refused::Error)?;
+        // Both sides run with no input; what they would read at run time is
+        // not tried.
+        if (self.effects_of(&f.name) | self.body_effects(&pattern)).has(Effects::READS_INPUT) {
+            return Err(Refused::Why("it reads standard input, which the checks cannot give it".into()));
+        }
+        let pattern_name = pattern.name.clone();
+        made.push(pattern);
+        Ok((gen, made, pattern_name))
+    }
+
+    /// Whether rule `name` (a JIR name, of a generic rule's instance)
+    /// calls the functions it is given as its pattern does: the same
+    /// functions, with the same arguments, in the same order, as many times,
+    /// and stops where the pattern does when one of them traps. Then any
+    /// function can be given to it, whatever it does. Worked out once for
+    /// each rule asked about, the first time it would apply to a function
+    /// that is not inert.
+    pub(crate) fn keeps_order(&self, name: &str) -> bool {
+        if let Some(&kept) = self.order_kept.borrow().get(name) {
+            return kept;
+        }
+        // A rule the checks cannot run, or one still being compiled, is
+        // taken not to.
+        let kept = self.check_order(name).unwrap_or(false);
+        self.order_kept.borrow_mut().insert(name.to_string(), kept);
+        kept
+    }
+
+    /// Runs rule `name` and its pattern side by side, as `check_rule_fn`
+    /// does, but with each function given wrapped in one that first prints
+    /// which parameter it was passed for and its arguments, and that traps
+    /// on the `k`th call of any of them, for no `k` and for a few.
+    fn check_order(&self, name: &str) -> Result<bool, Refused> {
+        let f = self.function(name).map_err(Refused::Error)?;
+        let Some((decl, bindings)) = self.decl_of(name) else { return Ok(false) };
+        let Some(rule) = &decl.replaces else { return Ok(false) };
+        let prefix = format!("{}.order", f.name);
+        let (mut gen, mut made, pattern) = self.rule_sides(&f, decl, rule, &bindings, &prefix)?;
+        let names = decl.params.iter().filter(|p| !p.comptime).map(|p| p.name.as_str());
+        let mut tracers = Vec::new();
+        for (i, (t, param)) in f.params.iter().zip(names).enumerate() {
+            tracers.push(match t {
+                Type::Fn(ps, r) => {
+                    let tracer = self.tracer(&format!("{prefix}.trace.{i}"), param, ps, r, &bindings).map_err(Refused::Error)?;
+                    let name = tracer.name.clone();
+                    made.push(tracer);
+                    Some(name)
+                }
+                _ => None,
+            });
+        }
+        let (ours, theirs) = (format!("{prefix}.rule"), format!("{prefix}.of_pattern"));
+        made.push(self.traced(&ours, &f.name, &f, &tracers, &bindings).map_err(Refused::Error)?);
+        made.push(self.traced(&theirs, &pattern, &f, &tracers, &bindings).map_err(Refused::Error)?);
+        let (vm_module, program) = self.prepare(rule.pos, made, &ours).map_err(Refused::Error)?;
+        let mut params = f.params.clone();
+        params.push(Type::I64);
+        let mut c = Check { rule: ours, pattern: theirs, params, ret: f.ret.clone(), module: vm_module, program, fuel: BUDGET, strict: true, decided: 0 };
+
+        let specials: Vec<Vec<ConstValue>> = f.params.iter().map(|t| gen.specials(t, DEPTH)).collect();
+        for i in 0..ORDER_CASES {
+            let Some(mut args) = case(&mut gen, &f.params, &specials, i, ORDER_CASES) else { continue };
+            // No trap, then a trap at one of the first few calls.
+            for k in [-1, (i % TRAP_AT) as i64] {
+                if c.fuel == 0 {
+                    break;
+                }
+                args.push(ConstValue::Int(k));
+                if self.differ(&mut c, &args).is_some() {
+                    return Ok(false);
+                }
+                args.pop();
+            }
+        }
+        // Only what was tried counts.
+        Ok(c.decided >= ORDER_CASES / 10)
+    }
+
+    /// `fn name(c: cell<i64>, k: i64, f: fn(params) -> ret, params) -> ret`,
+    /// a closure to wrap function `f`, given for parameter `param`, in: it
+    /// counts its call in `c`, prints `param` and the arguments it can
+    /// print, traps if that call is the `k`th of all the wrapped functions'
+    /// (from 0), and returns what `f` does.
+    fn tracer(&self, name: &str, param: &str, params: &[Type], ret: &Type, bindings: &Rc<Bindings>) -> Result<Function, Error> {
+        let inner_ty = Type::Fn(params.to_vec(), Box::new(ret.clone()));
+        let cell_ty = Type::Cell(Box::new(Type::I64));
+        let all = [cell_ty.clone(), Type::I64, inner_ty].into_iter().chain(params.iter().cloned()).collect();
+        let sig = Rc::new(Sig { params: all, ret: ret.clone() });
+        let mut cx = FnCx::new(self, sig, bindings.clone());
+        let cell = cx.new_reg(cell_ty);
+        let k = cx.new_reg(Type::I64);
+        let inner = cx.new_reg(Type::Fn(params.to_vec(), Box::new(ret.clone())));
+        let args: Vec<Reg> = params.iter().map(|t| cx.new_reg(t.clone())).collect();
+        let n = cx.emit_to(Type::I64, |dst| Inst::CellGet { dst, cell, path: vec![] });
+        let one = cx.konst(Type::I64, 1);
+        let next = cx.emit_to(Type::I64, |dst| Inst::Binary { dst, op: BinOp::Add, lhs: n, rhs: one });
+        cx.emit(Inst::CellSet { cell, path: vec![], value: next });
+        let tag = cx.emit_to(Type::Str, |dst| Inst::Str { dst, value: format!("{param}:") });
+        cx.emit(Inst::Print { src: tag });
+        for (&a, t) in args.iter().zip(params) {
+            if matches!(t, Type::Int(_) | Type::Float(_) | Type::Bool | Type::Str) {
+                cx.emit(Inst::Print { src: a });
+            }
+        }
+        let at_k = cx.emit_to(Type::Bool, |dst| Inst::Binary { dst, op: BinOp::Eq, lhs: n, rhs: k });
+        let (trap, call) = (cx.new_block(), cx.new_block());
+        cx.terminate(Terminator::Branch { cond: at_k, then: trap, els: call });
+        cx.switch_to(trap);
+        cx.emit(Inst::Trap);
+        cx.terminate(Terminator::Unreachable);
+        cx.switch_to(call);
+        let r = cx.emit_to(ret.clone(), |dst| Inst::CallIndirect { dst, callee: inner, args });
+        cx.terminate(Terminator::Ret(r));
+        cx.finish(name, ret.clone(), Pos::default())
+    }
+
+    /// `fn name(f's params, k: i64) -> f's ret`: calls `target`, which has
+    /// `f`'s signature, with each function among the parameters wrapped in
+    /// its tracer, all counting in one cell.
+    fn traced(&self, name: &str, target: &str, f: &Function, tracers: &[Option<String>], bindings: &Rc<Bindings>) -> Result<Function, Error> {
+        let all = f.params.iter().cloned().chain([Type::I64]).collect();
+        let sig = Rc::new(Sig { params: all, ret: f.ret.clone() });
+        let mut cx = FnCx::new(self, sig, bindings.clone());
+        let params: Vec<Reg> = f.params.iter().map(|t| cx.new_reg(t.clone())).collect();
+        let k = cx.new_reg(Type::I64);
+        let zero = cx.konst(Type::I64, 0);
+        let cell = cx.emit_to(Type::Cell(Box::new(Type::I64)), |dst| Inst::NewCell { dst, value: zero });
+        let mut args = Vec::new();
+        for ((&p, t), tracer) in params.iter().zip(&f.params).zip(tracers) {
+            args.push(match tracer {
+                Some(func) => cx.emit_to(t.clone(), |dst| Inst::Closure { dst, func: func.clone(), captures: vec![cell, k, p] }),
+                None => p,
+            });
+        }
+        let func = target.to_string();
+        let r = cx.emit_to(f.ret.clone(), |dst| Inst::Call { dst, func, args });
+        cx.terminate(Terminator::Ret(r));
+        cx.finish(name, f.ret.clone(), Pos::default())
+    }
+
+    /// `fn name(params) -> R { return pattern }`, with rules off.
+    fn pattern_fn(&self, f: &Function, decl: &FnDecl, rule: &Contract, bindings: Rc<Bindings>, name: &str) -> Result<Function, Error> {
         let sig = Rc::new(Sig { params: f.params.clone(), ret: f.ret.clone() });
         let mut cx = FnCx::new(self, sig, bindings);
         cx.in_rule = true;
@@ -597,7 +755,7 @@ impl<'p> Env<'p> {
             return Err(Error::new(rule.pos, msg));
         }
         cx.terminate(Terminator::Ret(r));
-        cx.finish(&format!("{}.pattern", f.name), f.ret.clone(), rule.pos)
+        cx.finish(name, f.ret.clone(), rule.pos)
     }
 
     /// Runs both sides with `args`: what each gave, when they differ.
@@ -607,8 +765,11 @@ impl<'p> Env<'p> {
         let ours = self.run_side(c, &rule, args);
         let theirs = self.run_side(c, &pattern, args);
         match (&ours, &theirs) {
-            (Outcome::Unknown, _) | (_, Outcome::Unknown) => None,
-            (Outcome::Trap(_), Outcome::Trap(_)) => None,
+            (Outcome::Unknown, _) | (_, Outcome::Unknown) => return None,
+            _ => c.decided += 1,
+        }
+        match (&ours, &theirs) {
+            (Outcome::Trap(a, p), Outcome::Trap(b, q)) if !c.strict || (a == b && p == q) => None,
             (Outcome::Value(a, p), Outcome::Value(b, q)) if same(a, b) && p == q => None,
             _ => Some((ours, theirs)),
         }
@@ -628,10 +789,9 @@ impl<'p> Env<'p> {
                 Err(_) => Outcome::Unknown,
             },
             Err(e) if e.msg.starts_with("evaluation did not finish") || e.msg == "stack overflow" => Outcome::Unknown,
-            Err(e) => Outcome::Trap(e.msg),
+            Err(e) => Outcome::Trap(e.msg, printed),
         }
     }
-
     fn shrink_rule(
         &self,
         c: &mut Check,
@@ -671,7 +831,7 @@ impl<'p> Env<'p> {
         let gives = |o: &Outcome| match o {
             Outcome::Value(_, p) if printing => format!("prints {:?}", String::from_utf8_lossy(p)),
             Outcome::Value(v, _) => format!("gives {}", gen.show(&c.ret, v)),
-            Outcome::Trap(msg) => format!("traps ({msg})"),
+            Outcome::Trap(msg, _) => format!("traps ({msg})"),
             Outcome::Unknown => "does not finish".into(),
         };
         let msg = format!(
@@ -838,6 +998,36 @@ impl Body {
             }
         }
     }
+}
+
+/// Why a rule cannot be run side by side with its pattern.
+enum Refused {
+    /// What keeps the checks from making up its inputs or comparing it.
+    Why(String),
+    /// An error compiling what the checks run.
+    Error(Error),
+}
+
+/// Input `i` of the `n` inputs tried for `params`: the first half combines
+/// their `specials` while there are combinations left, the rest are random
+/// and grow; `None` when one cannot be made.
+fn case(gen: &mut Gen, params: &[Type], specials: &[Vec<ConstValue>], i: usize, n: usize) -> Option<Vec<ConstValue>> {
+    let total: usize = specials.iter().map(Vec::len).try_fold(1usize, |a, n| a.checked_mul(n)).unwrap_or(usize::MAX);
+    if i < n / 2 && i < total {
+        let mut k = i;
+        return Some(
+            specials
+                .iter()
+                .map(|vs| {
+                    let v = vs[k % vs.len()].clone();
+                    k /= vs.len();
+                    v
+                })
+                .collect(),
+        );
+    }
+    let size = 1 + (i * 16 / n) as u32;
+    params.iter().map(|t| gen.random(t, size, DEPTH)).collect()
 }
 
 /// Whether two results are the same, with every NaN the same as any other.

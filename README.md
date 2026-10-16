@@ -124,7 +124,8 @@ smallest that breaks one becoming a compile error; `nocopy` functions, which
 natively must copy no list, string or closure, with whatever they call;
 rewrite rules (`replaces`), which the compiler checks against what they
 replace before it uses them, and applies only where the code they move has
-no effects; compile-time evaluation (`const`,
+no effects, or where the checks show that they call the functions they are
+given as the pattern does; compile-time evaluation (`const`,
 `comptime`) and macros, both run on the VM, with functions on code, `meta` to
 look inside code and `type_of` to ask its type.
 

@@ -2799,3 +2799,73 @@ fn rules_that_read_input_are_refused() {
                  fn get2(n: i64) -> i64 replaces get(n) {\n  if n > 0 { return len(read_line()) }\n  return n\n}\nfn main() {}");
     assert!(e.contains("cannot check that `get2` does what it replaces: it reads standard input"), "{e}");
 }
+
+/// `map`, and a rule that writes it into the list it is given, calling `f`
+/// as `map` does.
+const MAP_IN_PLACE: &str = "fn map(comptime T: type, comptime U: type, xs: [T], f: fn(T) -> U) -> [U] {\n  let out: [U] = []\n  for x in xs { push(out, f(x)) }\n  return out\n}\n\
+                            fn in_place(comptime T: type, xs: [T], f: fn(T) -> T) -> [T] replaces map(xs, f) {\n  for i in 0..len(xs) { xs[i] = f(xs[i]) }\n  return xs\n}\n";
+
+#[test]
+fn rules_that_keep_the_order_apply_to_any_function() {
+    // `in_place` calls `f` with the same values, in the same order, as many
+    // times as `map`: functions that print, loop, change cells or come from
+    // anywhere may be given to it.
+    let src = format!(
+        "{MAP_IN_PLACE}fn shout(s: str) -> str {{ let out = \"\"\n for i in 0..len(s) {{ out = out + \"!\" }}\n return s + out }}\n\
+         fn each(xs: [i64], f: fn(i64) -> i64) -> [i64] {{ return map(xs, f) }}\n\
+         fn main() {{\n  let n = cell(0)\n  let xs: [i64] = [1, 2, 3]\n  let ss: [str] = [\"ab\", \"c\"]\n\
+           xs = map(xs, fn(x: i64) -> i64 {{ print(x)\n return x * 10 }})\n\
+           print(map(ss, shout))\n\
+           print(map(xs, fn(x: i64) -> i64 {{ *n = *n + 1\n return x + *n }}))\n\
+           print(each(xs, fn(x: i64) -> i64 {{ print(x)\n return x }}))\n}}"
+    );
+    assert_eq!(run(&src), "1\n2\n3\n[ab!!, c!]\n[11, 22, 33]\n10\n20\n30\n[10, 20, 30]\n");
+    let m = check(&src).unwrap();
+    let main = m.func("main").unwrap().to_string();
+    assert_eq!(main.matches("call @in_place.").count(), 3, "{main}");
+    assert!(m.func("each").unwrap().to_string().contains("call @in_place."), "{m}");
+    // When `f` traps on its third call, as many have printed before.
+    let src = format!(
+        "{MAP_IN_PLACE}fn main() {{\n  let xs: [i64] = [4, 2, 0, 1]\n\
+           xs = map(xs, fn(x: i64) -> i64 {{ print(x)\n return 100 / x }})\n  print(xs)\n}}"
+    );
+    assert_eq!(printed_before_error(&src), "4\n2\n0\n");
+    assert!(applies(&check(&src).unwrap(), "in_place"));
+}
+
+#[test]
+fn rules_that_change_the_order_stay_for_inert_functions() {
+    // Each of these computes what `map` does, and so applies to inert
+    // functions, but calls `f` otherwise: back to front, twice for each
+    // element, or not before trapping when `map` would.
+    let back = "fn back(comptime T: type, xs: [T], f: fn(T) -> T) -> [T] replaces map(xs, f) {\n  let i = len(xs)\n  while i > 0 {\n    i = i - 1\n    xs[i] = f(xs[i])\n  }\n  return xs\n}\n";
+    let twice = "fn twice(comptime T: type, xs: [T], f: fn(T) -> T) -> [T] replaces map(xs, f) {\n  for i in 0..len(xs) {\n    let y = f(xs[i])\n    xs[i] = f(xs[i])\n  }\n  return xs\n}\n";
+    let map = "fn map(comptime T: type, comptime U: type, xs: [T], f: fn(T) -> U) -> [U] {\n  let out: [U] = []\n  for x in xs { push(out, f(x)) }\n  return out\n}\n";
+    for (rule, name) in [(back, "back"), (twice, "twice")] {
+        let inert = format!("{map}{rule}fn main() {{ let xs: [i64] = [1, 2]\n print(map(xs, fn(x: i64) -> i64 {{ return x + 1 }})) }}");
+        assert_eq!(run(&inert), "[2, 3]\n");
+        assert!(applies(&check(&inert).unwrap(), name), "{name}");
+        let loud = format!("{map}{rule}fn main() {{ let xs: [i64] = [1, 2]\n print(map(xs, fn(x: i64) -> i64 {{ print(x)\n return x + 1 }})) }}");
+        assert_eq!(run(&loud), "1\n2\n[2, 3]\n");
+        assert!(!applies(&check(&loud).unwrap(), name), "{name}");
+    }
+    // `pick` traps on an index out of range before calling `f`, where the
+    // pattern calls `f` for every element first: the same when `f` is
+    // inert, but not when it prints.
+    let lib = format!(
+        "{map}fn at(xs: [i64], i: i64) -> i64 {{ return xs[i] }}\n\
+         fn pick(xs: [i64], f: fn(i64) -> i64, i: i64) -> i64 replaces at(map(xs, f), i) {{\n  let x = xs[i]\n  for y in xs {{ f(y) }}\n  return f(x)\n}}\n"
+    );
+    let src = format!("{lib}fn main() {{ let xs: [i64] = [1, 2]\n print(at(map(xs, fn(x: i64) -> i64 {{ return x * 3 }}), 1)) }}");
+    assert_eq!(run(&src), "6\n");
+    assert!(applies(&check(&src).unwrap(), "pick"));
+    let src = format!("{lib}fn main() {{ let xs: [i64] = [1, 2]\n print(at(map(xs, fn(x: i64) -> i64 {{ print(x)\n return x }}), 5)) }}");
+    assert_eq!(printed_before_error(&src), "1\n2\n");
+    assert!(!applies(&check(&src).unwrap(), "pick"));
+    // Calling `f` for every element first, it keeps the order.
+    let main = &src[src.find("fn main").unwrap()..];
+    let lib = lib.replace("let x = xs[i]\n  for y in xs { f(y) }\n  return f(x)", "let ys: [i64] = []\n  for y in xs { push(ys, f(y)) }\n  return ys[i]");
+    let src = format!("{lib}{main}");
+    assert_eq!(printed_before_error(&src), "1\n2\n");
+    assert!(applies(&check(&src).unwrap(), "pick"));
+}
