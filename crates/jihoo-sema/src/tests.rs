@@ -1504,6 +1504,27 @@ fn generic_struct_instances() {
     assert!(m.to_string().contains(r#"struct $"Pair(u8)" { a: u8, b: u8 } size 2 align 1"#), "{m}");
 }
 
+/// Type arguments parse as expressions, where `cell (A, B)` and `chan (A,
+/// B)` could also make a cell or a channel: as arguments they are types.
+#[test]
+fn cells_and_channels_of_tuples_as_type_arguments() {
+    let src = "fn first(comptime T: type, xs: [T]) -> T { return xs[0] }\n\
+               fn main() {\n  let o: Option(cell (i64, str)) = Option.Some(cell((7, \"x\")))\n\
+                 match o {\n    Some(p) => print((*p).0)\n    None => {}\n  }\n\
+                 let cs: [cell (i64, i64)] = [cell((1, 2))]\n  let c = first(cell (i64, i64), cs)\n  *c = (3, 4)\n  print((*cs[0]).1)\n\
+                 let n: Option(cell ((i64, u8))) = Option.None\n  let w: Option(cell [(i64, str)]) = Option.None\n\
+                 let k: Option(chan (i64, bool)) = Option.Some(chan((i64, bool), 1))\n\
+                 let t: Option(chan (i64, i64, u8)) = Option.None\n  let u: Option(chan (i64)) = Option.None\n\
+                 match k {\n    Some(ch) => {\n      send(ch, (5, true))\n      print(recv(ch).0)\n    }\n    None => {}\n  }\n}";
+    assert_eq!(run(src), "7\n4\n5\n");
+    // Making them is as before.
+    assert_eq!(run("fn main() { let a = cell(5)\n let b = cell((1, 2))\n let c = chan(i64, 2)\n send(c, *a + (*b).1)\n print(recv(c)) }"), "7\n");
+    let e = err("fn main() { let x = cell(1, 2) }");
+    assert!(e.contains("`cell (A, B)` is a type, and `cell(value)` makes one"), "{e}");
+    let e = err("fn main() { let x = chan(i64, 4, 5) }");
+    assert!(e.contains("`chan (A, B)` is a type, and `chan(T)` or `chan(T, n)` makes one"), "{e}");
+}
+
 #[test]
 fn generic_struct_value_parameters() {
     let m = check(

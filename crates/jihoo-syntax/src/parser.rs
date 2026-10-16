@@ -152,6 +152,43 @@ impl Parser {
         &self.cur().tok
     }
 
+    /// The type `cell T` or `chan T` (`what`), where the expression could
+    /// also have been `call`, which makes one: when it does not read as a
+    /// type either, the error says both.
+    fn type_or_call(&mut self, what: &str, call: &str) -> PResult<TypeExpr> {
+        let paren = self.toks[self.i + 1].tok == Tok::LParen;
+        self.type_expr().map_err(|e| {
+            if !paren {
+                return e;
+            }
+            let msg = format!("{}: `{what} (A, B)` is a type, and {call} makes one", e.msg);
+            Error::new(e.pos, msg)
+        })
+    }
+
+    /// How many commas the parentheses opening at token `at` hold, outside
+    /// any brackets inside them; `None` when they hold nothing, or do not
+    /// close.
+    fn paren_commas(&self, at: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut commas = 0;
+        for (k, t) in self.toks[at..].iter().enumerate() {
+            match t.tok {
+                Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+                Tok::RParen | Tok::RBracket | Tok::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return (k > 1).then_some(commas);
+                    }
+                }
+                Tok::Comma if depth == 1 => commas += 1,
+                Tok::Eof => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+
     fn pos(&self) -> Pos {
         self.cur().pos
     }
@@ -1305,8 +1342,9 @@ impl Parser {
                 let arms = self.braced_list(|p| p.match_expr_arm())?;
                 ExprKind::Match(Box::new(value), arms)
             }
-            // `chan(T, n)` makes a channel; `chan T` is the type.
-            Tok::Chan if self.toks[self.i + 1].tok == Tok::LParen => {
+            // `chan(T, n)` makes a channel; `chan T` is the type, and so is
+            // `chan (A, B, C)` or `chan ()`, which no call can be.
+            Tok::Chan if self.toks[self.i + 1].tok == Tok::LParen && self.paren_commas(self.i + 1).is_some_and(|n| n <= 1) => {
                 self.bump();
                 self.bump();
                 let ty = self.type_expr()?;
@@ -1314,16 +1352,17 @@ impl Parser {
                 self.expect(&Tok::RParen, "`,` or `)`")?;
                 ExprKind::NewChan(ty, cap)
             }
-            Tok::Chan => ExprKind::Type(self.type_expr()?),
-            // `cell(value)` makes a cell; `cell T` is the type.
-            Tok::Cell if self.toks[self.i + 1].tok == Tok::LParen => {
+            Tok::Chan => ExprKind::Type(self.type_or_call("chan", "`chan(T)` or `chan(T, n)`")?),
+            // `cell(value)` makes a cell; `cell T` is the type, and so is
+            // `cell (A, B)` or `cell ()`, which no call can be.
+            Tok::Cell if self.toks[self.i + 1].tok == Tok::LParen && self.paren_commas(self.i + 1) == Some(0) => {
                 self.bump();
                 self.bump();
                 let value = self.with_struct_lit(true, |p| p.expr())?;
                 self.expect(&Tok::RParen, "`)`")?;
                 ExprKind::NewCell(Box::new(value))
             }
-            Tok::Cell => ExprKind::Type(self.type_expr()?),
+            Tok::Cell => ExprKind::Type(self.type_or_call("cell", "`cell(value)`")?),
             Tok::Quote => {
                 self.bump();
                 self.quote()?

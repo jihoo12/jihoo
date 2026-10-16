@@ -1552,11 +1552,7 @@ impl Gen {
     /// copy made first. The slot is a variable, or part of a tuple that is
     /// used again too.
     fn payload_stmt(&mut self) {
-        // As a type argument, `cell (A, B)` reads as `cell(A, B)`, a call.
-        let mut t = self.any_ty(2);
-        while self.ty_name(&t).contains("cell (") {
-            t = self.any_ty(2);
-        }
+        let t = self.any_ty(2);
         let tn = self.ty_name(&t);
         let x = self.expr(&t, 2);
         let s = self.fresh("s");

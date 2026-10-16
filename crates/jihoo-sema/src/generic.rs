@@ -132,6 +132,14 @@ pub(crate) fn expr_to_type(e: &Expr) -> Result<TypeExpr, Error> {
         }
         ExprKind::Deref(inner) => TypeExprKind::Ptr(Box::new(expr_to_type(inner)?)),
         ExprKind::NewRef(inner) => TypeExprKind::Ref(Box::new(expr_to_type(inner)?)),
+        // `cell (u8)` and `chan (u8)` parse as making one; `chan (u8, str)`,
+        // a channel of tuples, as making one of `u8` with room for `str`.
+        ExprKind::NewCell(inner) => TypeExprKind::Cell(Box::new(expr_to_type(inner)?)),
+        ExprKind::NewChan(t, None) => TypeExprKind::Chan(Box::new(t.clone())),
+        ExprKind::NewChan(t, Some(second)) => {
+            let parts = vec![t.clone(), expr_to_type(second)?];
+            TypeExprKind::Chan(Box::new(TypeExpr { pos: t.pos, kind: TypeExprKind::Tuple(parts) }))
+        }
         ExprKind::ArrayRepeat(elem, n) => TypeExprKind::Array(Box::new(expr_to_type(elem)?), n.clone()),
         // `[u8]`, a list, parses as an array literal with one element.
         ExprKind::ArrayLit(items) if items.len() == 1 => TypeExprKind::List(Box::new(expr_to_type(&items[0])?)),

@@ -35,6 +35,9 @@ fn main() {
 - Type arguments are written in expression position and read back as types
   (or [left out](#inferred-type-arguments)):
   `u8`, `*u8`, `[u8; 4]` and `fn(i64) -> i64` all parse as expressions.
+  So do `cell (A, B)` and `chan (A, B)`, which as expressions could make a
+  cell or a channel: as type arguments they are the cell or channel of a
+  tuple (`Option(cell (i64, str))`).
 - Inside an instance, `T` stands for its type and `N` for a constant, also in
   array lengths and `size_of`. Comptime parameters cannot be assigned.
 - `comptime T: Ord` takes only types that implement a [trait](traits.md#bounds),

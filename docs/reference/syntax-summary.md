@@ -96,6 +96,7 @@ primary = INT | FLOAT | STRING | "true" | "false"
         | "$" NAME | "$" "(" expr ")"                     ; a hole, inside quote
         | "size_of" "(" type ")" | "align_of" "(" type ")"
         | "chan" "(" type ("," expr)? ")" | "cell" "(" expr ")"
+                                                        ; with more parts, a type: `cell (A, B)`
         | "asm" "(" STRING* ("," asm-operand)* ")"
         | type                                            ; a type argument: `max(u8, a, b)`
 asm-operand = "out" "(" (STRING | "reg") ")" type
